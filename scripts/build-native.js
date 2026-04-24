@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-const { execSync, spawnSync } = require('child_process');
-const path = require('path');
+const { execSync, spawnSync } = require("child_process");
+const path = require("path");
 
 function resolvePython() {
   const envPython = process.env.PYTHON || process.env.npm_config_python;
@@ -9,11 +9,11 @@ function resolvePython() {
 
   // On Windows, node-gyp auto-discovery can fail with Microsoft Store Python.
   // Resolve the real interpreter path via py launcher and pass it explicitly.
-  if (process.platform === 'win32') {
+  if (process.platform === "win32") {
     try {
       const out = execSync('py -3 -c "import sys; print(sys.executable)"', {
-        stdio: ['ignore', 'pipe', 'ignore'],
-        encoding: 'utf8',
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
       }).trim();
       if (out) return out;
     } catch {
@@ -25,18 +25,18 @@ function resolvePython() {
 }
 
 function main() {
-  const nodeGyp = path.resolve(__dirname, '..', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js');
-  const args = [nodeGyp, 'rebuild', '--directory=native'];
+  const nodeGyp = path.resolve(__dirname, "..", "node_modules", "node-gyp", "bin", "node-gyp.js");
+  const args = [nodeGyp, "rebuild", "--directory=native"];
 
   const python = resolvePython();
   if (python) args.push(`--python=${python}`);
 
   const result = spawnSync(process.execPath, args, {
-    stdio: 'inherit',
+    stdio: "inherit",
     shell: false,
   });
 
-  if (typeof result.status === 'number') {
+  if (typeof result.status === "number") {
     process.exit(result.status);
   }
 
