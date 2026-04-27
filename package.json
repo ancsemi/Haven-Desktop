@@ -1,6 +1,6 @@
 {
   "name": "haven-desktop",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Haven Desktop — Private chat, reimagined for your desktop",
   "main": "src/main/main.js",
   "author": {

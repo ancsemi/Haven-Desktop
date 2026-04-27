@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.2
+
+### Fixed
+- **App crashed on launch with `Cannot read properties of undefined (reading 'isDestroyed')`** — the transient-error retry added in 1.4.1 dereferenced `view.webContents` after the background-preload view had already been destroyed. Retries now bail out cleanly if the view (or its `webContents`) is gone, ignore subframe load failures, and never run for background pre-load views (those are best-effort and were already cleaned up silently).
+
+---
+
 ## v1.4.1
 
 ### Fixed

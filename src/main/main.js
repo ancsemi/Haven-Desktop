@@ -527,6 +527,9 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     });
 
     // ── Page load timeout — if no content after 15 s, offer to go back ──
+    // Background-preloaded views are silent: they never show user dialogs.
+    // If they fail to load, they're cleaned up quietly so unread-badge
+    // pre-loading doesn't surface as a scary popup on launch.
     let loadResolved = false;
     view.webContents.once('did-finish-load', async () => {
       loadResolved = true;
@@ -537,7 +540,18 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       const isHaven = await view.webContents.executeJavaScript(
         '!!(document.getElementById("app-body") || document.querySelector(".auth-page") || document.title.startsWith("Haven"))'
       ).catch(() => false);
-      if (!isHaven && mainWindow && !mainWindow.isDestroyed()) {
+      if (isHaven || !mainWindow || mainWindow.isDestroyed()) return;
+      if (background) {
+        // Silent cleanup — don't bother the user about a background preload
+        mainWindow?.removeBrowserView(view);
+        try { view.webContents.destroy(); } catch {}
+        serverViews.delete(url);
+        serverBadgeState.delete(url);
+        knownServerUrlsByView.delete(url);
+        recomputeTaskbarBadge();
+        return;
+      }
+      {
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         const { response } = await dialog.showMessageBox(mainWindow, {
           type: 'warning',
@@ -567,6 +581,16 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       // Check if the page actually has content (async — never blocks renderer or main)
       view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
+        if (background) {
+          // Background preload silently failed to load \u2014 just clean up
+          mainWindow?.removeBrowserView(view);
+          try { view.webContents.destroy(); } catch {}
+          serverViews.delete(url);
+          serverBadgeState.delete(url);
+          knownServerUrlsByView.delete(url);
+          recomputeTaskbarBadge();
+          return;
+        }
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         const { response } = await dialog.showMessageBox(mainWindow, {
           type: 'warning',
@@ -592,9 +616,48 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     }, 15000);
 
     // ── Handle load failures — only reset to welcome for the primary server ──
-    view.webContents.on('did-fail-load', (_e, errorCode, errorDesc) => {
-      loadResolved = true;
+    // Retry briefly on transient errors (server restart, brief outage) before
+    // giving up and dumping the user back to the welcome screen.
+    let _failRetryCount = 0;
+    const MAX_FAIL_RETRIES = 6; // ~30 s total at 5 s back-off
+    view.webContents.on('did-fail-load', (_e, errorCode, errorDesc, validatedUrl, isMainFrame) => {
+      // Ignore subframe failures (iframes, ads, etc.) — only the main page matters.
+      if (isMainFrame === false) return;
       console.error(`[Haven Desktop] Failed to load ${url}: ${errorCode} ${errorDesc}`);
+      // -3 ABORTED = navigation cancelled (e.g. another nav started). Ignore.
+      if (errorCode === -3) return;
+
+      // Background preload views never retry — they're best-effort badge
+      // pollers. Let the existing background-cleanup branch below handle them.
+      const TRANSIENT = new Set([
+        -102, // CONNECTION_REFUSED
+        -106, // INTERNET_DISCONNECTED
+        -109, // ADDRESS_UNREACHABLE
+        -118, // CONNECTION_TIMED_OUT
+        -7,   // TIMED_OUT
+        -21,  // NETWORK_CHANGED
+        -101, // CONNECTION_RESET
+        -105, // NAME_NOT_RESOLVED
+        -130, // PROXY_CONNECTION_FAILED
+        -324, // EMPTY_RESPONSE
+      ]);
+      if (!background && TRANSIENT.has(errorCode) && _failRetryCount < MAX_FAIL_RETRIES) {
+        _failRetryCount++;
+        const delay = Math.min(5000, 1000 * Math.pow(2, _failRetryCount - 1));
+        console.warn(`[Haven Desktop] Transient load failure (${errorCode}), retry ${_failRetryCount}/${MAX_FAIL_RETRIES} in ${delay}ms…`);
+        setTimeout(() => {
+          // The view may have been torn down (window closed, server switched,
+          // crash recovery, etc.) between scheduling and firing. Guard every
+          // hop — webContents itself becomes undefined after .destroy().
+          if (!mainWindow || mainWindow.isDestroyed?.()) return;
+          if (!view || !view.webContents) return;
+          try { if (view.webContents.isDestroyed()) return; } catch { return; }
+          try { view.webContents.loadURL(url); } catch {}
+        }, delay);
+        return;
+      }
+
+      loadResolved = true;
       if (url !== primaryServerUrl) {
         // A peer/secondary server failed — clean up and return to the primary view silently
         mainWindow?.removeBrowserView(view);
@@ -620,6 +683,10 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       }
       resetToWelcome();
     });
+
+    // Reset retry counter once a load succeeds, so a future failure starts
+    // fresh and we don't burn the budget over many brief outages.
+    view.webContents.on('did-finish-load', () => { _failRetryCount = 0; });
 
     // ── Open external links in default browser (issue #5) ──
     // Allow navigations to known embed origins (SoundCloud, Spotify, YouTube)
