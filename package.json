@@ -15,7 +15,7 @@
     "build": "npm run build:native && electron-builder",
     "build:win": "npm run build:native && electron-builder --win",
     "build:linux": "npm run build:native && electron-builder --linux",
-    "build:native": "node ./node_modules/node-gyp/bin/node-gyp.js rebuild --directory=native",
+    "build:native": "node ./scripts/build-native.js",
     "rebuild:electron": "node ./node_modules/@electron/rebuild/lib/cli.js && npm run build:native",
     "postinstall": "node ./node_modules/@electron/rebuild/lib/cli.js || echo electron-rebuild skipped"
   },
