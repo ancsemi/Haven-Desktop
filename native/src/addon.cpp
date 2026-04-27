@@ -12,6 +12,7 @@
 #include <napi.h>
 #include "audio_capture.h"
 #include <memory>
+#include <cstring>
 
 static std::unique_ptr<haven::IAudioCapture> g_capture;
 
@@ -70,17 +71,26 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
 
     // Capture callback → runs on native thread
     haven::AudioDataCb nativeCb = [](const float* data, size_t count) {
+        if (!data || count == 0) {
+            return;
+        }
+
         // Copy the PCM data so it survives across threads
         float* copy = new float[count];
         std::memcpy(copy, data, count * sizeof(float));
 
-        g_tsfn.NonBlockingCall(copy, [count](Napi::Env env, Napi::Function fn, float* buf) {
-            // Create a Float32Array and call the JS callback
-            Napi::ArrayBuffer ab = Napi::ArrayBuffer::New(env, buf, count * sizeof(float),
-                [](Napi::Env, void* ptr) { delete[] static_cast<float*>(ptr); });
+        napi_status status = g_tsfn.NonBlockingCall(copy, [count](Napi::Env env, Napi::Function fn, float* buf) {
+            // Use JS-owned backing memory to avoid external buffer lifetime issues.
+            Napi::ArrayBuffer ab = Napi::ArrayBuffer::New(env, count * sizeof(float));
+            std::memcpy(ab.Data(), buf, count * sizeof(float));
+            delete[] buf;
             Napi::Float32Array f32 = Napi::Float32Array::New(env, count, ab, 0);
             fn.Call({ f32 });
         });
+
+        if (status != napi_ok) {
+            delete[] copy;
+        }
     };
 
     bool ok = Cap()->StartCapture(pid, nativeCb);

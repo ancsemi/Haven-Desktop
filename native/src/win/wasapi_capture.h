@@ -19,6 +19,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 
 namespace haven {
 
@@ -34,6 +35,13 @@ public:
     void                  Cleanup()                    override;
 
 private:
+    enum class StartupState {
+        Idle,
+        Starting,
+        Running,
+        Failed
+    };
+
     void captureLoop();
 
     std::atomic<bool> m_running{false};
@@ -41,6 +49,11 @@ private:
     AudioDataCb       m_callback;
     uint32_t          m_targetPid = 0;
     std::mutex        m_mutex;
+
+    std::mutex              m_startMutex;
+    std::condition_variable m_startCv;
+    StartupState            m_startState{StartupState::Idle};
+    HRESULT                 m_startHr{S_OK};
 };
 
 } // namespace haven
