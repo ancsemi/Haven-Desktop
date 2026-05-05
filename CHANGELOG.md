@@ -1,5 +1,16 @@
 # Haven Desktop Changelog
 
+## v1.4.13
+
+### Added
+- **#184 (final item): OS-level PTT for bare modifiers and mouse buttons.** The recorder UI in 3.11.x can already capture lone modifiers (`Shift`/`Alt`/`Ctrl`/`CommandOrControl`) and `Mouse4`/`Mouse5`, but Electron's `globalShortcut.register()` rejects those bindings — they only worked when Haven was focused. Desktop now loads the optional `uiohook-napi` dependency and routes those bindings through OS-level input hooks so they fire even when Haven is in the background. Ordinary keyboard accelerators continue to use Electron's built-in `globalShortcut`. PTT also now respects the recorder's `pttMode` setting: in `hold` mode the renderer unmutes on key/button down and re-mutes on key/button up; in `toggle` mode a single press flips the mute state.
+- **`pttMode` accepted by `shortcuts:register`.** The renderer recorder has been writing this field since 3.11; it was previously dropped by the IPC handler's allow-list. Now persisted and honoured.
+
+### Notes
+- `uiohook-napi` is declared as an *optional* dependency. If it fails to install (no native toolchain, unsupported platform), Haven still launches and ordinary keyboard shortcuts still work — only the bare-modifier / mouse-button bindings are no-op'd. A console warning is logged at startup in that case.
+
+---
+
 ## v1.4.12
 
 ### Fixed

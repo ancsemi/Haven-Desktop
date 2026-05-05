@@ -586,6 +586,30 @@ ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-
 ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
 ipcRenderer.on('voice:ptt-toggle',    () => document.getElementById('voice-mute-btn')?.click());
 
+// PTT hold mode (#184): main fires -down on key/mouse press and -up on
+// release. We unmute on press and re-mute on release iff that state
+// transition is needed — the mute button is a toggle, so we only click
+// it when its current visual state doesn't match the desired one.
+function _pttSetTalking(shouldTalk) {
+  const btn = document.getElementById('voice-mute-btn');
+  if (!btn) return;
+  // The mute button reflects mute state via aria-pressed / .muted /
+  // its inner icon (varies by build). Use aria-pressed first, fall
+  // back to a `.muted` class probe.
+  const pressed = btn.getAttribute('aria-pressed');
+  let isMuted;
+  if (pressed === 'true' || pressed === 'false') {
+    isMuted = pressed === 'true';
+  } else {
+    isMuted = btn.classList.contains('muted') || btn.classList.contains('is-muted');
+  }
+  // shouldTalk → want unmuted. Click only when state needs to flip.
+  const needFlip = shouldTalk ? isMuted : !isMuted;
+  if (needFlip) btn.click();
+}
+ipcRenderer.on('voice:ptt-down', () => _pttSetTalking(true));
+ipcRenderer.on('voice:ptt-up',   () => _pttSetTalking(false));
+
 // ─── Server badge state updates from main process ────────
 ipcRenderer.on('server-badge-update', (_event, badgeMap) => {
   window.dispatchEvent(new CustomEvent('haven-server-badges', { detail: badgeMap }));

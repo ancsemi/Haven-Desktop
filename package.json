@@ -1,6 +1,6 @@
 {
   "name": "haven-desktop",
-  "version": "1.4.12",
+  "version": "1.4.13",
   "description": "Haven Desktop — Private chat, reimagined for your desktop",
   "main": "src/main/main.js",
   "author": {
@@ -23,6 +23,9 @@
     "electron-store": "^8.2.0",
     "electron-updater": "^6.3.9",
     "node-addon-api": "^8.3.0"
+  },
+  "optionalDependencies": {
+    "uiohook-napi": "^1.5.4"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.1",

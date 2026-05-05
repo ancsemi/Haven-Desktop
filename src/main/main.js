@@ -295,29 +295,235 @@ app.whenReady().then(async () => {
 });
 
 // ── Voice / PTT global shortcuts ───────────────────────
+//
+// Two layers of registration:
+//
+//   1. Electron's built-in `globalShortcut` for ordinary accelerators
+//      ("F12", "CommandOrControl+Shift+M", "Alt+Q"…). Cheap, no native
+//      dep needed, works everywhere.
+//
+//   2. `uiohook-napi` (optional dependency) for the bindings Electron
+//      can't represent: lone modifiers ("Shift", "Alt", "Control",
+//      "CommandOrControl") and extra mouse buttons ("Mouse4" / "Mouse5"
+//      from #5255). These are the bindings the renderer's recorder
+//      can capture but globalShortcut.register() rejects with "Failed
+//      to register shortcut".  uiohook hooks the OS-level input event
+//      stream so the bindings work even when Haven isn't focused.
+//
+// PTT also gets press/release semantics in hold mode — the renderer
+// listens for `voice:ptt-down` / `voice:ptt-up` and unmutes on down,
+// re-mutes on up. Toggle mode keeps the existing `voice:ptt-toggle`
+// behaviour (single tap flips the mute button state). (#184)
+let _uiohook = null;
+let _uiohookStarted = false;
+function tryLoadUiohook() {
+  if (_uiohook !== null) return _uiohook;        // already loaded or attempted
+  try {
+    // Loaded lazily so a missing optional dep doesn't break startup.
+    // eslint-disable-next-line global-require
+    _uiohook = require('uiohook-napi');
+  } catch (err) {
+    console.warn('[Shortcuts] uiohook-napi unavailable — bare modifiers and Mouse4/5 will be ignored:', err.message);
+    _uiohook = false;
+  }
+  return _uiohook;
+}
+
+// uiohook routing table: { keycode|button -> { kind, event, mode } }
+// kind:  'key' | 'mouse'
+// event: base IPC channel name ('voice:ptt' | 'voice:mute-toggle' | 'voice:deafen-toggle')
+// mode:  'toggle' (single fire on press) | 'hold' (separate -down / -up events)
+const _uiohookKeyBindings = new Map();
+const _uiohookMouseBindings = new Map();
+// Track which keys/buttons we've already fired -down for so we don't
+// repeat-fire from OS auto-repeat while the key is physically held.
+const _uiohookDownState = new Set();
+
+function _accelToUiohookKeycode(accel) {
+  // uiohook UiohookKey constants — only need the bare-modifier set here.
+  if (!_uiohook) return null;
+  const K = _uiohook.UiohookKey || {};
+  const map = {
+    'CommandOrControl': process.platform === 'darwin' ? K.Meta : K.Ctrl,
+    'Control':          K.Ctrl,
+    'Ctrl':             K.Ctrl,
+    'Alt':              K.Alt,
+    'Shift':            K.Shift,
+    'Meta':             K.Meta,
+    'Cmd':              K.Meta,
+    'Super':            K.Meta,
+  };
+  // uiohook reports left/right modifiers as separate keycodes — return
+  // both so we can match either. Stored as a [primary, alt] pair.
+  const altMap = {
+    'Ctrl':             K.CtrlR,
+    'Control':          K.CtrlR,
+    'CommandOrControl': process.platform === 'darwin' ? K.MetaR : K.CtrlR,
+    'Alt':              K.AltR,
+    'Shift':            K.ShiftR,
+    'Meta':             K.MetaR,
+    'Cmd':              K.MetaR,
+    'Super':            K.MetaR,
+  };
+  const primary = map[accel];
+  if (primary == null) return null;
+  return [primary, altMap[accel]].filter(v => v != null);
+}
+
+function _accelToMouseButton(accel) {
+  // accel: "Mouse4" / "Mouse5" / etc. (1-indexed, matches the recorder's `button + 1`)
+  const m = /^Mouse(\d+)$/i.exec(accel || '');
+  if (!m) return null;
+  return parseInt(m[1], 10);
+}
+
+function _isUiohookAccel(accel) {
+  if (!accel) return false;
+  if (/^Mouse\d+$/i.test(accel)) return true;
+  if (['Shift', 'Alt', 'Control', 'Ctrl', 'CommandOrControl', 'Meta', 'Cmd', 'Super'].includes(accel)) return true;
+  return false;
+}
+
+function _ensureUiohookStarted() {
+  const u = tryLoadUiohook();
+  if (!u || _uiohookStarted) return !!u;
+
+  u.uIOhook.on('keydown', (e) => {
+    for (const [, binding] of _uiohookKeyBindings) {
+      if (!binding.keycodes.includes(e.keycode)) continue;
+      const stateKey = `k:${binding.event}`;
+      if (binding.mode === 'hold') {
+        if (_uiohookDownState.has(stateKey)) return; // ignore OS auto-repeat
+        _uiohookDownState.add(stateKey);
+        safeSend(getActiveContents(), `${binding.event}-down`);
+      } else {
+        safeSend(getActiveContents(), binding.event);
+      }
+    }
+  });
+  u.uIOhook.on('keyup', (e) => {
+    for (const [, binding] of _uiohookKeyBindings) {
+      if (!binding.keycodes.includes(e.keycode)) continue;
+      const stateKey = `k:${binding.event}`;
+      _uiohookDownState.delete(stateKey);
+      if (binding.mode === 'hold') {
+        safeSend(getActiveContents(), `${binding.event}-up`);
+      }
+    }
+  });
+  u.uIOhook.on('mousedown', (e) => {
+    for (const [, binding] of _uiohookMouseBindings) {
+      if (e.button !== binding.button) continue;
+      const stateKey = `m:${binding.event}`;
+      if (binding.mode === 'hold') {
+        if (_uiohookDownState.has(stateKey)) return;
+        _uiohookDownState.add(stateKey);
+        safeSend(getActiveContents(), `${binding.event}-down`);
+      } else {
+        safeSend(getActiveContents(), binding.event);
+      }
+    }
+  });
+  u.uIOhook.on('mouseup', (e) => {
+    for (const [, binding] of _uiohookMouseBindings) {
+      if (e.button !== binding.button) continue;
+      const stateKey = `m:${binding.event}`;
+      _uiohookDownState.delete(stateKey);
+      if (binding.mode === 'hold') {
+        safeSend(getActiveContents(), `${binding.event}-up`);
+      }
+    }
+  });
+
+  try {
+    u.uIOhook.start();
+    _uiohookStarted = true;
+    console.log('[Shortcuts] uiohook-napi started — bare modifiers + Mouse4/5 active');
+  } catch (err) {
+    console.warn('[Shortcuts] uiohook-napi failed to start:', err.message);
+    return false;
+  }
+  return true;
+}
+
+function _stopUiohookIfIdle() {
+  if (!_uiohookStarted) return;
+  if (_uiohookKeyBindings.size === 0 && _uiohookMouseBindings.size === 0) {
+    try {
+      _uiohook && _uiohook.uIOhook.stop();
+    } catch {}
+    _uiohookStarted = false;
+    _uiohookDownState.clear();
+  }
+}
+
 function unregisterVoiceShortcuts() {
   const cfg = store.get('desktopShortcuts') || {};
   ['mute', 'deafen', 'ptt'].forEach(k => {
-    try { if (cfg[k]) globalShortcut.unregister(cfg[k]); } catch {}
+    try { if (cfg[k] && !_isUiohookAccel(cfg[k])) globalShortcut.unregister(cfg[k]); } catch {}
   });
+  _uiohookKeyBindings.clear();
+  _uiohookMouseBindings.clear();
+  _uiohookDownState.clear();
+  _stopUiohookIfIdle();
 }
 
 function registerVoiceShortcuts() {
   unregisterVoiceShortcuts();
   const cfg = store.get('desktopShortcuts') || {};
-  const bind = (accel, event) => {
-    if (!accel) return;
+  const pttMode = cfg.pttMode === 'toggle' ? 'toggle' : 'hold'; // default hold (#5255)
+
+  const bindings = [
+    { accel: cfg.mute,   event: 'voice:mute-toggle',   mode: 'toggle' },
+    { accel: cfg.deafen, event: 'voice:deafen-toggle', mode: 'toggle' },
+    { accel: cfg.ptt,    event: 'voice:ptt',           mode: pttMode  },
+  ];
+
+  let needUiohook = false;
+
+  for (const b of bindings) {
+    if (!b.accel) continue;
+
+    if (_isUiohookAccel(b.accel)) {
+      needUiohook = true;
+      const mouseBtn = _accelToMouseButton(b.accel);
+      if (mouseBtn != null) {
+        _uiohookMouseBindings.set(b.accel + '|' + b.event, {
+          button: mouseBtn,
+          event:  b.event,
+          mode:   b.mode,
+        });
+      } else {
+        const keycodes = _accelToUiohookKeycode(b.accel);
+        if (keycodes && keycodes.length) {
+          _uiohookKeyBindings.set(b.accel + '|' + b.event, {
+            keycodes,
+            event: b.event,
+            mode:  b.mode,
+          });
+        }
+      }
+      continue;
+    }
+
+    // Ordinary accelerator → Electron globalShortcut.
+    // Toggle-only — Electron globalShortcut doesn't expose key-up,
+    // so even if PTT is in hold mode here we degrade to toggle for
+    // keyboard combos (the recorder UI labels this trade-off in the
+    // toast it shows on registration failure).
     try {
-      globalShortcut.register(accel, () => {
-        safeSend(getActiveContents(), event);
+      globalShortcut.register(b.accel, () => {
+        const channel = b.event === 'voice:ptt'
+          ? (b.mode === 'hold' ? 'voice:ptt-toggle' : 'voice:ptt-toggle')
+          : b.event;
+        safeSend(getActiveContents(), channel);
       });
     } catch (e) {
-      console.warn(`[Shortcuts] Failed to register ${accel}:`, e.message);
+      console.warn(`[Shortcuts] Failed to register ${b.accel}:`, e.message);
     }
-  };
-  bind(cfg.mute,   'voice:mute-toggle');
-  bind(cfg.deafen, 'voice:deafen-toggle');
-  bind(cfg.ptt,    'voice:ptt-toggle');
+  }
+
+  if (needUiohook) _ensureUiohookStarted();
 }
 
 // ── Show a dialog with an auto-timeout ─────────────────
@@ -1889,16 +2095,31 @@ function registerIPC() {
     if (!updates || typeof updates !== 'object') return false;
     unregisterVoiceShortcuts();
     const cfg = { ...store.get('desktopShortcuts') };
-    const allowed = new Set(['mute', 'deafen', 'ptt']);
+    // `pttMode` ('toggle' | 'hold') is stored alongside the keybinds so
+    // registerVoiceShortcuts() can decide whether PTT needs press/release
+    // events from uiohook. (#5255 / #184)
+    const allowed = new Set(['mute', 'deafen', 'ptt', 'pttMode']);
     Object.entries(updates).forEach(([k, v]) => {
-      if (allowed.has(k) && typeof v === 'string' && v.length <= 50) cfg[k] = v;
+      if (!allowed.has(k)) return;
+      if (k === 'pttMode') {
+        if (v === 'toggle' || v === 'hold') cfg[k] = v;
+        return;
+      }
+      if (typeof v === 'string' && v.length <= 50) cfg[k] = v;
     });
     store.set('desktopShortcuts', cfg);
     registerVoiceShortcuts();
-    // Report registration success for each non-empty shortcut
+    // Report registration success for each non-empty shortcut. Bare
+    // modifiers and Mouse4/5 are routed through uiohook-napi instead of
+    // globalShortcut — report them as registered iff the optional dep
+    // loaded successfully (#184).
+    const uiohookOk = !!(_uiohook && _uiohookStarted);
     const result = {};
     Object.entries(cfg).forEach(([k, v]) => {
-      result[k] = v ? globalShortcut.isRegistered(v) : true;
+      if (k === 'pttMode') { result[k] = true; return; }
+      if (!v) { result[k] = true; return; }
+      if (_isUiohookAccel(v)) { result[k] = uiohookOk; return; }
+      result[k] = globalShortcut.isRegistered(v);
     });
     return result;
   });
