@@ -160,8 +160,14 @@ function buildServerAppUrl(serverUrl) {
 
 // ── Single-Instance Lock ──────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) { app.quit(); }
-else {
+if (!gotLock) {
+  app.quit();
+  // Watchdog: Chromium's ProcessSingleton IPC can hang when the lock is held
+  // by an orphaned subprocess from a crashed instance (OS hasn't closed its
+  // file handles yet). Force-exit after 3 s so the user isn't left with a
+  // frozen shell that never shows a window. The next launch gets a fresh lock.
+  setTimeout(() => process.exit(0), 3000).unref();
+} else {
   app.on('second-instance', () => {
     const win = mainWindow || welcomeWindow;
     if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
@@ -938,13 +944,18 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         recomputeTaskbarBadge();
         if (primaryServerUrl && serverViews.has(primaryServerUrl)) {
           switchToServer(primaryServerUrl);
-          const wc = serverViews.get(primaryServerUrl)?.webContents;
-          if (wc && !wc.isDestroyed()) {
-            wc.executeJavaScript(`
-              if (typeof app !== 'undefined' && typeof app._showToast === 'function') {
-                app._showToast("Couldn't connect to that server", 'error');
-              }
-            `).catch(() => {});
+          // Only show the toast for user-initiated peer connections — not for
+          // silent background preloads, which fail frequently on launch when
+          // servers are briefly unreachable and should never surface errors.
+          if (!background) {
+            const wc = serverViews.get(primaryServerUrl)?.webContents;
+            if (wc && !wc.isDestroyed()) {
+              wc.executeJavaScript(`
+                if (typeof app !== 'undefined' && typeof app._showToast === 'function') {
+                  app._showToast("Couldn't connect to that server", 'error');
+                }
+              `).catch(() => {});
+            }
           }
         } else {
           resetToWelcome();
