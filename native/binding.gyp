@@ -30,12 +30,12 @@
         ["OS=='linux'", {
           "sources": ["src/linux/pulse_capture.cpp"],
           "cflags_cc": [
-            "<!@(pkg-config --cflags libpulse 2>/dev/null || echo '')",
+            "<!@(pkg-config --cflags libpulse libpulse-simple 2>/dev/null || echo '')",
             "-std=c++17",
             "-fexceptions"
           ],
           "libraries": [
-            "<!@(pkg-config --libs libpulse 2>/dev/null || echo '-lpulse')"
+            "<!@(pkg-config --libs libpulse libpulse-simple 2>/dev/null || echo '-lpulse -lpulse-simple')"
           ],
           "defines": ["PLATFORM_LINUX"]
         }]
