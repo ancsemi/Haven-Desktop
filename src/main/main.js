@@ -161,12 +161,22 @@ function buildServerAppUrl(serverUrl) {
 // ── Single-Instance Lock ──────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
-  app.quit();
-  // Watchdog: Chromium's ProcessSingleton IPC can hang when the lock is held
-  // by an orphaned subprocess from a crashed instance (OS hasn't closed its
-  // file handles yet). Force-exit after 3 s so the user isn't left with a
-  // frozen shell that never shows a window. The next launch gets a fresh lock.
-  setTimeout(() => process.exit(0), 3000).unref();
+  // The lock can fail transiently when the previous instance hasn't fully
+  // released its file handles yet (Windows error 32 / sharing violation).
+  // If this is the first attempt, wait 1.5 s for the old process to finish
+  // exiting, then relaunch automatically so the user isn't forced to click
+  // the icon a second time. If it still fails on the retry, another instance
+  // is genuinely running — focus it and quit.
+  const isRetry = process.argv.includes('--relaunch-retry');
+  if (!isRetry) {
+    setTimeout(() => {
+      app.relaunch({ args: process.argv.slice(1).concat(['--relaunch-retry']) });
+      app.exit(0);
+    }, 1500);
+  } else {
+    app.quit();
+    setTimeout(() => process.exit(0), 3000).unref();
+  }
 } else {
   app.on('second-instance', () => {
     const win = mainWindow || welcomeWindow;

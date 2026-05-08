@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.4.14
+
+### Fixed
+- **Spurious "Couldn't connect to that server" toast shown on launch.** Background preloads (`scheduleBackgroundServerPreload`) were triggering the error toast on the primary view when a background server failed to load at startup. Added a `!background` guard so the toast only fires for user-initiated connections.
+- **Haven sometimes wouldn't open after a quick close-then-relaunch (Windows error 32).** Chromium's single-instance lock can take a moment to release after the previous process exits. If you relaunched before the OS fully freed the lock file, Haven would silently quit and you'd have to click again. Haven now waits 1.5 seconds and relaunches itself automatically in that case, so the window always appears without any extra effort on your part.
+
+---
+
 ## v1.4.13
 
 ### Added
