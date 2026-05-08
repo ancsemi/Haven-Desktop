@@ -53,7 +53,7 @@ jobs:
           node-version: 20
 
       - name: Install PulseAudio dev headers
-        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev
 
       - name: Install dependencies
         run: npm install
