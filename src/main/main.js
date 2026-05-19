@@ -303,11 +303,6 @@ app.whenReady().then(async () => {
   createTray();
   Menu.setApplicationMenu(buildAppMenu());
 
-  // ── Global shortcut: Ctrl+Shift+Home to reset to welcome screen ──
-  // This is the escape hatch for users who are soft-locked into a broken server
-  globalShortcut.register('CommandOrControl+Shift+Home', () => {
-    if (mainWindow) resetToWelcome(true); // full reset — user explicitly requested
-  });
 });
 
 // ── Voice / PTT global shortcuts ───────────────────────
@@ -1484,6 +1479,12 @@ function buildAppMenu() {
         },
         { type: 'separator' },
         { role: 'togglefullscreen' },
+        { type: 'separator' },
+        {
+          label: 'Reset to Welcome Screen',
+          accelerator: 'CmdOrCtrl+Shift+Home',
+          click() { if (mainWindow) resetToWelcome(true); },
+        },
       ],
     },
     {

@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.15
+
+### Fixed
+- **Ctrl+Shift+Home was hijacked globally by Haven Desktop.** The "Reset to Welcome Screen" escape hatch was registered as a system-wide shortcut, meaning it would fire even when Haven wasn't focused (interfering with text editors, terminals, and other apps that use Ctrl+Shift+Home to select text). It is now a regular in-app menu accelerator under View, so it only works when Haven is the active window.
+
+---
+
 ## v1.4.14
 
 ### Fixed
