@@ -106,6 +106,29 @@ let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
 let knownServerUrlsByView = new Map();
 let _logBuf = '', _logTimer = null;  // server log batch buffer (module-scope so crash handler can clear)
 
+// Build a { normalizedUrl: displayName } map from serverHistory + live views.
+// Used to enrich badge broadcasts so the renderer can label an "orphan
+// unread" fallback icon when a server fires a badge but isn't in the
+// active view's sidebar. (#5337 multiserver unread desync)
+function buildServerNameMap() {
+  const out = {};
+  try {
+    const hist = store.get('serverHistory') || [];
+    for (const entry of hist) {
+      if (!entry || !entry.url) continue;
+      const norm = normalizeServerUrl(entry.url);
+      if (!norm) continue;
+      const name = (entry.name && entry.name !== entry.url) ? entry.name : '';
+      out[norm] = name || (() => { try { return new URL(norm).hostname; } catch { return norm; } })();
+    }
+  } catch {}
+  for (const url of serverViews.keys()) {
+    if (out[url]) continue;
+    try { out[url] = new URL(url).hostname; } catch { out[url] = url; }
+  }
+  return out;
+}
+
 function normalizeServerUrl(serverUrl) {
   let value = String(serverUrl || '').trim();
   if (!value) return '';
@@ -1986,9 +2009,14 @@ function registerIPC() {
     // Background views still render their server bars and need to update
     // their dots too — and the active view filter previously dropped the
     // signal whenever the sender happened to be the active view.
+    // Includes a parallel name map so the renderer can surface an
+    // "unread elsewhere" fallback icon for servers that aren't in the
+    // active view's sidebar (curated per-server, alias URLs, etc).
     const badgeMap = Object.fromEntries(serverBadgeState);
+    const nameMap = buildServerNameMap();
+    const payload = { badges: badgeMap, names: nameMap };
     for (const [, view] of serverViews) {
-      try { safeSend(view.webContents, 'server-badge-update', badgeMap); } catch {}
+      try { safeSend(view.webContents, 'server-badge-update', payload); } catch {}
     }
   });
 
@@ -2022,8 +2050,10 @@ function registerIPC() {
   });
 
   // ── Query per-server badge state (renderer asks for current state) ──
+  // Returns { badges, names } so the renderer can show an "unread elsewhere"
+  // fallback icon for servers missing from its sidebar.
   ipcMain.handle('get-server-badges', () => {
-    return Object.fromEntries(serverBadgeState);
+    return { badges: Object.fromEntries(serverBadgeState), names: buildServerNameMap() };
   });
 
   // ── Window Controls ───────────────────────────────────
