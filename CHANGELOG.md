@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.17
+
+### Fixed
+- **Screen-share encoder stalled when Haven was hidden behind another window (#5379).** Chromium treats a window covered by another full-size window as "occluded" and starts throttling its renderer, which stalls the WebRTC screen-share encoder and introduces audio/video desync that persists for the rest of the share. Haven Desktop already disabled `backgroundThrottling` on the server views, but Chromium's *native* occlusion detection (a separate code path on Windows) was still kicking in. Disabled the `CalculateNativeWinOcclusion` feature so renderers stay awake when the window is merely behind another window. This does NOT cover the explicit-minimize case — that one is still subject to OS-level suspension and would require re-enabling the `disable-renderer-backgrounding` flag, which was removed in 1.3.4 because it starved the renderer event loop. Workaround for minimize: shrink the window instead of minimizing it during a screen-share session.
+
+---
+
 ## v1.4.16
 
 ### Added

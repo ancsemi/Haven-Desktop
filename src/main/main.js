@@ -84,6 +84,14 @@ app.commandLine.appendSwitch('image-decode-ct', '3');
 // from throttling timers when the window was unfocused, causing all intervals
 // (clock, ping, server polling, voice analysers) to run at full speed 24/7.
 // This contributed to renderer freezes by starving the event loop.
+// #5379 — but Chromium *also* treats a window covered by another full-size
+// window as "occluded" and starts throttling the renderer there too, which
+// stalls the WebRTC screen-share encoder and introduces permanent A/V desync
+// for the streamer the moment they alt-tab to a maximized window. Disabling
+// the native-occlusion calculation tells Chromium to keep the renderer awake
+// when the window is merely hidden behind another window (it does NOT cover
+// the explicit-minimize case — that one is still subject to OS-level throttling).
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 // Cap the GPU-process memory budget so decoded textures don't eat into
 // the reservation Oilpan needs for large DOM allocations.
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
