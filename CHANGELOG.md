@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.16
+
+### Added
+- **Splash screen while the server view loads.** Launching Haven Desktop used to drop you on a flat dark rectangle for 30-40 s on cold-start cross-tunnel HTTPS handshakes (the BrowserView was already full-size and just blank while the renderer fetched). The main window now loads a small `splash.html` (hex logo, spinner, "Loading Haven…") immediately on creation, and the active BrowserView is kept at 0×0 until its first `did-finish-load`. A 20 s safety-net timer expands the view anyway if the server is unreachable, so you'll see the browser's own error page instead of an eternal spinner. Background-preloaded server views stay at 0×0 until you actually switch to them, then the switch-to handler expands them to full size.
+
+---
+
 ## v1.4.15
 
 ### Fixed
