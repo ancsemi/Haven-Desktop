@@ -661,6 +661,17 @@ function createAppWindow(serverUrl) {
       show: false,
     });
 
+    // Show a splash page in the main window itself while the active server's
+    // BrowserView loads. Without this the window opens to a flat dark
+    // rectangle (or, with show:false, simply never appears) for the ~30-40 s
+    // a cold-start cross-tunnel HTTPS handshake can take. The splash gets
+    // covered by the BrowserView once it's expanded to full size below.
+    try {
+      mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'splash.html'));
+    } catch (e) {
+      console.warn('[Haven] Could not load splash:', e?.message || e);
+    }
+
     const saveBounds = () => {
       if (!mainWindow || mainWindow.isMaximized()) return;
       const b = mainWindow.getBounds();
@@ -723,6 +734,22 @@ function switchToServer(serverUrl) {
   mainWindow.setTopBrowserView(view);
   activeServerUrl = url;
 
+  // Make sure the freshly-promoted view actually fills the window. Newly
+  // created views start at 0×0 (so the splash stays visible during load),
+  // and background-preloaded views never get expanded until you switch to
+  // them.
+  try {
+    const [cw, ch] = mainWindow.getContentSize();
+    const b = view.getBounds();
+    if (b.width !== cw || b.height !== ch) {
+      // Only expand if the view has already finished loading — otherwise let
+      // the per-view did-finish-load handler do it so the splash stays up.
+      if (!view.webContents.isLoading()) {
+        view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+      }
+    }
+  } catch {}
+
   // Save to server history
   const _hist = store.get('serverHistory') || [];
   const _hIdx = _hist.findIndex(h => h.url === url);
@@ -765,8 +792,28 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     });
     mainWindow.addBrowserView(view);
     const [w, h] = mainWindow.getContentSize();
-    view.setBounds({ x: 0, y: 0, width: w, height: h });
+    // Start the view hidden (0×0) so the splash page underneath stays visible
+    // while the renderer loads. We expand to full size only when this view
+    // is the active one and finishes loading — prevents the user from
+    // staring at a blank dark rectangle for 30-40 s on cold-start
+    // cross-tunnel handshakes. Background-preloaded views stay at 0×0
+    // until the user actually switches to them (see switchToServer).
+    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
     view.setAutoResize({ width: true, height: true });
+    const _expandIfActive = () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (activeServerUrl !== url) return;
+      try {
+        const [cw, ch] = mainWindow.getContentSize();
+        view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+      } catch {}
+    };
+    // Safety net — even if the active server is unreachable, drop the splash
+    // after 20 s so the user sees the BrowserView's own error page instead
+    // of an eternal spinner.
+    const _expandTimer = setTimeout(_expandIfActive, 20000);
+    view.webContents.once('did-finish-load', () => { clearTimeout(_expandTimer); _expandIfActive(); });
+    view.webContents.once('did-fail-load',   () => { clearTimeout(_expandTimer); _expandIfActive(); });
 
     view.webContents.loadURL(buildServerAppUrl(url));
 
