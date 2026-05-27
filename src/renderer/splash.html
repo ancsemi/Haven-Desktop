@@ -25,11 +25,11 @@
       gap: 22px;
     }
     .hex {
-      font-size: 88px;
-      line-height: 1;
-      color: #6b4fdb;
+      width: 96px;
+      height: 96px;
       filter: drop-shadow(0 0 32px rgba(107, 79, 219, .45));
       animation: pulse 2.2s ease-in-out infinite;
+      image-rendering: -webkit-optimize-contrast;
     }
     @keyframes pulse {
       0%, 100% { transform: scale(1);    opacity: 1;   }
@@ -68,7 +68,7 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="hex">⬢</div>
+    <img class="hex" src="splash-icon.png" alt="Haven">
     <h1>Loading <span class="brand">Haven</span>…</h1>
     <div class="spinner" aria-label="Loading"></div>
     <div class="status">Connecting to your server</div>

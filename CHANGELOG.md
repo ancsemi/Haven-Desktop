@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.18
+
+### Changed
+- **Splash screen now uses the official Haven hex-H logo** instead of the generic solid-purple hexagon glyph. Same gentle pulse animation, just the real brand mark while the server view loads.
+
+---
+
 ## v1.4.17
 
 ### Fixed
