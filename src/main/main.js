@@ -91,7 +91,17 @@ app.commandLine.appendSwitch('image-decode-ct', '3');
 // the native-occlusion calculation tells Chromium to keep the renderer awake
 // when the window is merely hidden behind another window (it does NOT cover
 // the explicit-minimize case — that one is still subject to OS-level throttling).
-app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+// Also disable IntensiveWakeUpThrottling (introduced in M87) which clamps
+// timers to 1Hz after the page is hidden for >5 minutes — catastrophic for
+// a long-running screen share if the OS ever flips the window to hidden.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
+// #5379 (follow-up) — the CalculateNativeWinOcclusion flag only stops
+// Chromium from *calculating* occlusion itself. Windows' own DWM still
+// signals occlusion when another window is snap-maximized over Haven, and
+// the GPU/renderer process throttles independently of the calculation
+// flag. This switch tells Chromium to ignore that OS-level occlusion
+// signal entirely, which is exactly the case the Snap workflow hits.
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 // Cap the GPU-process memory budget so decoded textures don't eat into
 // the reservation Oilpan needs for large DOM allocations.
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
@@ -667,6 +677,11 @@ function createAppWindow(serverUrl) {
       backgroundColor: '#0d0d1a',
       icon: ICON_PATH,
       show: false,
+      // The BrowserView per-server already disables backgroundThrottling, but
+      // the top-level window also hosts splash and (briefly) error pages.
+      // Keeping it un-throttled means transient overlays don't add a second
+      // throttle layer on top of the per-view setting during screen share. (#5379)
+      webPreferences: { backgroundThrottling: false },
     });
 
     // Show a splash page in the main window itself while the active server's
