@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.19
+
+### Changed
+- **Clearer logging when `uiohook-napi` can't load (#184).** Bare-modifier and Mouse4/Mouse5 PTT bindings depend on the optional `uiohook-napi` native module. When it fails to load — most commonly on Linux distros that don't have `libuiohook` system-installed — the console previously just said "uiohook-napi unavailable". The warning now includes a platform-specific install hint (Arch pacman + yay incantation, Debian/Ubuntu apt packages, macOS Accessibility/Input Monitoring permission, Windows reinstall/rebuild suggestion) so users on Linux in particular don't have to dig through GitHub issues to find the right command. Same hint also fires on `uIOhook.start()` failures.
+
+---
+
 ## v1.4.18
 
 ### Changed

@@ -368,6 +368,27 @@ app.whenReady().then(async () => {
 // behaviour (single tap flips the mute button state). (#184)
 let _uiohook = null;
 let _uiohookStarted = false;
+// Platform-specific hint for "the native dep didn't load" — surfaced in the
+// console so users (especially on Linux where libuiohook is a separate system
+// package) don't have to guess why bare-modifier / mouse PTT bindings silently
+// no-op. (#184 follow-up)
+function _uiohookInstallHint() {
+  if (process.platform === 'linux') {
+    return 'Linux: install libuiohook from your package manager '
+         + '(Arch: `yay -S libuiohook` + `sudo pacman -S base-devel libxtst libxinerama libxkbcommon-x11 libxt`; '
+         + 'Debian/Ubuntu: `sudo apt install libxtst-dev libxt-dev libxkbcommon-dev`), '
+         + 'then `npm rebuild uiohook-napi` in the Haven-Desktop install dir.';
+  }
+  if (process.platform === 'win32') {
+    return 'Windows: uiohook-napi ships a prebuilt binary — if loading fails, '
+         + 'try reinstalling Haven Desktop, or `npm rebuild uiohook-napi` if you built from source.';
+  }
+  if (process.platform === 'darwin') {
+    return 'macOS: grant Haven Accessibility + Input Monitoring permission in System Settings → '
+         + 'Privacy & Security, then restart Haven.';
+  }
+  return '';
+}
 function tryLoadUiohook() {
   if (_uiohook !== null) return _uiohook;        // already loaded or attempted
   try {
@@ -375,7 +396,10 @@ function tryLoadUiohook() {
     // eslint-disable-next-line global-require
     _uiohook = require('uiohook-napi');
   } catch (err) {
-    console.warn('[Shortcuts] uiohook-napi unavailable — bare modifiers and Mouse4/5 will be ignored:', err.message);
+    const hint = _uiohookInstallHint();
+    console.warn('[Shortcuts] uiohook-napi unavailable — bare modifiers and Mouse4/5 PTT bindings will be ignored.');
+    console.warn('[Shortcuts]   reason:', err.message);
+    if (hint) console.warn('[Shortcuts]   hint:', hint);
     _uiohook = false;
   }
   return _uiohook;
@@ -493,6 +517,8 @@ function _ensureUiohookStarted() {
     console.log('[Shortcuts] uiohook-napi started — bare modifiers + Mouse4/5 active');
   } catch (err) {
     console.warn('[Shortcuts] uiohook-napi failed to start:', err.message);
+    const hint = _uiohookInstallHint();
+    if (hint) console.warn('[Shortcuts]   hint:', hint);
     return false;
   }
   return true;
@@ -1225,7 +1251,6 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     let _lastMemReload = 0;           // timestamp of last memory reload
     const _memTrend = [];           // [{ts, mb}] — last 20 readings (~10 min)
     const MEM_TREND_MAX = 20;
-    let _memSampleCount = 0;        // total samples taken (for trend log cadence)
     const _startMemCheck = () => {
       _memCheckInterval = setInterval(async () => {
       if (!mainWindow || !serverViews.has(url)) {
@@ -1245,19 +1270,6 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         // Track trend
         _memTrend.push({ ts: Date.now(), mb: Math.round(memMB) });
         if (_memTrend.length > MEM_TREND_MAX) _memTrend.shift();
-        _memSampleCount++;
-
-        // Log trend every 5th sample (~2.5 min), but only when memory changed significantly
-        if (_memSampleCount % 5 === 0 && _memTrend.length >= 5) {
-          const first = _memTrend[0].mb;
-          const last  = _memTrend[_memTrend.length - 1].mb;
-          const delta = last - first;
-          // Only log if memory shifted by more than 10 MB
-          if (Math.abs(delta) > 10) {
-            const arrow = delta > 0 ? '↑' : '↓';
-            console.log(`[Haven Desktop] Memory trend: ${first}→${last} MB (${delta > 0 ? '+' : ''}${delta}) ${arrow} over ${Math.round((_memTrend[_memTrend.length-1].ts - _memTrend[0].ts)/60000)} min`);
-          }
-        }
 
         if (memMB > MEM_THRESHOLD_MB) {
           // Hard reload — but only if we haven't reloaded recently to prevent loops
