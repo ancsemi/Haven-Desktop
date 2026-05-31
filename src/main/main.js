@@ -51,6 +51,8 @@ const store = new Store({
     minimizeToTray: false,    // close button hides to tray instead of quitting
     forceSDR:       false,    // force sRGB color profile (fixes HDR over-saturation)
     hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
+    disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
+    unlimitFrameRate:  false, // disable Chromium's frame-rate cap (pairs with disableGpuVsync)
     serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
   },
 });
@@ -58,6 +60,20 @@ const store = new Store({
 // ── Force sRGB color profile when user has HDR issues (must be before app.whenReady) ──
 if (store.get('forceSDR')) {
   app.commandLine.appendSwitch('force-color-profile', 'srgb');
+}
+
+// ── G-Sync / VRR workaround (#35): Chromium can negotiate a tiny refresh rate
+// with an Nvidia G-Sync display and then never renegotiate back up, dropping
+// the renderer to ~5 FPS once the window has been hidden/restored. Disabling
+// GPU vsync and Chromium's internal frame-rate limit forces the compositor to
+// keep producing frames at full speed. Both flags can introduce visible tearing
+// on non-VRR monitors, which is why they're off by default and opt-in via the
+// Debug section of Settings.
+if (store.get('disableGpuVsync')) {
+  app.commandLine.appendSwitch('disable-gpu-vsync');
+}
+if (store.get('unlimitFrameRate')) {
+  app.commandLine.appendSwitch('disable-frame-rate-limit');
 }
 
 // ── Suppress Chrome Autofill CDP warnings (harmless but noisy on startup) ──
@@ -2159,7 +2175,8 @@ function registerIPC() {
   const ALLOWED_SETTINGS_KEYS = new Set([
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
     'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
-    'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR'
+    'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
+    'disableGpuVsync', 'unlimitFrameRate'
   ]);
   ipcMain.handle('settings:get', (_e, key)        => store.get(key));
   ipcMain.handle('settings:set', (_e, key, value)  => {
@@ -2173,11 +2190,13 @@ function registerIPC() {
 
   // ── Desktop App Preferences ───────────────────────────
   ipcMain.handle('desktop:get-prefs', () => ({
-    startOnLogin:   !!store.get('startOnLogin'),
-    startHidden:    !!store.get('startHidden'),
-    minimizeToTray: !!store.get('minimizeToTray'),
-    forceSDR:       !!store.get('forceSDR'),
-    hideMenuBar:    !!store.get('hideMenuBar'),
+    startOnLogin:     !!store.get('startOnLogin'),
+    startHidden:      !!store.get('startHidden'),
+    minimizeToTray:   !!store.get('minimizeToTray'),
+    forceSDR:         !!store.get('forceSDR'),
+    hideMenuBar:      !!store.get('hideMenuBar'),
+    disableGpuVsync:  !!store.get('disableGpuVsync'),
+    unlimitFrameRate: !!store.get('unlimitFrameRate'),
   }));
 
   ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {
@@ -2221,6 +2240,19 @@ function registerIPC() {
       mainWindow.setMenuBarVisibility(!enabled);
     }
     return true;
+  });
+
+  // #35 — G-Sync / VRR FPS-drop workaround. Both flags are Chromium
+  // command-line switches applied at app boot, so flipping them requires a
+  // restart to take effect. The renderer surfaces a toast saying so.
+  ipcMain.handle('desktop:set-disable-gpu-vsync', (_e, enabled) => {
+    store.set('disableGpuVsync', !!enabled);
+    return { requiresRestart: true };
+  });
+
+  ipcMain.handle('desktop:set-unlimit-frame-rate', (_e, enabled) => {
+    store.set('unlimitFrameRate', !!enabled);
+    return { requiresRestart: true };
   });
 
   // ── Desktop Shortcuts ─────────────────────────────────

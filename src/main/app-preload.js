@@ -1346,6 +1346,8 @@ window.havenDesktop = {
     setMinimizeToTray:(v)     => ipcRenderer.invoke('desktop:set-minimize-to-tray', v),
     setForceSDR:      (v)     => ipcRenderer.invoke('desktop:set-force-sdr', v),
     setHideMenuBar:   (v)     => ipcRenderer.invoke('desktop:set-hide-menu-bar', v),
+    setDisableGpuVsync:  (v)  => ipcRenderer.invoke('desktop:set-disable-gpu-vsync', v),
+    setUnlimitFrameRate: (v)  => ipcRenderer.invoke('desktop:set-unlimit-frame-rate', v),
   },
 
   /** Query per-server unread badge state for notification dots */
