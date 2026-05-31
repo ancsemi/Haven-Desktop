@@ -2243,17 +2243,32 @@ function registerIPC() {
     });
     store.set('desktopShortcuts', cfg);
     registerVoiceShortcuts();
-    // Report registration success for each non-empty shortcut. Bare
-    // modifiers and Mouse4/5 are routed through uiohook-napi instead of
-    // globalShortcut — report them as registered iff the optional dep
-    // loaded successfully (#184).
+    // Report registration outcome per-shortcut, with a reason when a bind
+    // didn't take so the renderer can surface a useful toast instead of
+    // the generic "may already be in use" message (#184).
+    //   'ok'                   — registered successfully
+    //   'uiohook-unavailable'  — bind needs uiohook-napi (Mouse4/5 or bare
+    //                             modifier) and the optional native dep
+    //                             didn't load (most common on Linux without
+    //                             libuiohook installed)
+    //   'conflict'             — Electron's globalShortcut couldn't claim
+    //                             the combo (already taken by the OS or
+    //                             another app)
     const uiohookOk = !!(_uiohook && _uiohookStarted);
     const result = {};
     Object.entries(cfg).forEach(([k, v]) => {
-      if (k === 'pttMode') { result[k] = true; return; }
-      if (!v) { result[k] = true; return; }
-      if (_isUiohookAccel(v)) { result[k] = uiohookOk; return; }
-      result[k] = globalShortcut.isRegistered(v);
+      if (k === 'pttMode') { result[k] = { ok: true, reason: 'ok' }; return; }
+      if (!v)              { result[k] = { ok: true, reason: 'ok' }; return; }
+      if (_isUiohookAccel(v)) {
+        result[k] = uiohookOk
+          ? { ok: true,  reason: 'ok' }
+          : { ok: false, reason: 'uiohook-unavailable', accel: v };
+        return;
+      }
+      const ok = globalShortcut.isRegistered(v);
+      result[k] = ok
+        ? { ok: true,  reason: 'ok' }
+        : { ok: false, reason: 'conflict', accel: v };
     });
     return result;
   });

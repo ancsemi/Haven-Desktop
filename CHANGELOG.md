@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.20
+
+### Fixed
+- **Useless "Failed to register shortcut" toast (#184).** When binding a Mouse4/Mouse5 or bare-modifier PTT key on a machine where `uiohook-napi` couldn't load, the renderer used to show a one-size-fits-all "may already be in use, or the desktop app version doesn't support this binding type yet" toast with no actionable next step. The desktop IPC handler now returns a structured outcome per shortcut (`{ ok, reason }` where reason is `ok` / `uiohook-unavailable` / `conflict`) and the renderer translates each into a specific toast that tells the user what's actually wrong and what to do about it (install libuiohook, pick a different combo, etc.). Pairs with the Haven server-side renderer update.
+
+---
+
 ## v1.4.19
 
 ### Changed
