@@ -4,7 +4,8 @@
 
 const {
   app, BrowserWindow, BrowserView, ipcMain, Notification, Tray, Menu,
-  nativeImage, desktopCapturer, session, dialog, shell, screen, globalShortcut
+  nativeImage, desktopCapturer, session, dialog, shell, screen, globalShortcut,
+  clipboard
 } = require('electron');
 const path  = require('path');
 const fs    = require('fs');
@@ -2187,6 +2188,30 @@ function registerIPC() {
 
   // ── App Info ──────────────────────────────────────────
   ipcMain.handle('app:version', () => app.getVersion());
+
+  // ── Clipboard: write image ───────────────────────────
+  // Renderer-side navigator.clipboard.write([new ClipboardItem({...})])
+  // is unreliable for arbitrary remote images in Electron — the
+  // user-gesture token gets dropped across the async fetch + decode,
+  // and Chromium silently rejects the write with NotAllowedError.
+  // Bypass it entirely by handing the image bytes to the main process
+  // where Electron's `clipboard` module has no gesture restrictions.
+  // Accepts either a data: URL or a raw base64 PNG string.
+  ipcMain.handle('clipboard:write-image', async (_e, payload) => {
+    try {
+      if (!payload || typeof payload !== 'string') {
+        return { ok: false, reason: 'no-payload' };
+      }
+      const img = payload.startsWith('data:')
+        ? nativeImage.createFromDataURL(payload)
+        : nativeImage.createFromBuffer(Buffer.from(payload, 'base64'));
+      if (img.isEmpty()) return { ok: false, reason: 'decoded-empty' };
+      clipboard.writeImage(img);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: String(err && err.message || err) };
+    }
+  });
 
   // ── Desktop App Preferences ───────────────────────────
   ipcMain.handle('desktop:get-prefs', () => ({

@@ -1325,6 +1325,12 @@ window.havenDesktop = {
 
   getVersion: () => ipcRenderer.invoke('app:version'),
 
+  /** Write an image to the OS clipboard via the main process.
+   *  Bypasses navigator.clipboard.write's gesture restrictions that
+   *  the renderer can't reliably satisfy across an async fetch.
+   *  Accepts a data: URL or raw base64. Returns { ok, reason }. */
+  clipboardWriteImage: (payload) => ipcRenderer.invoke('clipboard:write-image', payload),
+
   /** Access the Desktop-level server history (persists across all servers) */
   getServerHistory: () => ipcRenderer.invoke('server-history:get'),
   addServerHistory: (url, name) => ipcRenderer.invoke('server-history:add', url, name),
