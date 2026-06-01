@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.22
+
+### Added
+- **`clipboard:write-image` IPC for renderer image-copy (Haven 3.21.0 followup).** New main-process IPC handler accepts a data URL or raw base64 PNG and writes it to the OS clipboard via Electron's `clipboard.writeImage` + `nativeImage`. Exposed on the renderer as `window.havenDesktop.clipboardWriteImage`. The renderer now prefers this path over `navigator.clipboard.write` for right-click → Copy image because the browser API was silently rejecting the write with `NotAllowedError`: the user-gesture token gets dropped across the async fetch + decode chain, and Chromium refuses any subsequent clipboard write without an active gesture. The main-process clipboard has no such restriction. Falls back to the web API + final text-URL fallback when the desktop hook isn't present.
+
+---
+
 ## v1.4.21
 
 ### Added
