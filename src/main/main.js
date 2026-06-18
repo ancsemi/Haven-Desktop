@@ -816,6 +816,15 @@ function switchToServer(serverUrl) {
     }
   } catch {}
 
+  // Pull the active view's <title> up to the BrowserWindow so the OS window
+  // chrome stops saying "Loading Haven…" once a real renderer is on top.
+  // (mainWindow.webContents = splash.html, whose <title> never changes — so
+  // without this, the window title is stuck on the splash text forever.)
+  try {
+    const t = (view.webContents.getTitle() || '').trim();
+    mainWindow.setTitle(t && !/^Loading Haven/i.test(t) ? t : 'Haven');
+  } catch {}
+
   // Save to server history
   const _hist = store.get('serverHistory') || [];
   const _hIdx = _hist.findIndex(h => h.url === url);
@@ -878,8 +887,26 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // after 20 s so the user sees the BrowserView's own error page instead
     // of an eternal spinner.
     const _expandTimer = setTimeout(_expandIfActive, 20000);
-    view.webContents.once('did-finish-load', () => { clearTimeout(_expandTimer); _expandIfActive(); });
-    view.webContents.once('did-fail-load',   () => { clearTimeout(_expandTimer); _expandIfActive(); });
+    const _syncTitleIfActive = () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (activeServerUrl !== url) return;
+      try {
+        const t = (view.webContents.getTitle() || '').trim();
+        // The server's app.html sets <title>Haven</title>; the auth page sets
+        // <title>Haven · Sign In</title>; etc. Anything non-empty that isn't
+        // the splash placeholder is a better window title than "Loading Haven…".
+        if (t && !/^Loading Haven/i.test(t)) {
+          mainWindow.setTitle(t);
+        } else {
+          mainWindow.setTitle('Haven');
+        }
+      } catch {}
+    };
+    view.webContents.once('did-finish-load', () => { clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
+    view.webContents.once('did-fail-load',   () => { clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
+    // Each subsequent in-page navigation (e.g. login → app, channel switch)
+    // also gets reflected in the window title once the view is the active one.
+    view.webContents.on('page-title-updated', _syncTitleIfActive);
 
     view.webContents.loadURL(buildServerAppUrl(url));
 
@@ -2480,41 +2507,4 @@ function installLinuxDesktopEntry() {
   const appImagePath = process.env.APPIMAGE;
   if (!appImagePath) return; // Only for AppImage installs
 
-  const home = process.env.HOME || os.homedir();
-  const appsDir = path.join(home, '.local', 'share', 'applications');
-  const iconDir = path.join(home, '.local', 'share', 'icons');
-  const desktopFile = path.join(appsDir, 'haven-desktop.desktop');
-  const iconDest = path.join(iconDir, 'haven-desktop.png');
-
-  // Skip if already registered for this AppImage path
-  if (fs.existsSync(desktopFile)) {
-    try {
-      if (fs.readFileSync(desktopFile, 'utf-8').includes(appImagePath)) return;
-    } catch {}
-  }
-
-  try {
-    fs.mkdirSync(appsDir, { recursive: true });
-    fs.mkdirSync(iconDir, { recursive: true });
-
-    if (fs.existsSync(ICON_PATH)) fs.copyFileSync(ICON_PATH, iconDest);
-
-    const entry = [
-      '[Desktop Entry]',
-      'Name=Haven',
-      'Comment=Private self-hosted chat',
-      `Exec="${appImagePath}" %U`,
-      `Icon=${iconDest}`,
-      'Type=Application',
-      'Categories=Network;Chat;InstantMessaging;',
-      'Terminal=false',
-      'StartupWMClass=haven',
-    ].join('\n');
-
-    fs.writeFileSync(desktopFile, entry);
-    try { require('child_process').execSync(`update-desktop-database "${appsDir}" 2>/dev/null`, { timeout: 5000 }); } catch {}
-    console.log('[Haven Desktop] Installed desktop entry:', desktopFile);
-  } catch (err) {
-    console.warn('[Haven Desktop] Desktop integration failed:', err.message);
-  }
-}
+  cons

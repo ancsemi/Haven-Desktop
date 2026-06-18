@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.23
+
+### Fixed
+- **Window title stuck on "Loading Haven…" forever.** The splash page that the main `BrowserWindow` loads while a server's `BrowserView` boots has `<title>Loading Haven…</title>`, and `BrowserView`s are a separate `webContents` whose `<title>` does NOT propagate up to the host window. So once the splash was covered by the actual Haven UI, the OS chrome went on saying "Loading Haven…" indefinitely — looking, to many users, like the app had hung even though it was fully usable underneath. The active view's title is now mirrored to `mainWindow.setTitle()` on `did-finish-load`, `did-fail-load`, every `page-title-updated`, and every `switchToServer` swap, with a "Haven" fallback when the page title is empty or itself still says "Loading Haven".
+
+---
+
 ## v1.4.22
 
 ### Added
