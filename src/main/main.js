@@ -2507,4 +2507,41 @@ function installLinuxDesktopEntry() {
   const appImagePath = process.env.APPIMAGE;
   if (!appImagePath) return; // Only for AppImage installs
 
-  cons
+  const home = process.env.HOME || os.homedir();
+  const appsDir = path.join(home, '.local', 'share', 'applications');
+  const iconDir = path.join(home, '.local', 'share', 'icons');
+  const desktopFile = path.join(appsDir, 'haven-desktop.desktop');
+  const iconDest = path.join(iconDir, 'haven-desktop.png');
+
+  // Skip if already registered for this AppImage path
+  if (fs.existsSync(desktopFile)) {
+    try {
+      if (fs.readFileSync(desktopFile, 'utf-8').includes(appImagePath)) return;
+    } catch {}
+  }
+
+  try {
+    fs.mkdirSync(appsDir, { recursive: true });
+    fs.mkdirSync(iconDir, { recursive: true });
+
+    if (fs.existsSync(ICON_PATH)) fs.copyFileSync(ICON_PATH, iconDest);
+
+    const entry = [
+      '[Desktop Entry]',
+      'Name=Haven',
+      'Comment=Private self-hosted chat',
+      `Exec="${appImagePath}" %U`,
+      `Icon=${iconDest}`,
+      'Type=Application',
+      'Categories=Network;Chat;InstantMessaging;',
+      'Terminal=false',
+      'StartupWMClass=haven',
+    ].join('\n');
+
+    fs.writeFileSync(desktopFile, entry);
+    try { require('child_process').execSync(`update-desktop-database "${appsDir}" 2>/dev/null`, { timeout: 5000 }); } catch {}
+    console.log('[Haven Desktop] Installed desktop entry:', desktopFile);
+  } catch (err) {
+    console.warn('[Haven Desktop] Desktop integration failed:', err.message);
+  }
+}

@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.24
+
+### Fixed
+- **Desktop app refused to launch on Windows after the v1.4.23 update (#5422).** v1.4.23 shipped a truncated `src/main/main.js` — the last 11 lines, including the closing brace of `installLinuxDesktopEntry()`, got chopped off in transit between editors. Electron loaded the asar, hit `SyntaxError: Unexpected end of input` halfway through main bootstrap, and surfaced the "A JavaScript error occurred in the main process" dialog instead of opening a window. Reinstalling didn't help — the same broken file shipped inside the installer. Rebuilt `main.js` from a known-good base and re-applied the v1.4.23 title-bar fix on top, then parse-checked every file in `src/main/` before tagging.
+
+---
+
 ## v1.4.23
 
 ### Fixed
