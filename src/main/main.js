@@ -942,24 +942,56 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // Menu from params.dictionarySuggestions and params.misspelledWord so
     // users can apply a correction just like they would in a browser.
     view.webContents.on('context-menu', (_e, params) => {
-      if (!params.misspelledWord) return;
       const items = [];
-      const suggestions = params.dictionarySuggestions || [];
-      if (suggestions.length) {
-        for (const suggestion of suggestions.slice(0, 6)) {
-          items.push({
-            label: suggestion,
-            click: () => { try { view.webContents.replaceMisspelling(suggestion); } catch {} },
-          });
+
+      // ── Spellcheck suggestions (when right-clicking a misspelled word) ──
+      if (params.misspelledWord) {
+        const suggestions = params.dictionarySuggestions || [];
+        if (suggestions.length) {
+          for (const suggestion of suggestions.slice(0, 6)) {
+            items.push({
+              label: suggestion,
+              click: () => { try { view.webContents.replaceMisspelling(suggestion); } catch {} },
+            });
+          }
+          items.push({ type: 'separator' });
         }
+        items.push({
+          label: 'Add to Dictionary',
+          click: () => {
+            try { view.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {}
+          },
+        });
         items.push({ type: 'separator' });
       }
-      items.push({
-        label: 'Add to Dictionary',
-        click: () => {
-          try { view.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {}
-        },
-      });
+
+      // ── Link actions ──
+      if (params.linkURL) {
+        items.push({
+          label: 'Copy Link',
+          click: () => { try { require('electron').clipboard.writeText(params.linkURL); } catch {} },
+        });
+        items.push({ type: 'separator' });
+      }
+
+      // ── Standard editing actions ──
+      // Electron's BrowserView has no default context menu, so right-click on
+      // selectable text or an input previously offered nothing. Build the
+      // usual Cut/Copy/Paste/Select All from the params' editFlags.
+      const flags = params.editFlags || {};
+      const hasSelection = !!(params.selectionText && params.selectionText.trim());
+      if (params.isEditable || hasSelection) {
+        if (params.isEditable) items.push({ label: 'Cut', role: 'cut', enabled: flags.canCut });
+        items.push({ label: 'Copy', role: 'copy', enabled: flags.canCopy });
+        if (params.isEditable) items.push({ label: 'Paste', role: 'paste', enabled: flags.canPaste });
+        items.push({ type: 'separator' });
+        items.push({ label: 'Select All', role: 'selectAll' });
+      }
+
+      // Trim any trailing separator so the menu doesn't end with a divider.
+      while (items.length && items[items.length - 1].type === 'separator') items.pop();
+
+      if (!items.length) return;
       try { Menu.buildFromTemplate(items).popup({ window: mainWindow }); } catch {}
     });
 

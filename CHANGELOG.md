@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.25
+
+### Fixed
+- **Right-click did nothing on selected text or links.** The desktop app's `BrowserView` has no built-in context menu, and Haven's handler only built a menu for misspelled words — so right-clicking normal text, an input, or a link offered no Copy/Cut/Paste/Select All, and copying only worked for images. The context menu now adds standard Cut/Copy/Paste/Select All (driven by the selection's edit flags) and a Copy Link item, on top of the existing spellcheck suggestions.
+
+---
+
 ## v1.4.24
 
 ### Fixed
