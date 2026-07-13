@@ -77,52 +77,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // Inject the CSS once
   const css = document.createElement('style');
   css.textContent = `
-    /* Hide the original status bar — we replace it with a fixed clone */
-    .status-bar#status-bar { display: none !important; }
-
-    #haven-desktop-footer {
-      position: fixed !important;
-      bottom: 0; left: 0; right: 0;
-      z-index: 9999;
-      display: flex !important;
-      align-items: center;
-      gap: 16px;
-      padding: 4px 16px;
-      background: var(--bg-secondary, #1e2035);
-      border-top: 1px solid var(--border, #333);
-      font-size: 11px;
-      color: var(--text-muted, #888);
-      font-family: var(--font-main, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
-      user-select: none;
-      min-height: 26px;
-    }
-    #haven-desktop-footer .hdf-item {
-      display: flex; align-items: center; gap: 5px; white-space: nowrap;
-    }
-    #haven-desktop-footer .hdf-label {
-      text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; font-size: 10px;
-    }
-    #haven-desktop-footer .hdf-value {
-      color: var(--text-secondary, #bbb); font-family: var(--font-mono, monospace); font-size: 11px;
-    }
-    #haven-desktop-footer .hdf-divider {
-      width: 1px; height: 14px; background: var(--border, #333);
-    }
-    #haven-desktop-footer .hdf-spacer { flex: 1; }
-    #haven-desktop-footer .hdf-version { opacity: 0.5; font-size: 10px; }
-    #haven-desktop-footer .hdf-led {
-      width: 8px; height: 8px; border-radius: 50%; background: #4ade80; flex-shrink: 0;
-    }
-    #haven-desktop-footer .hdf-server-url { cursor: pointer; opacity: 0.6; transition: opacity 0.2s; font-size: 10px; }
-    #haven-desktop-footer .hdf-server-url:hover { opacity: 1; }
-    #haven-desktop-footer .hdf-server-url.hdf-hidden { letter-spacing: 2px; }
-    #haven-desktop-footer .hdf-url-toggle {
-      cursor: pointer; opacity: 0.4; transition: opacity 0.2s; font-size: 11px;
-      background: none; border: none; color: inherit; padding: 0 4px; line-height: 1;
-    }
-    #haven-desktop-footer .hdf-url-toggle:hover { opacity: 1; }
-
-    /* Switch Server button on login page — fixed above the desktop footer */
+    /* Switch Server button on login page — fixed above the status bar */
     #haven-switch-server-btn {
       position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
       z-index: 9998; padding: 8px 24px;
@@ -196,31 +151,8 @@ window.addEventListener('DOMContentLoaded', () => {
       font-size: 9px; color: var(--accent, #6b4fdb); text-transform: uppercase;
       letter-spacing: 0.5px; font-weight: 600;
     }
-
-    /* Push the rest of the page up so it's not hidden behind the fixed footer */
-    #app { padding-bottom: 26px !important; }
   `;
   document.head.appendChild(css);
-
-  // Build the footer bar
-  const bar = document.createElement('div');
-  bar.id = 'haven-desktop-footer';
-  bar.innerHTML = `
-    <div class="hdf-item"><span class="hdf-led" id="hdf-led"></span><span class="hdf-label">Server</span><span class="hdf-value" id="hdf-server">Connected</span></div>
-    <div class="hdf-divider"></div>
-    <div class="hdf-item"><span class="hdf-label">Ping</span><span class="hdf-value" id="hdf-ping">--</span><span class="hdf-label">ms</span></div>
-    <div class="hdf-divider"></div>
-    <div class="hdf-item"><span class="hdf-label">Channel</span><span class="hdf-value" id="hdf-channel">None</span></div>
-    <div class="hdf-divider"></div>
-    <div class="hdf-item"><span class="hdf-label">Online</span><span class="hdf-value" id="hdf-online">0</span></div>
-    <span class="hdf-spacer"></span>
-    <div class="hdf-item"><span class="hdf-value" id="hdf-clock"></span></div>
-    <div class="hdf-divider"></div>
-    <div class="hdf-item"><span class="hdf-value hdf-version" id="hdf-version"></span></div>
-    <div class="hdf-divider"></div>
-    <div class="hdf-item"><span class="hdf-value hdf-server-url" id="hdf-server-url" title="Click to copy server address"></span><button class="hdf-url-toggle" id="hdf-url-toggle" title="Show/hide server address">👁</button></div>
-  `;
-  document.body.appendChild(bar);
 
   function _normalizeDesktopServerUrl(input = window.location.href) {
     let value = String(input || '').trim();
@@ -240,53 +172,8 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ── Server URL in footer (copyable on click, privacy toggle) ──
-  const hdfUrlEl = document.getElementById('hdf-server-url');
-  const hdfUrlToggle = document.getElementById('hdf-url-toggle');
-  const _serverUrl = _normalizeDesktopServerUrl();
-  let _urlVisible = localStorage.getItem('hdf-show-url') !== 'false';
-
-  function _applyUrlVisibility() {
-    if (_urlVisible) {
-      hdfUrlEl.textContent = _serverUrl;
-      hdfUrlEl.classList.remove('hdf-hidden');
-      hdfUrlToggle.textContent = '👁';
-      hdfUrlToggle.title = 'Hide server address';
-    } else {
-      hdfUrlEl.textContent = '••••••••';
-      hdfUrlEl.classList.add('hdf-hidden');
-      hdfUrlToggle.textContent = '👁‍🗨';
-      hdfUrlToggle.title = 'Show server address';
-    }
-  }
-
-  if (hdfUrlEl && hdfUrlToggle) {
-    _applyUrlVisibility();
-    hdfUrlToggle.addEventListener('click', () => {
-      _urlVisible = !_urlVisible;
-      localStorage.setItem('hdf-show-url', _urlVisible);
-      _applyUrlVisibility();
-    });
-    hdfUrlEl.addEventListener('click', () => {
-      if (!_urlVisible) return;
-      try {
-        require('electron').clipboard.writeText(_serverUrl);
-      } catch {
-        const ta = document.createElement('textarea');
-        ta.value = _serverUrl;
-        ta.style.cssText = 'position:fixed;left:-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-      }
-      const origText = hdfUrlEl.textContent;
-      hdfUrlEl.textContent = 'Copied!';
-      setTimeout(() => { hdfUrlEl.textContent = origText; }, 1500);
-    });
-  }
-
   // ── Update server name in history from public config ──
+  const _serverUrl = _normalizeDesktopServerUrl();
   fetch('/api/public-config').then(r => r.json()).then(d => {
     if (d.server_title) {
       ipcRenderer.invoke('server-history:update-name', _serverUrl, d.server_title);
@@ -451,29 +338,6 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Sync data from the original (hidden) status bar elements every 500ms
-  setInterval(() => {
-    const sync = (src, dst) => {
-      const s = document.getElementById(src);
-      const d = document.getElementById(dst);
-      if (s && d && d.textContent !== s.textContent) d.textContent = s.textContent;
-    };
-    sync('status-server-text', 'hdf-server');
-    sync('status-ping',        'hdf-ping');
-    sync('status-channel',     'hdf-channel');
-    sync('status-online-count','hdf-online');
-    sync('status-clock',       'hdf-clock');
-    sync('status-version',     'hdf-version');
-
-    // Sync the LED color
-    const srcLed = document.getElementById('status-server-led');
-    const dstLed = document.getElementById('hdf-led');
-    if (srcLed && dstLed) {
-      const cls = srcLed.className;
-      dstLed.style.background = cls.includes('danger') ? '#ef4444' : cls.includes('warn') ? '#f59e0b' : '#4ade80';
-      dstLed.style.animation = cls.includes('pulse') ? 'pulse 1.5s infinite' : 'none';
-    }
-  }, 500);
 });
 
 // ═══════════════════════════════════════════════════════════
