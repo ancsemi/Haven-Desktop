@@ -39,6 +39,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | **Host or Join** | Run your own Haven server from the app, or connect to someone else's. Auto-detects local servers. |
 | **One-Click Install** | NSIS installer (Windows) and AppImage / .deb (Linux). Download, run, done. |
 | **Minimize to Tray** | Stays running quietly in your system tray. |
+| **Rich Presence** | See what everyone is playing and listening to in the member list and on their profile. Games via **Steam**; music via **Last.fm** (which covers Spotify, Apple Music, YouTube Music, Navidrome and Plex in one connection), Spotify directly, or Haven's own player. Optional, hidden while you're Invisible, never saved to the database. |
 
 ---
 
@@ -156,7 +157,7 @@ PCM data arrives via IPC → `AudioWorkletNode` processes it → `MediaStreamDes
 
 ---
 
-## � Feedback & Bug Reports
+## 💬 Feedback & Bug Reports
 
 This is a **beta release** — your feedback directly shapes the app. If something doesn't work, looks wrong, or could be better:
 
