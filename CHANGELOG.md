@@ -1,5 +1,17 @@
 # Haven Desktop Changelog
 
+## v1.4.27
+
+### Fixed
+- **The two main fixes listed under v1.4.26 were not actually in the v1.4.26 build.** That release commit carried only the version bump and the changelog, so the code never shipped. Both are included for real in this build.
+- **First window maximize/resize could fake-disconnect voice while a stream was open.** Background server BrowserViews were created at 0x0 with autoResize width/height true. On the first maximize Electron applied the window delta to every auto-resizing view, so hidden badge-poller views ballooned and could stack over the active session. Bounds are now owned explicitly: only the active view is sized to the content area; background views stay pinned at 0x0 with autoResize off; maximize/unmaximize/fullscreen/resize all re-sync.
+- **Copy Image from the lightbox failed inside the desktop app** with a browser-style clipboard toast. Main-process clipboard write now focuses the window, accepts raw base64 (not only data URLs), uses clipboard.write image, and exposes clipboardWriteText as a fallback. Pairs with Haven renderer changes in app-media.js.
+
+### Added
+- clipboard write-text IPC plus window.havenDesktop.clipboardWriteText for gesture-free text clipboard writes from the renderer.
+
+---
+
 ## v1.4.26
 
 ### Fixed
