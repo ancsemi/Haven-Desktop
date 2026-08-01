@@ -746,6 +746,25 @@ function createAppWindow(serverUrl) {
     mainWindow.on('resize', saveBounds);
     mainWindow.on('move',   saveBounds);
 
+    // Keep BrowserView geometry coherent across maximize / restore / drag-
+    // resize. Background views used to have setAutoResize({width,height})
+    // while sitting at 0×0 — on the first maximize Electron applied the
+    // window delta to EVERY auto-resizing view, so hidden badge-poller
+    // views ballooned over the active one. That could surface a second
+    // renderer (or blank chrome) and scramble focus/voice state. We now
+    // pin background views at 0×0 with autoResize off, and only size the
+    // active view explicitly.
+    const syncViewBounds = () => {
+      try { syncAllServerViewBounds(); } catch (e) {
+        console.warn('[Haven Desktop] syncViewBounds failed:', e?.message || e);
+      }
+    };
+    mainWindow.on('resize', syncViewBounds);
+    mainWindow.on('maximize', syncViewBounds);
+    mainWindow.on('unmaximize', syncViewBounds);
+    mainWindow.on('enter-full-screen', syncViewBounds);
+    mainWindow.on('leave-full-screen', syncViewBounds);
+
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
       if (!app.isQuitting && store.get('minimizeToTray')) {
@@ -788,6 +807,40 @@ function createAppWindow(serverUrl) {
 
 // ── Multi-Server View Management ────────────────────────────
 
+/** Pin every non-active server view at 0×0 (no autoResize) and size the
+ *  active view to the window content area. Safe to call on every resize /
+ *  maximize — idempotent. */
+function syncAllServerViewBounds() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  let cw = 0, ch = 0;
+  try { [cw, ch] = mainWindow.getContentSize(); } catch { return; }
+  if (cw < 1 || ch < 1) return;
+
+  for (const [url, view] of serverViews) {
+    if (!view || !view.webContents || view.webContents.isDestroyed?.()) continue;
+    const isActive = url === activeServerUrl;
+    try {
+      // Always disable autoResize — we own bounds explicitly. Leaving it on
+      // for background views is what made them grow on first maximize.
+      view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
+    } catch {}
+    try {
+      if (isActive) {
+        // Don't expand over the splash while the active view is still loading
+        // its first paint — did-finish-load will expand it.
+        if (view.webContents.isLoading?.() && view.getBounds().width === 0) continue;
+        view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+      } else {
+        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
+    } catch {}
+  }
+  // Keep the active view on top after bound changes.
+  if (activeServerUrl && serverViews.has(activeServerUrl)) {
+    try { mainWindow.setTopBrowserView(serverViews.get(activeServerUrl)); } catch {}
+  }
+}
+
 function switchToServer(serverUrl) {
   const url = normalizeServerUrl(serverUrl);
   if (!mainWindow) return;
@@ -803,8 +856,10 @@ function switchToServer(serverUrl) {
   // Make sure the freshly-promoted view actually fills the window. Newly
   // created views start at 0×0 (so the splash stays visible during load),
   // and background-preloaded views never get expanded until you switch to
-  // them.
+  // them. Also re-pin every other view at 0×0 so a prior maximize can't
+  // leave a badge-poller view covering the active one.
   try {
+    syncAllServerViewBounds();
     const [cw, ch] = mainWindow.getContentSize();
     const b = view.getBounds();
     if (b.width !== cw || b.height !== ch) {
@@ -873,14 +928,22 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // staring at a blank dark rectangle for 30-40 s on cold-start
     // cross-tunnel handshakes. Background-preloaded views stay at 0×0
     // until the user actually switches to them (see switchToServer).
+    // Start hidden. Do NOT enable setAutoResize — on maximize Electron
+    // applies the window delta to every auto-resizing BrowserView, which
+    // made background (badge) views grow from 0×0 into real rectangles
+    // stacked under/over the active view. Bounds are owned by
+    // syncAllServerViewBounds() / switchToServer() instead.
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-    view.setAutoResize({ width: true, height: true });
+    try {
+      view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
+    } catch {}
     const _expandIfActive = () => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
       if (activeServerUrl !== url) return;
       try {
         const [cw, ch] = mainWindow.getContentSize();
         view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+        mainWindow.setTopBrowserView(view);
       } catch {}
     };
     // Safety net — even if the active server is unreachable, drop the splash
