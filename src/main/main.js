@@ -2318,17 +2318,61 @@ function registerIPC() {
   // and Chromium silently rejects the write with NotAllowedError.
   // Bypass it entirely by handing the image bytes to the main process
   // where Electron's `clipboard` module has no gesture restrictions.
-  // Accepts either a data: URL or a raw base64 PNG string.
-  ipcMain.handle('clipboard:write-image', async (_e, payload) => {
+  // Accepts either a data: URL or a raw base64 PNG/JPEG string.
+  ipcMain.handle('clipboard:write-image', async (e, payload) => {
     try {
       if (!payload || typeof payload !== 'string') {
         return { ok: false, reason: 'no-payload' };
       }
-      const img = payload.startsWith('data:')
-        ? nativeImage.createFromDataURL(payload)
-        : nativeImage.createFromBuffer(Buffer.from(payload, 'base64'));
-      if (img.isEmpty()) return { ok: false, reason: 'decoded-empty' };
-      clipboard.writeImage(img);
+      // Ensure the BrowserView has OS focus before writing. Some Windows
+      // clipboard brokers still gate writes on the focused HWND even from
+      // the main process when the renderer just dismissed a context menu.
+      try {
+        const wc = e && e.sender;
+        if (wc && !wc.isDestroyed()) {
+          if (typeof wc.focus === 'function') wc.focus();
+          const win = BrowserWindow.fromWebContents(wc) || mainWindow;
+          if (win && !win.isDestroyed()) win.focus();
+        } else if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.focus();
+        }
+      } catch { /* focus is best-effort */ }
+
+      let img;
+      if (payload.startsWith('data:')) {
+        img = nativeImage.createFromDataURL(payload);
+      } else {
+        // Strip optional whitespace/newlines that some encoders insert.
+        const b64 = payload.replace(/\s+/g, '');
+        img = nativeImage.createFromBuffer(Buffer.from(b64, 'base64'));
+      }
+      if (!img || img.isEmpty()) return { ok: false, reason: 'decoded-empty' };
+      // Prefer clipboard.write({ image }) — on Windows this also clears
+      // stale CF_HTML / CF_TEXT formats that can make Paste in some apps
+      // prefer an old text clip over the new image.
+      try {
+        clipboard.write({ image: img });
+      } catch {
+        clipboard.writeImage(img);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: String(err && err.message || err) };
+    }
+  });
+
+  // Text fallback used when image bytes can't be obtained. Same focus
+  // dance as write-image so it doesn't hit gesture locks.
+  ipcMain.handle('clipboard:write-text', async (e, text) => {
+    try {
+      if (typeof text !== 'string' || !text) return { ok: false, reason: 'no-text' };
+      try {
+        const wc = e && e.sender;
+        if (wc && !wc.isDestroyed() && typeof wc.focus === 'function') wc.focus();
+        const win = (wc && BrowserWindow.fromWebContents(wc)) || mainWindow;
+        if (win && !win.isDestroyed()) win.focus();
+      } catch { /* best-effort */ }
+      clipboard.writeText(text);
       return { ok: true };
     } catch (err) {
       return { ok: false, reason: String(err && err.message || err) };

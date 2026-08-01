@@ -1195,6 +1195,10 @@ window.havenDesktop = {
    *  Accepts a data: URL or raw base64. Returns { ok, reason }. */
   clipboardWriteImage: (payload) => ipcRenderer.invoke('clipboard:write-image', payload),
 
+  /** Write plain text to the OS clipboard via the main process.
+   *  Same gesture-bypass rationale as clipboardWriteImage. */
+  clipboardWriteText: (text) => ipcRenderer.invoke('clipboard:write-text', text),
+
   /** Access the Desktop-level server history (persists across all servers) */
   getServerHistory: () => ipcRenderer.invoke('server-history:get'),
   addServerHistory: (url, name) => ipcRenderer.invoke('server-history:add', url, name),
