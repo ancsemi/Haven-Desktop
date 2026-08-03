@@ -57,7 +57,15 @@ class ServerManager {
         const pkg = path.join(dir, 'package.json');
 
         if (fs.existsSync(sjs) && fs.existsSync(pkg)) {
-          const json = JSON.parse(fs.readFileSync(pkg, 'utf-8'));
+          // Haven's package.json is written with a UTF-8 BOM (the release
+          // step bumps it with PowerShell's Set-Content -Encoding utf8).
+          // require() strips a BOM automatically, but JSON.parse does not --
+          // it throws on the leading U+FEFF, and the catch below swallowed
+          // that, so every candidate silently failed and Haven Desktop
+          // reported "No Haven server detected" with the server sitting
+          // right next to it. Written as an escape, not a literal BOM, so
+          // this line survives any editor round-trip.
+          const json = JSON.parse(fs.readFileSync(pkg, 'utf-8').replace(/^\uFEFF/, ''));
           if (json.name === 'haven') {
             return { found: true, path: dir, version: json.version };
           }
