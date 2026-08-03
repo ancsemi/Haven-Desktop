@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.28
+
+### Fixed
+- **"No Haven server detected automatically" when the server was sitting right next to Haven Desktop.** The scan that looks for a local Haven install reads each candidate's `package.json` and checks the name inside it. Haven's `package.json` is saved with a UTF-8 byte order mark, which the reader used here does not tolerate, so the check threw and the folder was skipped without a word. That happened for every candidate, including the sibling folder it looks at first, so the Server Setup screen reported nothing found and offered to browse or start fresh. The marker is now stripped before the file is read.
+
+---
+
 ## v1.4.27
 
 ### Fixed
