@@ -77,8 +77,9 @@ if (store.get('unlimitFrameRate')) {
   app.commandLine.appendSwitch('disable-frame-rate-limit');
 }
 
-// ── Suppress Chrome Autofill CDP warnings (harmless but noisy on startup) ──
-app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
+// NOTE: there is exactly ONE --disable-features switch below. Chromium keeps
+// only the last occurrence of a switch, so appending it a second time
+// somewhere else silently throws away everything in the first one.
 
 // ── Suppress Chromium stderr noise (WGC ProcessFrame spam, GPU errors, etc.) ──
 // disable-logging shuts down Chromium's logging system across ALL subprocesses
@@ -111,7 +112,11 @@ app.commandLine.appendSwitch('image-decode-ct', '3');
 // Also disable IntensiveWakeUpThrottling (introduced in M87) which clamps
 // timers to 1Hz after the page is hidden for >5 minutes — catastrophic for
 // a long-running screen share if the OS ever flips the window to hidden.
-app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
+// AutofillServerCommunication is folded in here too: it suppresses the noisy
+// Chrome Autofill CDP warnings on startup, and used to be its own
+// appendSwitch('disable-features', ...) call further up, which this line was
+// quietly overwriting.
+app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
 // #5379 (follow-up) — the CalculateNativeWinOcclusion flag only stops
 // Chromium from *calculating* occlusion itself. Windows' own DWM still
 // signals occlusion when another window is snap-maximized over Haven, and
