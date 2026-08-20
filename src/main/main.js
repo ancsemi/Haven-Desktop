@@ -752,17 +752,24 @@ function createAppWindow(serverUrl) {
     mainWindow.on('move',   saveBounds);
 
     // Keep BrowserView geometry coherent across maximize / restore / drag-
-    // resize. Background views used to have setAutoResize({width,height})
-    // while sitting at 0×0 — on the first maximize Electron applied the
-    // window delta to EVERY auto-resizing view, so hidden badge-poller
-    // views ballooned over the active one. That could surface a second
-    // renderer (or blank chrome) and scramble focus/voice state. We now
-    // pin background views at 0×0 with autoResize off, and only size the
-    // active view explicitly.
+    // resize. Background views must remain at 0×0 with autoResize off; only
+    // the active view is allowed to follow native window resizes.
+    let syncViewBoundsTimer = null;
     const syncViewBounds = () => {
       try { syncAllServerViewBounds(); } catch (e) {
         console.warn('[Haven Desktop] syncViewBounds failed:', e?.message || e);
       }
+
+      // Mutter can emit the Wayland maximize/fullscreen state before Electron
+      // exposes the configured surface size. Reconcile once that transition
+      // has settled instead of leaving the view at its old (usually 1200×800)
+      // bounds.
+      clearTimeout(syncViewBoundsTimer);
+      syncViewBoundsTimer = setTimeout(() => {
+        try { syncAllServerViewBounds(); } catch (e) {
+          console.warn('[Haven Desktop] deferred syncViewBounds failed:', e?.message || e);
+        }
+      }, 100);
     };
     mainWindow.on('resize', syncViewBounds);
     mainWindow.on('maximize', syncViewBounds);
@@ -825,17 +832,21 @@ function syncAllServerViewBounds() {
     if (!view || !view.webContents || view.webContents.isDestroyed?.()) continue;
     const isActive = url === activeServerUrl;
     try {
-      // Always disable autoResize — we own bounds explicitly. Leaving it on
-      // for background views is what made them grow on first maximize.
-      view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
-    } catch {}
-    try {
       if (isActive) {
         // Don't expand over the splash while the active view is still loading
         // its first paint — did-finish-load will expand it.
-        if (view.webContents.isLoading?.() && view.getBounds().width === 0) continue;
+        if (view.webContents.isLoading?.() && view.getBounds().width === 0) {
+          view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
+          continue;
+        }
         view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+        // Native auto-resize follows Wayland configure events even when the
+        // corresponding BrowserWindow resize event reports stale dimensions.
+        view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
       } else {
+        // Auto-resizing a hidden 0×0 view makes it grow by the window delta and
+        // overlap the active server on maximize.
+        view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
         view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
       }
     } catch {}
@@ -872,6 +883,7 @@ function switchToServer(serverUrl) {
       // the per-view did-finish-load handler do it so the splash stays up.
       if (!view.webContents.isLoading()) {
         view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+        view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
       }
     }
   } catch {}
@@ -933,11 +945,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // staring at a blank dark rectangle for 30-40 s on cold-start
     // cross-tunnel handshakes. Background-preloaded views stay at 0×0
     // until the user actually switches to them (see switchToServer).
-    // Start hidden. Do NOT enable setAutoResize — on maximize Electron
-    // applies the window delta to every auto-resizing BrowserView, which
-    // made background (badge) views grow from 0×0 into real rectangles
-    // stacked under/over the active view. Bounds are owned by
-    // syncAllServerViewBounds() / switchToServer() instead.
+    // Start hidden. Auto-resize is enabled only after this becomes the loaded,
+    // active view; background badge views must stay pinned at 0×0.
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
     try {
       view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
@@ -948,6 +957,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       try {
         const [cw, ch] = mainWindow.getContentSize();
         view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+        view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
         mainWindow.setTopBrowserView(view);
       } catch {}
     };
