@@ -12,6 +12,7 @@ const net  = require('net');
 class ServerManager {
   constructor(store, opts = {}) {
     this.store         = store;
+    this._t            = opts.t || (key => key);
     this.serverProcess = null;
     this._running      = false;
     this._port         = null;
@@ -82,13 +83,17 @@ class ServerManager {
 
     const sjs = path.join(serverDir, 'server.js');
     if (!fs.existsSync(sjs)) {
-      return { success: false, error: 'server.js not found in the chosen directory.' };
+      return { success: false, errorKey: 'server.error.fileNotFound' };
     }
 
     // Kill any zombie server process holding port 3000 from a previous crash
     await this._killProcessOnPort(3000);
 
-    this._port = await this._findPort(3000);
+    try {
+      this._port = await this._findPort(3000);
+    } catch {
+      return { success: false, errorKey: 'server.error.noPort' };
+    }
 
     return new Promise(resolve => {
       const env = { ...process.env, PORT: String(this._port) };
@@ -168,11 +173,11 @@ class ServerManager {
           const now = Date.now();
           const COOLDOWN_MS = 5000;
           if (now - (this._lastRestart || 0) < COOLDOWN_MS) {
-            this._emitLog('[Haven Desktop] Server crashed repeatedly — not restarting to avoid loop.\n');
+            this._emitLog(this._t('server.log.crashLoop'));
             return;
           }
           this._lastRestart = now;
-          this._emitLog(`[Haven Desktop] Server exited with code ${code} — restarting in 2 s…\n`);
+          this._emitLog(this._t('server.log.restarting', { code }));
           setTimeout(() => {
             if (!this._intentionalStop) {
               this.startServer(serverDir).catch(() => {});
@@ -235,7 +240,7 @@ class ServerManager {
     for (let p = start; p < start + 100; p++) {
       if (await test(p)) return p;
     }
-    throw new Error('No available port found');
+    throw new Error('NO_AVAILABLE_PORT');
   }
 
   // ── Kill zombie processes on a port (Windows & Unix) ────

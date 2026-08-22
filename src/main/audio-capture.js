@@ -13,7 +13,8 @@
 const path = require('path');
 
 class AudioCaptureManager {
-  constructor() {
+  constructor(opts = {}) {
+    this._t        = opts.t || (key => key);
     this._addon    = null;
     this._capturing = false;
     this._callback  = null;
@@ -59,8 +60,84 @@ class AudioCaptureManager {
    */
   getAudioApplications() {
     if (!this._addon) return [];
-    try { return this._addon.getAudioApplications(); }
+    try {
+      return this._addon.getAudioApplications().map(app => ({
+        ...app,
+        name: app.name === 'Unknown' ? this._t('audio.unknownApplication') : app.name,
+        nameKey: app.name === 'Unknown' ? 'audio.unknownApplication' : undefined,
+      }));
+    }
     catch (e) { console.error('[AudioCapture] getAudioApplications:', e); return []; }
+  }
+
+  _localizeStatus(status) {
+    if (!status?.message) return status;
+    const rawMessage = status.message;
+    const exact = new Map([
+      ['OpenProcess failed for target PID — process may have exited or be protected', 'audio.status.openProcessFailed'],
+      ['WASAPI activation timed out (>12s)', 'audio.status.wasapiTimeout'],
+      ['capture stopped', 'audio.status.captureStopped'],
+      ['ActivateAudioInterfaceAsync returned failure (process loopback API may be unavailable)', 'audio.status.wasapiUnavailable'],
+      ['Process loopback denied (target may be a protected/UWP process)', 'audio.status.wasapiDenied'],
+      ['ActivateCompleted reported failure', 'audio.status.wasapiActivationFailed'],
+      ['IAudioClient::Initialize failed for both preferred and mix formats', 'audio.status.wasapiFormatFailed'],
+      ['Initialize failed and GetMixFormat returned no format', 'audio.status.wasapiNoFormat'],
+      ['GetService(IAudioCaptureClient) failed', 'audio.status.wasapiServiceFailed'],
+      ['IAudioClient::Start failed', 'audio.status.wasapiStartFailed'],
+      ['WASAPI process loopback active', 'audio.status.wasapiActive'],
+      ['GetNextPacketSize repeatedly failed — aborting capture', 'audio.status.wasapiPacketFailed'],
+      ['GetBuffer repeatedly failed — aborting capture', 'audio.status.wasapiBufferFailed'],
+      ['Exclude-mode capture is not supported on Linux (PulseAudio/PipeWire)', 'audio.status.linuxExcludeUnsupported'],
+      ['pulse capture stopped', 'audio.status.pulseStopped'],
+      ['pa_context_connect failed (PulseAudio/PipeWire daemon not reachable)', 'audio.status.pulseUnavailable'],
+      ['pa_context_get_sink_input_info_list returned NULL', 'audio.status.pulseEnumerationFailed'],
+      ['pulse capture active', 'audio.status.pulseActive'],
+    ]);
+
+    let messageKey = exact.get(rawMessage);
+    let messageValues = {};
+    if (!messageKey) {
+      const wasapiMatch = /^activating (EXCLUDE|INCLUDE)-mode process loopback for PID (\d+)$/.exec(rawMessage);
+      if (wasapiMatch) {
+        const modeKey = wasapiMatch[1] === 'EXCLUDE' ? 'audio.mode.exclude' : 'audio.mode.include';
+        messageKey = 'audio.status.activatingWasapi';
+        messageValues = {
+          mode: this._t(modeKey),
+          modeKey,
+          pid: wasapiMatch[2],
+        };
+      }
+
+      const pulseMatch = /^preparing pulse capture for PID (\d+)$/.exec(rawMessage);
+      if (!messageKey && pulseMatch) {
+        messageKey = 'audio.status.preparingPulse';
+        messageValues = { pid: pulseMatch[1] };
+      }
+
+      const inputMatch = /^No PulseAudio sink input found for PID (\d+) \(the app may have stopped producing audio\)$/.exec(rawMessage);
+      if (!messageKey && inputMatch) {
+        messageKey = 'audio.status.pulseInputMissing';
+        messageValues = { pid: inputMatch[1] };
+      }
+
+      const createMatch = /^pa_simple_new failed: (.+)$/.exec(rawMessage);
+      if (!messageKey && createMatch) {
+        messageKey = 'audio.status.pulseCreateFailed';
+        messageValues = { error: createMatch[1] };
+      }
+    }
+
+    if (messageKey) {
+      return {
+        ...status,
+        message: this._t(messageKey, messageValues),
+        messageKey,
+        messageValues,
+        rawMessage,
+      };
+    } else {
+      return status;
+    }
   }
 
   /**
@@ -77,7 +154,11 @@ class AudioCaptureManager {
    * @returns {boolean} true if synchronous activation succeeded
    */
   startCapture(pid, opts) {
-    if (!this._addon) throw new Error('Native audio capture addon not available');
+    if (!this._addon) {
+      const error = new Error(this._t('audio.error.addonUnavailable'));
+      error.messageKey = 'audio.error.addonUnavailable';
+      throw error;
+    }
 
     // Backwards-compatible: startCapture(pid, fn) → include-mode.
     if (typeof opts === 'function') {
@@ -86,7 +167,11 @@ class AudioCaptureManager {
     const mode    = (opts && opts.mode) === 'exclude' ? 'exclude' : 'include';
     const onData  = opts && opts.onData;
     const onStatus = opts && opts.onStatus;
-    if (typeof onData !== 'function') throw new Error('startCapture: onData callback required');
+    if (typeof onData !== 'function') {
+      const error = new Error(this._t('audio.error.callbackRequired'));
+      error.messageKey = 'audio.error.callbackRequired';
+      throw error;
+    }
 
     if (this._capturing) this.stopCapture();
 
@@ -102,10 +187,11 @@ class AudioCaptureManager {
       if (this._callback) this._callback(pcm);
     };
 
-    const statusWrap = (s) => {
+    const statusWrap = (nativeStatus) => {
+      const s = this._localizeStatus(nativeStatus);
       this._lastStatus = s;
       if (s && s.kind === 'failed') this._initFailed = true;
-      console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}) — ${s?.message}`);
+      console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}) — ${nativeStatus?.message}`);
       if (this._onStatus) {
         try { this._onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
       }
@@ -116,7 +202,7 @@ class AudioCaptureManager {
       if (!ok) {
         this._capturing = false;
         this._callback  = null;
-        const reason = this._lastStatus?.message || 'native startCapture returned false';
+        const reason = this._lastStatus?.message || this._t('audio.error.startReturnedFalse');
         console.warn(`[AudioCapture] start failed (mode=${mode}, pid=${pid}): ${reason}`);
         return false;
       }
