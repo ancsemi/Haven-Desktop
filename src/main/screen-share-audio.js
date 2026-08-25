@@ -11,6 +11,63 @@ function resolveAudioSelection(value, audioApps, capabilities) {
   return { type: 'none', app: null };
 }
 
+function shouldDropAudioPacket(capturedAt, now = Date.now(), maxAgeMs = 150) {
+  return !Number.isFinite(capturedAt) || now - capturedAt > maxAgeMs;
+}
+
+class BoundedPcmRing {
+  constructor(capacity) {
+    this._data = new Float32Array(capacity);
+    this._read = 0;
+    this._write = 0;
+    this._available = 0;
+  }
+
+  get available() {
+    return this._available;
+  }
+
+  push(samples) {
+    if (!samples?.length) return 0;
+    const capacity = this._data.length;
+    let dropped = Math.max(0, this._available + samples.length - capacity);
+
+    if (samples.length >= capacity) {
+      this._data.set(samples.subarray(samples.length - capacity));
+      this._read = 0;
+      this._write = 0;
+      this._available = capacity;
+      return dropped;
+    }
+
+    if (dropped) {
+      this._read = (this._read + dropped) % capacity;
+      this._available -= dropped;
+    }
+    for (let i = 0; i < samples.length; i++) {
+      this._data[this._write] = samples[i];
+      this._write = (this._write + 1) % capacity;
+    }
+    this._available += samples.length;
+    return dropped;
+  }
+
+  pull(output) {
+    if (this._available < output.length) {
+      output.fill(0);
+      this._read = this._write;
+      this._available = 0;
+      return false;
+    }
+    for (let i = 0; i < output.length; i++) {
+      output[i] = this._data[this._read];
+      this._read = (this._read + 1) % this._data.length;
+    }
+    this._available -= output.length;
+    return true;
+  }
+}
+
 function createAudioCaptureController(stopCapture) {
   let active = null;
 
@@ -56,4 +113,9 @@ function createAudioCaptureController(stopCapture) {
   };
 }
 
-module.exports = { createAudioCaptureController, resolveAudioSelection };
+module.exports = {
+  BoundedPcmRing,
+  createAudioCaptureController,
+  resolveAudioSelection,
+  shouldDropAudioPacket,
+};

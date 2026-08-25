@@ -13,11 +13,11 @@
 const path = require('path');
 
 class AudioCaptureManager {
-  constructor() {
-    this._addon    = null;
+  constructor(addon = null) {
+    this._addon    = addon;
     this._capturing = false;
-    this._callback  = null;
-    this._loadAddon();
+    this._generation = 0;
+    if (!this._addon) this._loadAddon();
   }
 
   // ── Load the compiled native module ─────────────────────
@@ -70,8 +70,8 @@ class AudioCaptureManager {
    * @param {'include'|'exclude'|'system'} [opts.mode='include']
    *                                   include: capture FROM this PID tree
    *                                   exclude: capture all system audio EXCEPT this PID tree
-   *                                   (Windows only — Linux returns failure for exclude)
-   * @param {function} opts.onData     Receives Float32Array PCM chunks (48 kHz mono)
+   *                                   (native on Windows and Linux)
+   * @param {function} opts.onData     Receives (Float32Array, capturedAtMs) PCM chunks
    * @param {function} [opts.onStatus] Receives {kind, message, code} status events.
    *                                   kinds: 'starting' | 'started' | 'failed' | 'stopped'
    * @returns {boolean} true if synchronous activation succeeded
@@ -93,24 +93,25 @@ class AudioCaptureManager {
 
     if (this._capturing) this.stopCapture();
 
-    this._callback   = onData;
-    this._onStatus   = onStatus || null;
+    const generation = ++this._generation;
     this._capturing  = true;
     this._lastDataAt = Date.now();
     this._initFailed = false;
     this._lastStatus = null;
 
-    const dataWrap = (pcm) => {
+    const dataWrap = (pcm, capturedAt) => {
+      if (!this._capturing || this._generation !== generation) return;
       this._lastDataAt = Date.now();
-      if (this._callback) this._callback(pcm);
+      onData(pcm, capturedAt);
     };
 
     const statusWrap = (s) => {
+      if (!this._capturing || this._generation !== generation) return;
       this._lastStatus = s;
       if (s && s.kind === 'failed') this._initFailed = true;
       console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}) — ${s?.message}`);
-      if (this._onStatus) {
-        try { this._onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
+      if (onStatus) {
+        try { onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
       }
     };
 
@@ -118,7 +119,6 @@ class AudioCaptureManager {
       const ok = this._addon.startCapture(pid, mode, dataWrap, statusWrap);
       if (!ok) {
         this._capturing = false;
-        this._callback  = null;
         const reason = this._lastStatus?.message || 'native startCapture returned false';
         console.warn(`[AudioCapture] start failed (mode=${mode}, pid=${pid}): ${reason}`);
         return false;
@@ -130,7 +130,8 @@ class AudioCaptureManager {
       // Bumped from 8s because some sources (paused games) take a while to
       // produce real audio; the native heartbeat keeps lastDataAt fresh.
       this._watchdog = setTimeout(() => {
-        if (this._capturing && Date.now() - this._lastDataAt > 11000) {
+        if (this._capturing && this._generation === generation &&
+            Date.now() - this._lastDataAt > 11000) {
           console.warn('[AudioCapture] No data received in 11s — stopping capture');
           this.stopCapture();
         }
@@ -139,7 +140,6 @@ class AudioCaptureManager {
       return true;
     } catch (e) {
       this._capturing = false;
-      this._callback  = null;
       throw e;
     }
   }
@@ -147,11 +147,11 @@ class AudioCaptureManager {
   /** Stop active capture. */
   stopCapture() {
     clearTimeout(this._watchdog);
+    this._generation++;
     if (this._addon && this._capturing) {
       try { this._addon.stopCapture(); } catch { /* */ }
     }
     this._capturing = false;
-    this._callback  = null;
   }
 
   /**

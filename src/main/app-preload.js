@@ -12,6 +12,7 @@
 // ═══════════════════════════════════════════════════════════
 
 const { ipcRenderer } = require('electron');
+const { BoundedPcmRing, shouldDropAudioPacket } = require('./screen-share-audio');
 
 // Mark the document as running inside the Electron shell.
 // This lets CSS override responsive breakpoints that would otherwise
@@ -448,6 +449,7 @@ let _activeShareId       = null;
 let _pendingShareId      = null;
 let _displayMediaPending = false;
 let _audioBufferQueue    = [];
+let _audioBufferedSamples = 0;
 let _audioPacketsReceived = 0;
 // ─── Global voice shortcut triggers ──────────────────────
 ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
@@ -514,6 +516,7 @@ ipcRenderer.on('audio:share-mode', (_event, modeInfo) => {
 });
 ipcRenderer.on('audio:capture-data', (_event, payload) => {
   if (!payload?.captureId || payload.captureId !== _activeAudioCaptureId) return;
+  if (shouldDropAudioPacket(payload.capturedAt)) return;
   const pcmData = payload.data;
   // Build a Float32Array from whatever Electron's IPC delivers.
   // The main process now sends a plain ArrayBuffer (guaranteed offset-0),
@@ -547,11 +550,16 @@ ipcRenderer.on('audio:capture-data', (_event, payload) => {
   }
 
   if (_audioWorkletNode) {
-    _audioWorkletNode.port.postMessage({ type: 'audio-data', samples });
+    _audioWorkletNode.port.postMessage({ type: 'audio-data', samples }, [samples.buffer]);
   } else if (window._havenAppAudioPush) {
     window._havenAppAudioPush(samples);
   } else {
-    _audioBufferQueue.push(samples);
+    const buffered = samples.length > 4800 ? samples.subarray(samples.length - 4800) : samples;
+    _audioBufferQueue.push(buffered);
+    _audioBufferedSamples += buffered.length;
+    while (_audioBufferedSamples > 4800 && _audioBufferQueue.length > 1) {
+      _audioBufferedSamples -= _audioBufferQueue.shift().length;
+    }
   }
   _audioPacketsReceived++;
 });
@@ -579,7 +587,7 @@ function getScreenPickerCopy() {
       windows: 'Janelas',
       audio: 'Áudio',
       noAudio: 'Sem áudio',
-      systemAudio: 'Todo o áudio do sistema',
+      systemAudio: 'Áudio do sistema sem o Haven',
       applicationAudio: 'Áudio de um aplicativo',
       noApplications: 'Nenhum aplicativo reproduzindo áudio',
       systemUnavailable: 'Áudio do sistema indisponível',
@@ -597,7 +605,7 @@ function getScreenPickerCopy() {
     windows: 'Windows',
     audio: 'Audio',
     noAudio: 'No audio',
-    systemAudio: 'All system audio',
+    systemAudio: 'System audio without Haven',
     applicationAudio: 'Audio from one application',
     noApplications: 'No applications are playing audio',
     systemUnavailable: 'System audio unavailable',
@@ -875,32 +883,26 @@ async function buildAudioPipeline() {
   _audioPacketsReceived = 0;
   _ipcDataCount = 0;
   _audioBufferQueue = [];
+  _audioBufferedSamples = 0;
 
   // Try AudioWorklet first, fall back to ScriptProcessorNode if it fails
   // (AudioWorklet blob URLs can fail in some Electron/BrowserView contexts)
   try {
-    _audioCtx = new AudioContext({ sampleRate: 48000 });
+    _audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     // Explicitly resume — BrowserView contexts may start suspended
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
 
     // Inline AudioWorklet processor (blob URL avoids CSP / file issues)
     const workletSrc = `
+      ${BoundedPcmRing.toString()}
       class AppAudioProcessor extends AudioWorkletProcessor {
         constructor() {
           super();
-          this._ring   = new Float32Array(96000);   // 2 s ring buffer
-          this._wPos   = 0;
-          this._rPos   = 0;
-          this._avail  = 0;
+          this._ring = new BoundedPcmRing(4800); // Never retain more than 100 ms.
 
           this.port.onmessage = (e) => {
             if (e.data.type !== 'audio-data') return;
-            const s = e.data.samples;
-            for (let i = 0; i < s.length; i++) {
-              this._ring[this._wPos] = s[i];
-              this._wPos = (this._wPos + 1) % this._ring.length;
-            }
-            this._avail = Math.min(this._avail + s.length, this._ring.length);
+            this._ring.push(e.data.samples);
           };
         }
 
@@ -910,13 +912,7 @@ async function buildAudioPipeline() {
           const buf = out[0];
           const len = buf.length;
 
-          if (this._avail < len) { buf.fill(0); return true; }
-
-          for (let i = 0; i < len; i++) {
-            buf[i] = this._ring[this._rPos];
-            this._rPos = (this._rPos + 1) % this._ring.length;
-          }
-          this._avail -= len;
+          this._ring.pull(buf);
 
           for (let ch = 1; ch < out.length; ch++) out[ch].set(buf);
           return true;
@@ -947,9 +943,10 @@ async function buildAudioPipeline() {
 
     // Flush any PCM that arrived before the pipeline was ready
     _audioBufferQueue.forEach(buf =>
-      _audioWorkletNode.port.postMessage({ type: 'audio-data', samples: buf })
+      _audioWorkletNode.port.postMessage({ type: 'audio-data', samples: buf }, [buf.buffer])
     );
     _audioBufferQueue = [];
+    _audioBufferedSamples = 0;
 
     // Expose track globally so our getDisplayMedia override can grab it
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
@@ -975,47 +972,34 @@ async function buildAudioPipeline() {
 
   // ── Fallback: ScriptProcessorNode (works in all Electron versions) ──
   try {
-    _audioCtx = new AudioContext({ sampleRate: 48000 });
+    _audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
 
-    const bufSize = 4096;
+    const bufSize = 1024;
     // Use 1 input channel (not 0).  A "generator" ScriptProcessor with
     // 0 inputs may not have its onaudioprocess callback pumped reliably
     // in Electron / BrowserView environments.  Connecting a live source
     // to the input guarantees Chromium's audio thread drives the node.
     const scriptNode = _audioCtx.createScriptProcessor(bufSize, 1, 2);
-    const ring   = new Float32Array(96000);
-    let   wPos   = 0;
-    let   rPos   = 0;
-    let   avail  = 0;
+    const ring = new BoundedPcmRing(4800);
     let   _spProcessCount = 0;
 
     // Store a push function that the IPC handler can call
     window._havenAppAudioPush = (samples) => {
-      for (let i = 0; i < samples.length; i++) {
-        ring[wPos] = samples[i];
-        wPos = (wPos + 1) % ring.length;
-      }
-      avail = Math.min(avail + samples.length, ring.length);
+      ring.push(samples);
     };
 
     scriptNode.onaudioprocess = (e) => {
       _spProcessCount++;
       const out = e.outputBuffer.getChannelData(0);
-      if (avail < out.length) { out.fill(0); } else {
-        for (let i = 0; i < out.length; i++) {
-          out[i] = ring[rPos];
-          rPos = (rPos + 1) % ring.length;
-        }
-        avail -= out.length;
-      }
+      ring.pull(out);
       // Copy mono to stereo
       const out1 = e.outputBuffer.getChannelData(1);
       out1.set(out);
       // Periodic diagnostic
       if (_spProcessCount === 1 || _spProcessCount % 200 === 0) {
         const peak = Math.max(...Array.from(out.slice(0, 128)).map(Math.abs));
-        console.log(`[Haven Desktop] ScriptProcessor process #${_spProcessCount}, avail=${avail}, peak=${peak.toFixed(4)}`);
+        console.log(`[Haven Desktop] ScriptProcessor process #${_spProcessCount}, avail=${ring.available}, peak=${peak.toFixed(4)}`);
       }
     };
 
@@ -1038,6 +1022,7 @@ async function buildAudioPipeline() {
     // Flush buffered PCM
     _audioBufferQueue.forEach(buf => window._havenAppAudioPush(buf));
     _audioBufferQueue = [];
+    _audioBufferedSamples = 0;
 
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
     window._havenAppAudioStream = _audioDestination.stream;
@@ -1078,6 +1063,7 @@ function teardownAudioPipeline(captureId = _activeAudioCaptureId) {
   _capturedAudioPid = null;
   _activeAudioCaptureId = null;
   _audioBufferQueue = [];
+  _audioBufferedSamples = 0;
   _audioPacketsReceived = 0;
   _ipcDataCount     = 0;
   window._havenAppAudioTrack  = null;
@@ -1143,7 +1129,7 @@ function installGetDisplayMediaOverride() {
       // application-capture failure stays silent instead of exposing all audio.
       if (capturedAudioPid) {
         const timeoutMs = 8000;
-        const stepMs    = 100;
+        const stepMs    = 20;
         const start     = Date.now();
         let lastLog     = 0;
         while ((Date.now() - start) < timeoutMs) {

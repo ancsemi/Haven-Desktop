@@ -1930,10 +1930,12 @@ function registerScreenShareHandler() {
       catch (err) { console.warn('[ScreenShare] audio app enumeration failed:', err.message); }
 
       const nativeAudioAvailable = audioCapture.isSupported();
+      const nativeSystemAudio = nativeAudioAvailable &&
+        (process.platform === 'win32' || process.platform === 'linux');
       const audioCapabilities = {
         application: nativeAudioAvailable,
-        systemNative: process.platform === 'linux' && nativeAudioAvailable,
-        system: process.platform === 'win32' || (process.platform === 'linux' && nativeAudioAvailable),
+        systemNative: nativeSystemAudio,
+        system: nativeSystemAudio,
       };
 
       const sourceData = sources.map(s => ({
@@ -2034,7 +2036,7 @@ function registerScreenShareHandler() {
           console.log(`[ScreenShare] starting native capture: mode=${mode} pid=${pid}`);
           ok = audioCapture.startCapture(pid, {
             mode,
-            onData: (pcmData) => {
+            onData: (pcmData, capturedAt) => {
               try {
                 if (!pcmData || !pcmData.buffer) return;
                 const ab = pcmData.buffer.slice(
@@ -2042,7 +2044,11 @@ function registerScreenShareHandler() {
                   pcmData.byteOffset + pcmData.byteLength
                 );
                 if (!audioCaptureController.isActive(requestId)) return;
-                safeSend(targetContents, 'audio:capture-data', { captureId: requestId, data: ab });
+                safeSend(targetContents, 'audio:capture-data', {
+                  captureId: requestId,
+                  capturedAt,
+                  data: ab,
+                });
               } catch (cbErr) {
                 console.warn('[ScreenShare] audio callback error:', cbErr.message);
               }
@@ -2050,11 +2056,12 @@ function registerScreenShareHandler() {
             onStatus: (s) => {
               if (!audioCaptureController.isActive(requestId)) return;
               safeSend(targetContents, 'audio:capture-status', { ...s, captureId: requestId });
+              const isSystemMode = mode === 'exclude' || mode === 'system';
               if (s.kind === 'started') {
                 safeSend(targetContents, 'audio:share-mode', {
                   captureId: requestId,
-                  requested: mode === 'system' ? 'system' : 'app',
-                  applied: mode === 'system' ? 'system-loopback' : 'app',
+                  requested: isSystemMode ? 'system' : 'app',
+                  applied: isSystemMode ? 'system-clean' : 'app',
                   detail,
                 });
               } else if (s.kind === 'failed') {
@@ -2062,7 +2069,7 @@ function registerScreenShareHandler() {
                 audioCaptureController.clear(requestId);
                 safeSend(targetContents, 'audio:share-mode', {
                   captureId: requestId,
-                  requested: mode === 'system' ? 'system' : 'app',
+                  requested: isSystemMode ? 'system' : 'app',
                   applied: 'none',
                   detail: s.message || null,
                 });
@@ -2115,16 +2122,12 @@ function registerScreenShareHandler() {
         }
       } else if (audioSelection.type === 'system') {
         requestedMode = 'system';
-        if (audioCapabilities.systemNative) {
-          const capture = startNative('system', 0);
-          if (capture.ok) {
-            useNativeAudio = true;
-            appliedMode = 'system-loopback';
-          } else {
-            appliedDetail = `system capture failed: ${capture.reason || 'unknown reason'}`;
-          }
+        const capture = startNative('exclude', process.pid);
+        if (capture.ok) {
+          useNativeAudio = true;
+          appliedMode = 'system-clean';
         } else {
-          appliedMode = 'system-loopback';
+          appliedDetail = `system capture failed: ${capture.reason || 'unknown reason'}`;
         }
       }
 
@@ -2137,11 +2140,9 @@ function registerScreenShareHandler() {
         });
       }
 
-      if (appliedMode === 'system-loopback' && !useNativeAudio) {
-        safeCallback({ video: selected, audio: 'loopback' });
-      } else {
-        safeCallback({ video: selected });
-      }
+      // Native audio is attached by the preload only after the isolated track
+      // is ready. Never request raw Electron loopback, which includes Haven.
+      safeCallback({ video: selected });
 
     } catch (err) {
       console.error('[ScreenShare] handler error:', err);

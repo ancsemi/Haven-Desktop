@@ -13,6 +13,8 @@
 #include "audio_capture.h"
 #include <memory>
 #include <cstring>
+#include <chrono>
+#include <vector>
 
 static std::unique_ptr<haven::IAudioCapture> g_capture;
 
@@ -49,6 +51,11 @@ static Napi::Value GetAudioApplications(const Napi::CallbackInfo& info) {
 // data to the JS thread via Napi::ThreadSafeFunction.
 static Napi::ThreadSafeFunction g_tsfn;
 static Napi::ThreadSafeFunction g_statusTsfn;
+
+struct PendingAudioChunk {
+    std::vector<float> samples;
+    int64_t capturedAtMs;
+};
 
 static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -95,9 +102,11 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
         return env.Undefined();
     }
 
-    g_tsfn = Napi::ThreadSafeFunction::New(env, jsCb, "HavenAudioCapture", 0, 1);
+    // At 10 ms per chunk, four pending calls cap native-to-JS backlog at
+    // roughly 40 ms. NonBlockingCall drops new chunks if JS falls behind.
+    g_tsfn = Napi::ThreadSafeFunction::New(env, jsCb, "HavenAudioCapture", 4, 1);
     if (haveStatusCb) {
-        g_statusTsfn = Napi::ThreadSafeFunction::New(env, jsStatusCb, "HavenAudioStatus", 0, 1);
+        g_statusTsfn = Napi::ThreadSafeFunction::New(env, jsStatusCb, "HavenAudioStatus", 8, 1);
     }
 
     haven::AudioDataCb nativeCb = [](const float* data, size_t count) {
@@ -105,20 +114,24 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
             return;
         }
 
-        float* copy = new float[count];
-        std::memcpy(copy, data, count * sizeof(float));
+        auto* chunk = new PendingAudioChunk();
+        chunk->samples.assign(data, data + count);
+        chunk->capturedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
 
-        napi_status status = g_tsfn.NonBlockingCall(copy, [count](Napi::Env env, Napi::Function fn, float* buf) {
+        napi_status status = g_tsfn.NonBlockingCall(chunk,
+            [](Napi::Env env, Napi::Function fn, PendingAudioChunk* pending) {
             // Use JS-owned backing memory to avoid external buffer lifetime issues.
+            const size_t count = pending->samples.size();
             Napi::ArrayBuffer ab = Napi::ArrayBuffer::New(env, count * sizeof(float));
-            std::memcpy(ab.Data(), buf, count * sizeof(float));
-            delete[] buf;
+            std::memcpy(ab.Data(), pending->samples.data(), count * sizeof(float));
             Napi::Float32Array f32 = Napi::Float32Array::New(env, count, ab, 0);
-            fn.Call({ f32 });
+            fn.Call({ f32, Napi::Number::New(env, static_cast<double>(pending->capturedAtMs)) });
+            delete pending;
         });
 
         if (status != napi_ok) {
-            delete[] copy;
+            delete chunk;
         }
     };
 
@@ -127,7 +140,7 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
         nativeStatusCb = [](const haven::CaptureStatus& s) {
             // Box on heap so we can ferry across threads.
             auto* boxed = new haven::CaptureStatus(s);
-            g_statusTsfn.NonBlockingCall(boxed,
+            const napi_status status = g_statusTsfn.NonBlockingCall(boxed,
                 [](Napi::Env env, Napi::Function fn, haven::CaptureStatus* st) {
                     Napi::Object obj = Napi::Object::New(env);
                     const char* k = "?";
@@ -143,6 +156,7 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
                     fn.Call({ obj });
                     delete st;
                 });
+            if (status != napi_ok) delete boxed;
         };
     }
 
