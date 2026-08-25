@@ -443,6 +443,10 @@ let _audioWorkletNode    = null;
 let _audioCtx            = null;
 let _audioDestination    = null;
 let _capturedAudioPid    = null;
+let _activeAudioCaptureId = null;
+let _activeShareId       = null;
+let _pendingShareId      = null;
+let _displayMediaPending = false;
 let _audioBufferQueue    = [];
 let _audioPacketsReceived = 0;
 // ─── Global voice shortcut triggers ──────────────────────
@@ -491,22 +495,26 @@ let _ipcDataCount = 0;
 // instead of always burning the full timeout.
 let _lastNativeStatus = null;
 ipcRenderer.on('audio:capture-status', (_event, status) => {
+  if (!status?.captureId || status.captureId !== _activeAudioCaptureId) return;
   _lastNativeStatus = status;
   const codeHex = '0x' + ((status?.code || 0) >>> 0).toString(16);
   console.log(`[Haven Desktop] native capture status: kind=${status?.kind} code=${codeHex} msg=${status?.message}`);
 });
 
 // Resolved share-audio mode reported by main once the picker handler decides
-// what audio path to use (per-app / system-clean / fallback / loopback / none).
+// what audio path to use (application / system / none).
 // Forwarded to the page so the webapp can show a small mode indicator.
 ipcRenderer.on('audio:share-mode', (_event, modeInfo) => {
+  if (modeInfo?.captureId && modeInfo.captureId !== _activeShareId) return;
   console.log('[Haven Desktop] share audio mode:', modeInfo);
   try {
     window.__havenShareAudioMode = modeInfo;
     window.dispatchEvent(new CustomEvent('haven:share-audio-mode', { detail: modeInfo }));
   } catch (e) { console.warn('[Haven Desktop] dispatch share-mode event failed:', e.message); }
 });
-ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
+ipcRenderer.on('audio:capture-data', (_event, payload) => {
+  if (!payload?.captureId || payload.captureId !== _activeAudioCaptureId) return;
+  const pcmData = payload.data;
   // Build a Float32Array from whatever Electron's IPC delivers.
   // The main process now sends a plain ArrayBuffer (guaranteed offset-0),
   // but we still handle typed-array arrivals defensively.
@@ -550,40 +558,93 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
 
 // ─── Listen for screen-picker request from main process ──
 ipcRenderer.on('screen:show-picker', (_event, data) => {
-  showScreenPicker(data?.sources || [], data?.audioApps || [], data?.requestId || null);
+  showScreenPicker(
+    data?.sources || [],
+    data?.audioApps || [],
+    data?.audioCapabilities || {},
+    data?.requestId || null
+  );
 });
 
 // ═══════════════════════════════════════════════════════════
 // Screen-Share Picker  (injected as a full-screen overlay)
 // ═══════════════════════════════════════════════════════════
 
-function showScreenPicker(sources, audioApps, requestId) {
-  // Remove stale picker
-  document.getElementById('haven-screen-picker')?.remove();
+function getScreenPickerCopy() {
+  const language = (document.documentElement?.lang || navigator.language || 'en').toLowerCase();
+  if (language.startsWith('pt')) {
+    return {
+      title: 'Compartilhar tela',
+      screens: 'Telas',
+      windows: 'Janelas',
+      audio: 'Áudio',
+      noAudio: 'Sem áudio',
+      systemAudio: 'Todo o áudio do sistema',
+      applicationAudio: 'Áudio de um aplicativo',
+      noApplications: 'Nenhum aplicativo reproduzindo áudio',
+      systemUnavailable: 'Áudio do sistema indisponível',
+      applicationUnavailable: 'Áudio de aplicativos indisponível',
+      silent: 'silencioso',
+      silentDescription: 'A captura começa quando o aplicativo reproduzir áudio.',
+      noPreview: 'Sem prévia',
+      cancel: 'Cancelar',
+      share: 'Compartilhar',
+    };
+  }
+  return {
+    title: 'Share screen',
+    screens: 'Screens',
+    windows: 'Windows',
+    audio: 'Audio',
+    noAudio: 'No audio',
+    systemAudio: 'All system audio',
+    applicationAudio: 'Audio from one application',
+    noApplications: 'No applications are playing audio',
+    systemUnavailable: 'System audio unavailable',
+    applicationUnavailable: 'Application audio unavailable',
+    silent: 'silent',
+    silentDescription: 'Capture starts when the application plays audio.',
+    noPreview: 'No preview',
+    cancel: 'Cancel',
+    share: 'Share',
+  };
+}
 
+function showScreenPicker(sources, audioApps, audioCapabilities, requestId) {
+  const stalePicker = document.getElementById('haven-screen-picker');
+  const staleRequestId = stalePicker?.dataset.requestId;
+  if (staleRequestId && staleRequestId !== requestId) {
+    ipcRenderer.send('screen:picker-result', { requestId: staleRequestId, cancelled: true });
+  }
+  stalePicker?.remove();
+
+  const copy = getScreenPickerCopy();
+  const canShareSystemAudio = audioCapabilities.system === true;
+  const canShareApplicationAudio = audioCapabilities.application === true;
   const overlay = document.createElement('div');
   overlay.id = 'haven-screen-picker';
+  overlay.dataset.requestId = requestId;
   overlay.innerHTML = `
     <style>
       #haven-screen-picker {
         position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:999999;
-        display:flex;align-items:center;justify-content:center;
+        display:flex;align-items:center;justify-content:center;padding:18px;box-sizing:border-box;
         font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
       }
-      .hsp-box{background:#1a1a2e;border-radius:14px;padding:28px;max-width:820px;width:92%;
-        max-height:82vh;display:flex;flex-direction:column;border:1px solid rgba(107,79,219,.3);
+      .hsp-box{background:#1a1a2e;border-radius:14px;padding:24px;max-width:900px;width:100%;
+        max-height:calc(100vh - 36px);box-sizing:border-box;display:flex;flex-direction:column;
+        border:1px solid rgba(107,79,219,.3);
         box-shadow:0 20px 60px rgba(0,0,0,.5);}
-      .hsp-title{color:#e0e0e0;font-size:20px;font-weight:700;margin-bottom:2px;flex-shrink:0}
-      .hsp-sub{color:#888;font-size:13px;margin-bottom:14px;flex-shrink:0}
-      .hsp-scroll{flex:1;overflow-y:auto;padding-right:4px;margin-right:-4px;min-height:0}
-      .hsp-sec{margin-bottom:14px}
+      .hsp-title{color:#f1f1f5;font-size:20px;font-weight:700;margin-bottom:18px;flex-shrink:0}
+      .hsp-scroll{flex:1;overflow-y:auto;padding-right:6px;margin-right:-6px;min-height:0}
+      .hsp-sec{margin-bottom:18px}
       .hsp-sec-title{color:#aaa;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;
         margin-bottom:8px;font-weight:700}
       .hsp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}
-      .hsp-src{background:#16213e;border-radius:8px;padding:8px;cursor:pointer;
-        border:2px solid transparent;transition:border-color .2s,transform .15s}
+      .hsp-src{appearance:none;background:#16213e;border-radius:8px;padding:8px;cursor:pointer;
+        border:2px solid transparent;transition:border-color .2s,transform .15s;font:inherit;text-align:inherit}
       .hsp-src:hover{border-color:rgba(107,79,219,.5);transform:translateY(-1px)}
-      .hsp-src.sel{border-color:#6b4fdb}
+      .hsp-src.sel,.hsp-src:focus-visible{border-color:#8069e8;outline:none}
       .hsp-src img{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
         object-fit:cover;background:#0d0d1a}
       .hsp-src .hsp-thumb-ph{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
@@ -591,123 +652,166 @@ function showScreenPicker(sources, audioApps, requestId) {
         justify-content:center;color:#777;font-size:11px;letter-spacing:.3px}
       .hsp-src-name{color:#ccc;font-size:12px;text-align:center;white-space:nowrap;
         overflow:hidden;text-overflow:ellipsis}
-      .hsp-audio{padding-top:14px;border-top:1px solid #2a2a4a;flex-shrink:0;margin-top:10px}
+      .hsp-audio{padding-top:18px;border-top:1px solid #2a2a4a}
+      .hsp-app-title{color:#888;font-size:12px;margin:14px 0 8px}
       .hsp-apps{display:flex;flex-wrap:wrap;gap:8px}
-      .hsp-app{background:#16213e;border-radius:6px;padding:8px 14px;cursor:pointer;
+      .hsp-app{appearance:none;background:#16213e;border-radius:7px;padding:9px 14px;cursor:pointer;
         border:2px solid transparent;transition:border-color .2s;display:flex;
-        align-items:center;gap:8px;color:#ccc;font-size:13px}
+        align-items:center;gap:8px;color:#ccc;font:inherit;font-size:13px;text-align:left}
       .hsp-app:hover{border-color:rgba(107,79,219,.5)}
-      .hsp-app.sel{border-color:#6b4fdb}
+      .hsp-app.sel,.hsp-app:focus-visible{border-color:#8069e8;outline:none}
       .hsp-app .ico{width:20px;height:20px}
+      .hsp-empty{color:#777;font-size:12px;padding:4px 0}
       .hsp-btns{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-shrink:0}
       .hsp-btn{padding:8px 22px;border-radius:6px;border:none;font-size:14px;cursor:pointer;font-weight:600}
       .hsp-cancel{background:#333;color:#ccc}.hsp-cancel:hover{background:#444}
       .hsp-share{background:#6b4fdb;color:#fff}.hsp-share:hover{background:#7b5fe9}
       .hsp-share:disabled{opacity:.45;cursor:not-allowed}
-      .hsp-none{color:#666;font-size:12px;font-style:italic;padding:8px}
+      @media (max-width:600px){
+        #haven-screen-picker{padding:10px}.hsp-box{padding:18px;max-height:calc(100vh - 20px)}
+        .hsp-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hsp-btn{flex:1}
+      }
     </style>
 
-    <div class="hsp-box">
-      <div class="hsp-title">Share Your Screen</div>
-      <div class="hsp-sub">Choose a window or screen — then optionally pick an application whose audio to share.</div>
+    <div class="hsp-box" role="dialog" aria-modal="true" aria-labelledby="hsp-title">
+      <div class="hsp-title" id="hsp-title">${copy.title}</div>
 
       <div class="hsp-scroll">
-        <div class="hsp-sec">
-          <div class="hsp-sec-title">Screens</div>
+        <div class="hsp-sec" id="hsp-screens-section">
+          <div class="hsp-sec-title">${copy.screens}</div>
           <div class="hsp-grid" id="hsp-screens"></div>
         </div>
 
-        <div class="hsp-sec">
-          <div class="hsp-sec-title">Application Windows</div>
+        <div class="hsp-sec" id="hsp-windows-section">
+          <div class="hsp-sec-title">${copy.windows}</div>
           <div class="hsp-grid" id="hsp-windows"></div>
+        </div>
+
+        <div class="hsp-audio">
+          <div class="hsp-sec-title">${copy.audio}</div>
+          <div class="hsp-apps" id="hsp-audio-modes"></div>
+          <div class="hsp-app-title">${copy.applicationAudio}</div>
+          <div class="hsp-apps" id="hsp-audio-apps"></div>
         </div>
       </div>
 
-      <div class="hsp-audio">
-        <div class="hsp-sec-title">🔊 Application Audio — isolate audio from a specific app</div>
-        <div class="hsp-apps" id="hsp-audio-apps"></div>
-      </div>
-
       <div class="hsp-btns">
-        <button class="hsp-btn hsp-cancel" id="hsp-cancel">Cancel</button>
-        <button class="hsp-btn hsp-share"  id="hsp-go" disabled>Share</button>
+        <button class="hsp-btn hsp-cancel" id="hsp-cancel" type="button">${copy.cancel}</button>
+        <button class="hsp-btn hsp-share" id="hsp-go" type="button" disabled>${copy.share}</button>
       </div>
     </div>`;
 
   document.body.appendChild(overlay);
 
   let selSource = null;
-  let selAudioPid = null;
+  let selAudioPid = 'none';
 
   const screensEl  = document.getElementById('hsp-screens');
   const windowsEl  = document.getElementById('hsp-windows');
+  const modesEl    = document.getElementById('hsp-audio-modes');
   const appsEl     = document.getElementById('hsp-audio-apps');
   const goBtn      = document.getElementById('hsp-go');
 
   // ── Populate video sources ─────────────────────────────
   sources.forEach(src => {
-    const el = document.createElement('div');
+    const el = document.createElement('button');
+    el.type = 'button';
     el.className = 'hsp-src';
-    const preview = src.thumbnail
-      ? `<img src="${src.thumbnail}" alt="">`
-      : `<div class="hsp-thumb-ph">No preview</div>`;
-    el.innerHTML = `${preview}<div class="hsp-src-name" title="${src.name}">${src.name}</div>`;
+    el.setAttribute('aria-pressed', 'false');
+    if (src.thumbnail) {
+      const preview = document.createElement('img');
+      preview.src = src.thumbnail;
+      preview.alt = '';
+      el.appendChild(preview);
+    } else {
+      const preview = document.createElement('div');
+      preview.className = 'hsp-thumb-ph';
+      preview.textContent = copy.noPreview;
+      el.appendChild(preview);
+    }
+    const sourceName = document.createElement('div');
+    sourceName.className = 'hsp-src-name';
+    sourceName.title = src.name;
+    sourceName.textContent = src.name;
+    el.appendChild(sourceName);
     el.onclick = () => {
-      overlay.querySelectorAll('.hsp-src.sel').forEach(s => s.classList.remove('sel'));
+      overlay.querySelectorAll('.hsp-src.sel').forEach(source => {
+        source.classList.remove('sel');
+        source.setAttribute('aria-pressed', 'false');
+      });
       el.classList.add('sel');
+      el.setAttribute('aria-pressed', 'true');
       selSource = src.id;
       goBtn.disabled = false;
     };
     (src.id.startsWith('screen:') ? screensEl : windowsEl).appendChild(el);
   });
+  if (!screensEl.children.length) document.getElementById('hsp-screens-section').hidden = true;
+  if (!windowsEl.children.length) document.getElementById('hsp-windows-section').hidden = true;
 
-  // ── Populate audio applications ────────────────────────
-  // "No Audio" option — always shown first
-  const muteEl = document.createElement('div');
-  muteEl.className = 'hsp-app';
-  muteEl.innerHTML = '🔇&nbsp; No Audio';
-  muteEl.onclick = () => {
-    appsEl.querySelectorAll('.sel').forEach(a => a.classList.remove('sel'));
-    muteEl.classList.add('sel');
-    selAudioPid = 'none';
+  const selectAudio = (element, value) => {
+    overlay.querySelectorAll('.hsp-app.sel').forEach(option => {
+      option.classList.remove('sel');
+      option.setAttribute('aria-pressed', 'false');
+    });
+    element.classList.add('sel');
+    element.setAttribute('aria-pressed', 'true');
+    selAudioPid = value;
   };
-  appsEl.appendChild(muteEl);
 
-  // "System Audio (no Haven voice)" — selected by default. On Windows we
-  // capture system audio via WASAPI exclude-mode so Haven's own voice output
-  // is filtered out. On Linux we fall back to Electron loopback (still
-  // includes Haven voice; can't be helped without OS-level support yet).
-  const sysEl = document.createElement('div');
-  sysEl.className = 'hsp-app sel';
-  sysEl.innerHTML = '🔊&nbsp; System Audio';
-  selAudioPid = 'system';
-  sysEl.onclick = () => {
-    appsEl.querySelectorAll('.sel').forEach(a => a.classList.remove('sel'));
-    sysEl.classList.add('sel');
-    selAudioPid = 'system';
+  const createAudioOption = (label, icon, value, selected = false) => {
+    const element = document.createElement('button');
+    element.type = 'button';
+    element.className = `hsp-app${selected ? ' sel' : ''}`;
+    element.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    element.appendChild(document.createTextNode(`${icon} ${label}`));
+    element.onclick = () => selectAudio(element, value);
+    return element;
   };
-  appsEl.appendChild(sysEl);
 
-  // Per-app entries when native module is available. Inactive sessions
-  // (paused YouTube tabs, idle games) are shown but visually dimmed.
-  if (audioApps && audioApps.length) {
+  modesEl.appendChild(createAudioOption(copy.noAudio, '🔇', 'none', true));
+  if (canShareSystemAudio) {
+    modesEl.appendChild(createAudioOption(copy.systemAudio, '🔊', 'system'));
+  } else {
+    const unavailable = document.createElement('div');
+    unavailable.className = 'hsp-empty';
+    unavailable.textContent = copy.systemUnavailable;
+    modesEl.appendChild(unavailable);
+  }
+
+  if (canShareApplicationAudio && audioApps.length) {
     audioApps.forEach(a => {
-      const el = document.createElement('div');
+      const el = document.createElement('button');
+      el.type = 'button';
       el.className = 'hsp-app';
+      el.setAttribute('aria-pressed', 'false');
       if (a.active === false) el.style.opacity = '0.55';
-      const icon = a.icon ? `<img class="ico" src="${a.icon}" alt="">` : '🔊';
-      const dim  = a.active === false ? ' <span style="color:#888;font-size:11px">(silent)</span>' : '';
-      el.innerHTML = `${icon}<span>${a.name}${dim}</span>`;
+      if (a.icon) {
+        const icon = document.createElement('img');
+        icon.className = 'ico';
+        icon.src = a.icon;
+        icon.alt = '';
+        el.appendChild(icon);
+      } else {
+        el.appendChild(document.createTextNode('🔊'));
+      }
+      const name = document.createElement('span');
+      name.textContent = a.name;
+      if (a.active === false) name.appendChild(document.createTextNode(` (${copy.silent})`));
+      el.appendChild(name);
       el.title = a.active === false
-        ? 'This app is currently silent. Capture will start as soon as it produces audio.'
+        ? copy.silentDescription
         : a.name;
-      el.onclick = () => {
-        appsEl.querySelectorAll('.sel').forEach(x => x.classList.remove('sel'));
-        el.classList.add('sel');
-        selAudioPid = a.pid;
-      };
+      el.onclick = () => selectAudio(el, a.pid);
       appsEl.appendChild(el);
     });
+  } else {
+    const empty = document.createElement('div');
+    empty.className = 'hsp-empty';
+    empty.textContent = canShareApplicationAudio
+      ? copy.noApplications
+      : copy.applicationUnavailable;
+    appsEl.appendChild(empty);
   }
 
   // ── Cancel ─────────────────────────────────────────────
@@ -722,24 +826,26 @@ function showScreenPicker(sources, audioApps, requestId) {
     try { document.body?.focus(); window.focus(); } catch {}
 
     let effectiveAudioPid = selAudioPid;
-    // Native pipeline applies to per-app PIDs AND to 'system' (which uses
-    // WASAPI exclude-mode in main to strip Haven's voice from the share).
-    const wantsNativePipeline = !cancelled && selAudioPid &&
-                                selAudioPid !== 'none';
-    if (wantsNativePipeline) {
+    if (!cancelled) {
+      teardownAudioPipeline(_activeAudioCaptureId);
+      _activeShareId = requestId;
+    }
+
+    const wantsNativePipeline = (Number.isSafeInteger(selAudioPid) && selAudioPid > 0)
+      || (selAudioPid === 'system' && audioCapabilities.systemNative === true);
+    if (!cancelled && wantsNativePipeline) {
+      _activeAudioCaptureId = requestId;
       _capturedAudioPid = selAudioPid;
       console.log(`[Haven Desktop] Picker dismissed: building native audio pipeline for ${selAudioPid}`);
       const pipelineOk = await buildAudioPipeline();
       if (!pipelineOk) {
-        console.warn('[Haven Desktop] Local audio pipeline failed to build — main will fall back to Electron loopback for system audio, or silence for per-app');
-        _capturedAudioPid = null;
-        // For per-app picks, leave effectiveAudioPid alone — main will see
-        // the request and try to start native capture; if that ALSO fails
-        // it stays silent. For 'system' picks, leave it as 'system' too —
-        // main will try exclude-mode and last-ditch fall back to loopback.
+        console.warn('[Haven Desktop] Local audio pipeline failed to build; continuing without audio');
+        teardownAudioPipeline(requestId);
+        effectiveAudioPid = 'none';
       }
     }
 
+    _pendingShareId = requestId;
     ipcRenderer.send('screen:picker-result', cancelled
       ? { requestId, cancelled: true }
       : { requestId, sourceId: selSource, audioAppPid: effectiveAudioPid });
@@ -956,9 +1062,10 @@ async function buildAudioPipeline() {
   }
 }
 
-function teardownAudioPipeline() {
+function teardownAudioPipeline(captureId = _activeAudioCaptureId) {
+  if (captureId && captureId !== _activeAudioCaptureId) return;
   // Stop native capture first so IPC messages stop arriving
-  ipcRenderer.invoke('audio:stop-capture').catch(() => {});
+  if (captureId) ipcRenderer.invoke('audio:stop-capture', { captureId }).catch(() => {});
   if (window._havenAudioCtxMonitor) {
     clearInterval(window._havenAudioCtxMonitor);
     window._havenAudioCtxMonitor = null;
@@ -969,6 +1076,7 @@ function teardownAudioPipeline() {
   _audioCtx         = null;
   _audioDestination = null;
   _capturedAudioPid = null;
+  _activeAudioCaptureId = null;
   _audioBufferQueue = [];
   _audioPacketsReceived = 0;
   _ipcDataCount     = 0;
@@ -1001,80 +1109,96 @@ function installGetDisplayMediaOverride() {
   const _origGDM = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
 
   navigator.mediaDevices.getDisplayMedia = async function (constraints) {
+    if (_displayMediaPending) {
+      throw new DOMException('A screen-share request is already open.', 'InvalidStateError');
+    }
+    _displayMediaPending = true;
+
     // Reset native status before each share so a stale "failed" from a
     // prior session doesn't poison the next attempt.
     _lastNativeStatus = null;
 
-    const stream = await _origGDM(constraints);
-    const audioTracksFromElectron = stream.getAudioTracks().length;
-    console.log(`[Haven Desktop] getDisplayMedia resolved (capturedAudioPid=${_capturedAudioPid}, electron-audio-tracks=${audioTracksFromElectron}, per-app track ready=${!!window._havenAppAudioTrack})`);
-
-    // If a native capture was requested (per-app PID OR 'system' exclude-mode),
-    // wait for the first PCM packet to land.  IF AND ONLY IF native PCM
-    // arrives, we strip Electron's loopback track and substitute the per-app
-    // PCM track.  If PCM never arrives we leave Electron's loopback track in
-    // place so the share has *some* audio \u2014 silent shares are the worse UX
-    // (per user feedback after the per-app overhaul: many Windows installs
-    // hit ActivateAudioInterfaceAsync E_INVALIDARG / E_NOT_IMPLEMENTED on
-    // the WASAPI Process Loopback API, leaving every share dead-silent).
-    if (_capturedAudioPid) {
-      const timeoutMs = 8000;
-      const stepMs    = 100;
-      const start     = Date.now();
-      let lastLog     = 0;
-      while ((Date.now() - start) < timeoutMs) {
-        if (_audioPacketsReceived > 0) break;
-        // Abort early on hard failure from native side.
-        if (_lastNativeStatus && _lastNativeStatus.kind === 'failed') {
-          console.warn(`[Haven Desktop] native capture reported FAILED during readiness wait — keeping Electron loopback so share isn't silent`);
-          break;
-        }
-        if (Date.now() - lastLog > 1000) {
-          lastLog = Date.now();
-          console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
-        }
-        await new Promise(resolve => setTimeout(resolve, stepMs));
+    let stream;
+    try {
+      stream = await _origGDM(constraints);
+    } catch (error) {
+      const failedShareId = _pendingShareId;
+      _pendingShareId = null;
+      if (failedShareId && _activeShareId === failedShareId) {
+        teardownAudioPipeline(failedShareId);
+        _activeShareId = null;
       }
-
-      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {
-        // Native pipeline succeeded — NOW it's safe to drop Electron's
-        // loopback and substitute the clean per-app / exclude-mode track.
-        stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
-        stream.addTrack(window._havenAppAudioTrack);
-        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
-      } else {
-        // Native capture failed.  KEEP Electron's loopback track so the
-        // share is audible.  Yes, this can include Haven's own voice
-        // output (echo risk) but silence is worse — the share-audio-mode
-        // badge / toast will already warn the user.
-        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
-        console.warn('  capturedAudioPid:', _capturedAudioPid);
-        console.warn('  packetsReceived:', _audioPacketsReceived);
-        console.warn('  ipcDataCount:', _ipcDataCount);
-        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
-        console.warn('  audioCtx state:', _audioCtx?.state);
-        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
-        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
-        console.warn('  lastNativeStatus:', _lastNativeStatus);
-        console.warn("  Falling back to Electron loopback audio so share isn't silent (Haven voice loop possible).");
-      }
-    } else if (window._havenAppAudioTrack) {
-      // Defensive: a per-app track exists but no _capturedAudioPid was set.
-      // Prefer per-app over loopback to be safe.
-      stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
-      stream.addTrack(window._havenAppAudioTrack);
-      console.log('[Haven Desktop] Added pre-existing per-app audio track to share (defensive)');
-    } else {
-      // No native capture requested. Whatever Electron returned (loopback or
-      // nothing) is what we use. If audio was requested via constraints but
-      // not delivered, that's an Electron-level issue, not ours.
-      console.log(`[Haven Desktop] no native capture requested; using Electron-provided audio (${audioTracksFromElectron} track(s))`);
+      _displayMediaPending = false;
+      throw error;
     }
+    try {
+      const shareId = _pendingShareId || _activeShareId;
+      _pendingShareId = null;
+      const captureId = shareId === _activeAudioCaptureId ? shareId : null;
+      const capturedAudioPid = captureId ? _capturedAudioPid : null;
+      const audioTracksFromElectron = stream.getAudioTracks().length;
+      console.log(`[Haven Desktop] getDisplayMedia resolved (capturedAudioPid=${capturedAudioPid}, electron-audio-tracks=${audioTracksFromElectron}, per-app track ready=${!!window._havenAppAudioTrack})`);
 
-    // Auto-teardown when the video track ends (user stops sharing)
-    stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => teardownAudioPipeline()));
+      // Native capture is strict: wait for PCM and add only that track. An
+      // application-capture failure stays silent instead of exposing all audio.
+      if (capturedAudioPid) {
+        const timeoutMs = 8000;
+        const stepMs    = 100;
+        const start     = Date.now();
+        let lastLog     = 0;
+        while ((Date.now() - start) < timeoutMs) {
+          if (_activeAudioCaptureId !== captureId) break;
+          if (_audioPacketsReceived > 0) break;
+          if (_lastNativeStatus && _lastNativeStatus.kind === 'failed') {
+            console.warn('[Haven Desktop] native capture reported FAILED during readiness wait');
+            break;
+          }
+          if (Date.now() - lastLog > 1000) {
+            lastLog = Date.now();
+            console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
+          }
+          await new Promise(resolve => setTimeout(resolve, stepMs));
+        }
 
-    return stream;
+        if (_activeAudioCaptureId === captureId &&
+            _audioPacketsReceived > 0 && window._havenAppAudioTrack) {
+          // Remove any unexpected Electron track before attaching native audio.
+          stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+          stream.addTrack(window._havenAppAudioTrack);
+          console.log(`[Haven Desktop] native audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
+        } else {
+          console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
+          console.warn('  capturedAudioPid:', capturedAudioPid);
+          console.warn('  packetsReceived:', _audioPacketsReceived);
+          console.warn('  ipcDataCount:', _ipcDataCount);
+          console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
+          console.warn('  audioCtx state:', _audioCtx?.state);
+          console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
+          console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
+          console.warn('  lastNativeStatus:', _lastNativeStatus);
+          console.warn('  Continuing without audio to prevent a Haven voice loop.');
+          stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+          teardownAudioPipeline(captureId);
+        }
+      } else if (window._havenAppAudioTrack && !_activeAudioCaptureId) {
+        // A track without an active selection is stale and must never leak into
+        // a later "no audio" or "all system audio" share.
+        teardownAudioPipeline();
+      } else {
+        console.log(`[Haven Desktop] no native capture requested; using Electron-provided audio (${audioTracksFromElectron} track(s))`);
+      }
+
+      // An older video track must not tear down a newer share.
+      stream.getVideoTracks().forEach(track => track.addEventListener('ended', () => {
+        if (_activeShareId !== shareId) return;
+        teardownAudioPipeline(captureId);
+        _activeShareId = null;
+      }));
+
+      return stream;
+    } finally {
+      _displayMediaPending = false;
+    }
   };
 
   console.log('[Haven Desktop] getDisplayMedia override installed');
@@ -1147,9 +1271,6 @@ window.havenDesktop = {
   },
 
   audio: {
-    getApplications: () => ipcRenderer.invoke('audio:get-apps'),
-    startCapture:    (pid) => ipcRenderer.invoke('audio:start-capture', pid),
-    stopCapture:     ()    => { teardownAudioPipeline(); return ipcRenderer.invoke('audio:stop-capture'); },
     isSupported:     ()    => ipcRenderer.invoke('audio:is-supported'),
     optOutOfDucking: ()    => ipcRenderer.invoke('audio:opt-out-ducking'),
   },

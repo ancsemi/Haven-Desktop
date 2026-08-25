@@ -37,6 +37,7 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <unordered_map>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "mmdevapi.lib")
@@ -70,6 +71,33 @@ static std::string ProcessNameFromPid(DWORD pid) {
     }
     CloseHandle(h);
     return "Unknown";
+}
+
+static std::unordered_map<DWORD, DWORD> SnapshotProcessParents() {
+    std::unordered_map<DWORD, DWORD> parents;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return parents;
+
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            parents[entry.th32ProcessID] = entry.th32ParentProcessID;
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return parents;
+}
+
+static bool IsProcessInTree(DWORD pid, DWORD rootPid,
+                            const std::unordered_map<DWORD, DWORD>& parents) {
+    for (size_t depth = 0; pid != 0 && depth <= parents.size(); depth++) {
+        if (pid == rootPid) return true;
+        auto it = parents.find(pid);
+        if (it == parents.end() || it->second == pid) break;
+        pid = it->second;
+    }
+    return false;
 }
 
 // ── Completion handler for ActivateAudioInterfaceAsync ────
@@ -182,6 +210,7 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
     // Track PIDs we've already seen across all endpoints (avoid duplicates)
     std::vector<DWORD> seen;
     DWORD ourPid = GetCurrentProcessId();
+    const auto processParents = SnapshotProcessParents();
 
     IMMDeviceEnumerator* enumerator = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
@@ -232,7 +261,7 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
 
             DWORD pid = 0;
             ctrl2->GetProcessId(&pid);
-            if (pid == 0 || pid == ourPid ||
+            if (pid == 0 || IsProcessInTree(pid, ourPid, processParents) ||
                 std::find(seen.begin(), seen.end(), pid) != seen.end()) {
                 ctrl2->Release(); ctrl->Release(); continue;
             }

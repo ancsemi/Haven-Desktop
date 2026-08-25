@@ -12,6 +12,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "test": "node --test test/*.test.js",
     "build": "npm run build:native && electron-builder",
     "build:win": "npm run build:native && electron-builder --win",
     "build:linux": "npm run build:native && electron-builder --linux",

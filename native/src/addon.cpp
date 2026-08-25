@@ -56,7 +56,7 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
     // Accept either:
     //   startCapture(pid, dataCb)                         (legacy, INCLUDE)
     //   startCapture(pid, mode, dataCb [, statusCb])      (new)
-    // mode is a string: "include" or "exclude"
+    // mode is a string: "include", "exclude", or "system"
     if (info.Length() < 2 || !info[0].IsNumber()) {
         Napi::TypeError::New(env, "startCapture(pid, [mode], dataCb, [statusCb])")
             .ThrowAsJavaScriptException();
@@ -72,6 +72,7 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
     if (info[1].IsString()) {
         std::string m = info[1].As<Napi::String>().Utf8Value();
         if (m == "exclude") mode = haven::CaptureMode::ExcludeProcess;
+        if (m == "system") mode = haven::CaptureMode::SystemLoopback;
         if (info.Length() < 3 || !info[2].IsFunction()) {
             Napi::TypeError::New(env, "startCapture(pid, mode, dataCb, [statusCb])")
                 .ThrowAsJavaScriptException();

@@ -67,7 +67,7 @@ class AudioCaptureManager {
    * Start capturing audio.
    * @param {number} pid               Target process ID
    * @param {Object} opts              Capture options
-   * @param {'include'|'exclude'} [opts.mode='include']
+   * @param {'include'|'exclude'|'system'} [opts.mode='include']
    *                                   include: capture FROM this PID tree
    *                                   exclude: capture all system audio EXCEPT this PID tree
    *                                   (Windows only — Linux returns failure for exclude)
@@ -83,7 +83,10 @@ class AudioCaptureManager {
     if (typeof opts === 'function') {
       opts = { mode: 'include', onData: opts };
     }
-    const mode    = (opts && opts.mode) === 'exclude' ? 'exclude' : 'include';
+    const requestedMode = opts && opts.mode;
+    const mode = requestedMode === 'exclude' || requestedMode === 'system'
+      ? requestedMode
+      : 'include';
     const onData  = opts && opts.onData;
     const onStatus = opts && opts.onStatus;
     if (typeof onData !== 'function') throw new Error('startCapture: onData callback required');
