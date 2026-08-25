@@ -43,11 +43,12 @@ using CaptureStatusCb = std::function<void(const CaptureStatus&)>;
 // What kind of capture do we want?
 //   IncludeProcess: capture audio FROM the given PID (and its children)
 //   ExcludeProcess: capture ALL system audio EXCEPT the given PID tree
-//                   (Windows-only; falls back to IncludeProcess elsewhere
-//                    with a Failed status for Linux callers.)
+//                   (Windows-only; Linux reports a Failed status.)
+//   SystemLoopback: capture the default output monitor (Linux).
 enum class CaptureMode {
     IncludeProcess,
     ExcludeProcess,
+    SystemLoopback,
 };
 
 // Abstract per-platform audio capture

@@ -48,6 +48,32 @@ static std::string procName(uint32_t pid) {
     return "Unknown";
 }
 
+static uint32_t procParentPid(uint32_t pid) {
+    std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+    std::string line;
+    if (!f.is_open() || !std::getline(f, line)) return 0;
+
+    // The command is parenthesized and may contain spaces. Fields after the
+    // final ')' start with state, then parent PID.
+    const size_t commandEnd = line.rfind(')');
+    if (commandEnd == std::string::npos || commandEnd + 2 >= line.size()) return 0;
+    std::istringstream fields(line.substr(commandEnd + 2));
+    char state = 0;
+    uint32_t parent = 0;
+    fields >> state >> parent;
+    return parent;
+}
+
+static bool isProcessInTree(uint32_t pid, uint32_t rootPid) {
+    for (int depth = 0; pid != 0 && depth < 64; depth++) {
+        if (pid == rootPid) return true;
+        const uint32_t parent = procParentPid(pid);
+        if (parent == pid) break;
+        pid = parent;
+    }
+    return false;
+}
+
 // Synchronous PulseAudio helper — runs main loop until callback signals done
 struct PaSync {
     pa_mainloop*     ml  = nullptr;
@@ -132,9 +158,14 @@ static void moduleLoadCb(pa_context*, uint32_t idx, void* ud) {
 }
 
 // Success callback
-struct OpDone { bool done = false; };
-static void successCb(pa_context*, int, void* ud) {
-    ((OpDone*)ud)->done = true;
+struct OpDone {
+    bool done = false;
+    bool success = false;
+};
+static void successCb(pa_context*, int success, void* ud) {
+    auto* result = static_cast<OpDone*>(ud);
+    result->success = success != 0;
+    result->done = true;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -169,12 +200,10 @@ void PulseCapture::emitStatus(CaptureStatusKind kind, const std::string& msg, in
 }
 
 bool PulseCapture::IsSupported() const {
-    // Check if PulseAudio is available
-    pa_simple* s = nullptr;
-    pa_sample_spec ss = { PA_SAMPLE_FLOAT32LE, 48000, 1 };
-    s = pa_simple_new(nullptr, "HavenProbe", PA_STREAM_RECORD, nullptr, "probe", &ss, nullptr, nullptr, nullptr);
-    if (s) { pa_simple_free(s); return true; }
-    return false;
+    // Capability checks must not open the default recording source (usually
+    // the microphone). A control connection is enough for both capture modes.
+    PaSync pa;
+    return pa.connect();
 }
 
 std::vector<AudioApp> PulseCapture::GetAudioApplications() {
@@ -194,8 +223,10 @@ std::vector<AudioApp> PulseCapture::GetAudioApplications() {
 
     // Deduplicate by PID
     std::vector<uint32_t> seen;
+    const uint32_t ourPid = static_cast<uint32_t>(getpid());
     for (auto& si : ed.inputs) {
         if (si.pid == 0) continue;
+        if (isProcessInTree(si.pid, ourPid)) continue;
         if (std::find(seen.begin(), seen.end(), si.pid) != seen.end()) continue;
         seen.push_back(si.pid);
 
@@ -235,7 +266,9 @@ bool PulseCapture::StartCapture(uint32_t pid, CaptureMode mode,
     }
 
     emitStatus(CaptureStatusKind::Starting,
-        "preparing pulse capture for PID " + std::to_string(pid));
+        mode == CaptureMode::SystemLoopback
+            ? "preparing pulse system capture"
+            : "preparing pulse capture for PID " + std::to_string(pid));
 
     m_thread = std::thread([this]() { captureLoop(); });
     return true;
@@ -282,6 +315,71 @@ void PulseCapture::captureLoop() {
         emitStatus(CaptureStatusKind::Failed,
             "pa_context_connect failed (PulseAudio/PipeWire daemon not reachable)");
         m_running = false;
+        return;
+    }
+
+    if (m_mode == CaptureMode::SystemLoopback) {
+        struct DefaultSinkInfo {
+            std::string name;
+            bool done = false;
+        } sink;
+        auto serverInfoCb = [](pa_context*, const pa_server_info* info, void* ud) {
+            auto* result = static_cast<DefaultSinkInfo*>(ud);
+            if (info && info->default_sink_name) result->name = info->default_sink_name;
+            result->done = true;
+        };
+
+        pa_operation* op = pa_context_get_server_info(pa.ctx, serverInfoCb, &sink);
+        if (!op) {
+            emitStatus(CaptureStatusKind::Failed, "PulseAudio could not read the default output");
+            m_running = false;
+            return;
+        }
+        while (!sink.done) pa.iterateBlock();
+        pa_operation_unref(op);
+        if (sink.name.empty()) {
+            emitStatus(CaptureStatusKind::Failed, "PulseAudio has no default output");
+            m_running = false;
+            return;
+        }
+
+        const std::string monitor = sink.name + ".monitor";
+        pa_sample_spec ss = { PA_SAMPLE_FLOAT32LE, 48000, 1 };
+        int err = 0;
+        pa_simple* rec = pa_simple_new(
+            nullptr, "HavenDesktop", PA_STREAM_RECORD,
+            monitor.c_str(), "System Audio Capture",
+            &ss, nullptr, nullptr, &err
+        );
+        if (!rec) {
+            emitStatus(CaptureStatusKind::Failed,
+                std::string("pa_simple_new failed: ") + pa_strerror(err), err);
+            m_running = false;
+            return;
+        }
+
+        emitStatus(CaptureStatusKind::Started, "pulse system capture active");
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_callback) {
+                std::vector<float> silence(480, 0.0f);
+                m_callback(silence.data(), silence.size());
+            }
+        }
+
+        const size_t chunkFrames = 480;
+        std::vector<float> buf(chunkFrames);
+        while (m_running) {
+            if (pa_simple_read(rec, buf.data(), chunkFrames * sizeof(float), &err) < 0) {
+                emitStatus(CaptureStatusKind::Failed,
+                    std::string("PulseAudio system capture failed: ") + pa_strerror(err), err);
+                m_running = false;
+                break;
+            }
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_callback) m_callback(buf.data(), chunkFrames);
+        }
+        pa_simple_free(rec);
         return;
     }
 
@@ -341,11 +439,19 @@ void PulseCapture::captureLoop() {
         "sink_properties=device.description=\"Haven\\ Per-App\\ Capture\" "
         "rate=48000 channels=1 format=float32le",
         moduleLoadCb, &nullRes);
-    if (!op) { m_running = false; return; }
+    if (!op) {
+        emitStatus(CaptureStatusKind::Failed, "PulseAudio could not create the capture output");
+        m_running = false;
+        return;
+    }
     while (!nullRes.done) pa.iterateBlock();
     pa_operation_unref(op);
 
-    if (nullRes.index == PA_INVALID_INDEX) { m_running = false; return; }
+    if (nullRes.index == PA_INVALID_INDEX) {
+        emitStatus(CaptureStatusKind::Failed, "PulseAudio rejected the capture output");
+        m_running = false;
+        return;
+    }
     m_nullSinkModule = nullRes.index;
 
     // ── Look up the null sink index ───────────────────────
@@ -369,6 +475,7 @@ void PulseCapture::captureLoop() {
         op = pa_context_unload_module(pa.ctx, m_nullSinkModule, successCb, &od);
         if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
         m_nullSinkModule = 0;
+        emitStatus(CaptureStatusKind::Failed, "PulseAudio could not find the capture output");
         m_running = false;
         return;
     }
@@ -384,6 +491,17 @@ void PulseCapture::captureLoop() {
 
     op = pa_context_get_sink_info_by_index(pa.ctx, originalSink, sinkNameCb, &origSinkLookup);
     if (op) { while (!origSinkLookup.done) pa.iterateBlock(); pa_operation_unref(op); }
+
+    if (isPipeWire && origSinkLookup.name.empty()) {
+        OpDone od;
+        op = pa_context_unload_module(pa.ctx, m_nullSinkModule, successCb, &od);
+        if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
+        m_nullSinkModule = 0;
+        emitStatus(CaptureStatusKind::Failed,
+            "PipeWire could not identify the selected application's output");
+        m_running = false;
+        return;
+    }
 
     // ── Step 3: Route audio ───────────────────────────────
     //
@@ -432,28 +550,30 @@ void PulseCapture::captureLoop() {
                 OpDone od;
                 op = pa_context_move_sink_input_by_index(pa.ctx, targetSinkInput, csl.idx, successCb, &od);
                 if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
-                combineSinkOk = true;
+                combineSinkOk = od.success;
             }
         }
 
         if (!combineSinkOk) {
-            // Combine-sink failed — fall back to loopback from original sink's
-            // monitor.  This captures ALL audio on that output device (not just
-            // the target app), but it won't crash.
-            fprintf(stderr, "[Haven AudioCapture] combine-sink unavailable on PipeWire — falling back to loopback\n");
-            // Clean up failed combine-sink module if it was partially loaded
+            // Never fall back to the output monitor here: that would turn an
+            // application-only choice into a capture of every app, including
+            // Haven voice output.
             if (m_loopbackModule != 0) {
                 OpDone od2;
                 auto* unOp = pa_context_unload_module(pa.ctx, m_loopbackModule, successCb, &od2);
                 if (unOp) { while (!od2.done) pa.iterateBlock(); pa_operation_unref(unOp); }
                 m_loopbackModule = 0;
             }
-            // Loopback from original sink's monitor → HavenCapture
-            ModuleLoadResult lbRes;
-            std::string args = "source=" + origSinkLookup.name + ".monitor sink=HavenCapture sink_dont_move=true";
-            op = pa_context_load_module(pa.ctx, "module-loopback", args.c_str(), moduleLoadCb, &lbRes);
-            if (op) { while (!lbRes.done) pa.iterateBlock(); pa_operation_unref(op); }
-            m_loopbackModule = lbRes.index;
+            if (m_nullSinkModule != 0) {
+                OpDone od2;
+                auto* unOp = pa_context_unload_module(pa.ctx, m_nullSinkModule, successCb, &od2);
+                if (unOp) { while (!od2.done) pa.iterateBlock(); pa_operation_unref(unOp); }
+                m_nullSinkModule = 0;
+            }
+            emitStatus(CaptureStatusKind::Failed,
+                "PipeWire could not isolate the selected application audio");
+            m_running = false;
+            return;
         }
     } else {
         // Classic PulseAudio: move sink input to null sink directly
@@ -461,6 +581,16 @@ void PulseCapture::captureLoop() {
             OpDone od;
             op = pa_context_move_sink_input_by_index(pa.ctx, targetSinkInput, sl.idx, successCb, &od);
             if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
+            if (!od.success) {
+                OpDone unload;
+                op = pa_context_unload_module(pa.ctx, m_nullSinkModule, successCb, &unload);
+                if (op) { while (!unload.done) pa.iterateBlock(); pa_operation_unref(op); }
+                m_nullSinkModule = 0;
+                emitStatus(CaptureStatusKind::Failed,
+                    "PulseAudio could not isolate the selected application audio");
+                m_running = false;
+                return;
+            }
         }
 
         // Loopback null sink → default output so user still hears the app
