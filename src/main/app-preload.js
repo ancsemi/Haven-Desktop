@@ -22,6 +22,7 @@ const _displayVideoTracks = new WeakSet();
 const _screenShareTransceivers = new WeakMap();
 const _encoderStatsTimers = new WeakMap();
 const _encoderStatsGenerations = new WeakMap();
+let _activeDisplayVideoTrack = null;
 let _videoEncoderConfig = {
   preference: 'hardware',
   hardwareAvailable: false,
@@ -84,7 +85,7 @@ function clearVideoEncoderStatus() {
 function configureScreenShareTransceiver(track, transceiver) {
   if (!transceiver || transceiver.stopped) return;
 
-  if (!_displayVideoTracks.has(track)) {
+  if (!_displayVideoTracks.has(track) || track.readyState !== 'live') {
     if (_screenShareTransceivers.has(transceiver)) {
       try { transceiver.setCodecPreferences([]); } catch {}
       _screenShareTransceivers.delete(transceiver);
@@ -132,7 +133,7 @@ async function reportNegotiatedScreenEncoder(peer) {
     const encoderState = _screenShareTransceivers.get(transceiver);
     if (!encoderState) continue;
     const track = transceiver.sender.track;
-    if (track?.readyState !== 'live') {
+    if (track?.readyState !== 'live' || track !== _activeDisplayVideoTrack) {
       if (_screenShareTransceivers.get(transceiver) === encoderState) {
         _screenShareTransceivers.delete(transceiver);
       }
@@ -175,7 +176,9 @@ async function reportNegotiatedScreenEncoder(peer) {
       console.warn('[Haven Desktop] screen encoder stats unavailable:', error.message);
     }
   }
-  if (!hasLiveScreenTrack) clearVideoEncoderStatus();
+  if (!hasLiveScreenTrack && _activeDisplayVideoTrack?.readyState !== 'live') {
+    clearVideoEncoderStatus();
+  }
   return { hasLiveScreenTrack, reported };
 }
 
@@ -254,8 +257,9 @@ function installScreenShareEncodingOverride() {
     trackPrototype.stop = function (...args) {
       const isDisplayTrack = _displayVideoTracks.has(this);
       const result = originalTrackStop.apply(this, args);
-      if (isDisplayTrack) {
+      if (isDisplayTrack && _activeDisplayVideoTrack === this) {
         _displayVideoTracks.delete(this);
+        _activeDisplayVideoTrack = null;
         clearVideoEncoderStatus();
       }
       return result;
@@ -1406,14 +1410,17 @@ function installGetDisplayMediaOverride() {
       preference: normalizeVideoEncoderPreference(encoderConfig.preference),
       hardwareAvailable: encoderConfig.hardwareAvailable === true,
     };
-    stream.getVideoTracks().forEach(track => {
+    stream.getVideoTracks().forEach((track, index) => {
       _displayVideoTracks.add(track);
+      if (index === 0) _activeDisplayVideoTrack = track;
     });
 
     // Auto-teardown when the video track ends (user stops sharing)
-    stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => {
+    stream.getVideoTracks().forEach(track => track.addEventListener('ended', () => {
+      if (_activeDisplayVideoTrack !== track) return;
       teardownAudioPipeline();
       clearVideoEncoderStatus();
+      _activeDisplayVideoTrack = null;
     }));
 
     return stream;
