@@ -13,6 +13,7 @@ const os    = require('os');
 const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
+const { PipeWireStreamRouter } = require('./pipewire-stream-router');
 const {
   createAudioCaptureController,
   resolveAudioSelection,
@@ -138,6 +139,9 @@ let welcomeWindow   = null;
 let tray            = null;
 let serverManager   = null;
 let audioCapture    = null;
+const pipeWireStreamRouter = process.platform === 'linux'
+  ? new PipeWireStreamRouter()
+  : null;
 const audioCaptureController = createAudioCaptureController(() => {
   try { audioCapture?.stopCapture(); } catch {}
 });
@@ -295,7 +299,7 @@ app.on('ready', () => {
 
 app.whenReady().then(async () => {
   serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV });
-  audioCapture  = new AudioCaptureManager();
+  audioCapture  = new AudioCaptureManager(null, () => pipeWireStreamRouter?.stop());
   badgeIcon     = createBadgeIcon();
 
   // ── Sync start-on-login with OS ──────────────────────
@@ -690,6 +694,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   app.isQuitting = true;
   serverManager?.stopServer();
+  pipeWireStreamRouter?.stop();
   audioCapture?.cleanup();
 });
 
@@ -2058,6 +2063,9 @@ function registerScreenShareHandler() {
               safeSend(targetContents, 'audio:capture-status', { ...s, captureId: requestId });
               const isSystemMode = mode === 'exclude' || mode === 'system';
               if (s.kind === 'started') {
+                if (mode === 'exclude' && process.platform === 'linux') {
+                  pipeWireStreamRouter?.start(`HavenCombined_${process.pid}`, process.pid);
+                }
                 safeSend(targetContents, 'audio:share-mode', {
                   captureId: requestId,
                   requested: isSystemMode ? 'system' : 'app',
@@ -2065,6 +2073,7 @@ function registerScreenShareHandler() {
                   detail,
                 });
               } else if (s.kind === 'failed') {
+                pipeWireStreamRouter?.stop();
                 reasonRef.msg = s.message;
                 audioCaptureController.clear(requestId);
                 safeSend(targetContents, 'audio:share-mode', {

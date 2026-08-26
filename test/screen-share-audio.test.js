@@ -116,3 +116,17 @@ test('ignores native callbacks retained from an older capture generation', () =>
   assert.deepEqual(received, ['new-data:2000', 'new-status']);
   manager.stopCapture();
 });
+
+test('runs capture teardown before stopping the native addon', () => {
+  const events = [];
+  const addon = {
+    startCapture() { return true; },
+    stopCapture() { events.push('native'); },
+  };
+  const manager = new AudioCaptureManager(addon, () => events.push('router'));
+
+  manager.startCapture(1, { onData() {} });
+  manager.stopCapture();
+
+  assert.deepEqual(events, ['router', 'native']);
+});

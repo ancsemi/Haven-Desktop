@@ -13,8 +13,9 @@
 const path = require('path');
 
 class AudioCaptureManager {
-  constructor(addon = null) {
+  constructor(addon = null, beforeStop = null) {
     this._addon    = addon;
+    this._beforeStop = beforeStop;
     this._capturing = false;
     this._generation = 0;
     if (!this._addon) this._loadAddon();
@@ -148,6 +149,9 @@ class AudioCaptureManager {
   stopCapture() {
     clearTimeout(this._watchdog);
     this._generation++;
+    if (this._beforeStop) {
+      try { this._beforeStop(); } catch { /* */ }
+    }
     if (this._addon && this._capturing) {
       try { this._addon.stopCapture(); } catch { /* */ }
     }
