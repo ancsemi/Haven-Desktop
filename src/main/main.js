@@ -21,7 +21,10 @@ try { ({ autoUpdater } = require('electron-updater')); } catch {}
 // ── Constants ─────────────────────────────────────────────
 // ── Enable native Wayland support (must be before app.whenReady) ──
 if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('enable-features', 'UseOzonePlatform,WaylandWindowDecorations');
+  app.commandLine.appendSwitch(
+    'enable-features',
+    'UseOzonePlatform,WaylandWindowDecorations,AcceleratedVideoEncoder'
+  );
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 }
 
@@ -134,6 +137,10 @@ let welcomeWindow   = null;
 let tray            = null;
 let serverManager   = null;
 let audioCapture    = null;
+let hardwareVideoEncodingAvailable = false;
+app.on('gpu-info-update', () => {
+  hardwareVideoEncodingAvailable = app.getGPUFeatureStatus().video_encode === 'enabled';
+});
 let serverViews     = new Map();  // serverUrl → BrowserView
 let activeServerUrl = null;
 let primaryServerUrl = null;       // the server the user actually chose to connect to
@@ -2159,6 +2166,8 @@ function registerIPC() {
   ipcMain.handle('audio:stop-capture',   () => { try { audioCapture.stopCapture(); } catch {} });
   ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
+
+  ipcMain.handle('video:hardware-encoding-available', () => hardwareVideoEncodingAvailable);
 
   // ── Audio Devices ─────────────────────────────────────
   ipcMain.handle('devices:get-inputs', async () => {

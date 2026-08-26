@@ -58,11 +58,11 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 
 ### Prerequisites
 
-- **Node.js** 18+
-- **npm** 9+
+- **Node.js** 22.12+
+- **npm** 10+
 - **C++ Build Tools:**
   - **Windows:** Visual Studio Build Tools 2019+ with the "Desktop development with C++" workload
-  - **Linux:** `build-essential`, `libpulse-dev`
+  - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
 
 ### Quick Start (Windows — No Terminal)
 

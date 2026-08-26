@@ -44,9 +44,10 @@ linux:
   icon: assets/icon.png
   category: Network;Chat;InstantMessaging
   desktop:
-    Name: Haven
-    Comment: Private self-hosted chat
-    Terminal: false
+    entry:
+      Name: Haven
+      Comment: Private self-hosted chat
+      Terminal: false
 
 deb:
   afterInstall: assets/linux/postinst.sh

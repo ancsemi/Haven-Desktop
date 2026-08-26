@@ -12,6 +12,76 @@
 // ═══════════════════════════════════════════════════════════
 
 const { ipcRenderer } = require('electron');
+const { preferHardwareH264Codec } = require('./screen-share-video');
+
+const _displayVideoTracks = new WeakSet();
+const _screenShareTransceivers = new WeakSet();
+let _hardwareVideoEncodingAvailable = false;
+
+function configureScreenShareTransceiver(track, transceiver) {
+  if (!transceiver || transceiver.stopped) return;
+
+  if (!_displayVideoTracks.has(track) || !_hardwareVideoEncodingAvailable) {
+    if (_screenShareTransceivers.has(transceiver)) {
+      try { transceiver.setCodecPreferences([]); } catch {}
+      _screenShareTransceivers.delete(transceiver);
+    }
+    return;
+  }
+
+  const codecs = window.RTCRtpSender?.getCapabilities?.('video')?.codecs;
+  if (preferHardwareH264Codec(transceiver, codecs)) {
+    _screenShareTransceivers.add(transceiver);
+    console.log('[Haven Desktop] hardware H.264 preferred for screen share');
+  }
+}
+
+function installScreenShareEncodingOverride() {
+  if (!window.RTCPeerConnection || !window.RTCRtpSender) return false;
+
+  const peerPrototype = window.RTCPeerConnection.prototype;
+  const originalAddTrack = peerPrototype.addTrack;
+  const originalAddTransceiver = peerPrototype.addTransceiver;
+  const originalCreateOffer = peerPrototype.createOffer;
+  const originalCreateAnswer = peerPrototype.createAnswer;
+
+  function configureTransceivers(peer) {
+    peer.getTransceivers().forEach(transceiver => {
+      configureScreenShareTransceiver(transceiver.sender.track, transceiver);
+    });
+  }
+
+  peerPrototype.addTrack = function (track, ...streams) {
+    const sender = originalAddTrack.call(this, track, ...streams);
+    const transceiver = this.getTransceivers().find(item => item.sender === sender);
+    configureScreenShareTransceiver(track, transceiver);
+    return sender;
+  };
+
+  peerPrototype.addTransceiver = function (trackOrKind, init) {
+    const transceiver = originalAddTransceiver.call(this, trackOrKind, init);
+    if (typeof trackOrKind !== 'string') {
+      configureScreenShareTransceiver(trackOrKind, transceiver);
+    }
+    return transceiver;
+  };
+
+  peerPrototype.createOffer = function (...args) {
+    configureTransceivers(this);
+    return originalCreateOffer.apply(this, args);
+  };
+
+  peerPrototype.createAnswer = function (...args) {
+    configureTransceivers(this);
+    return originalCreateAnswer.apply(this, args);
+  };
+
+  return true;
+}
+
+if (!installScreenShareEncodingOverride()) {
+  window.addEventListener('DOMContentLoaded', installScreenShareEncodingOverride, { once: true });
+}
 
 // Mark the document as running inside the Electron shell.
 // This lets CSS override responsive breakpoints that would otherwise
@@ -1070,6 +1140,13 @@ function installGetDisplayMediaOverride() {
       // not delivered, that's an Electron-level issue, not ours.
       console.log(`[Haven Desktop] no native capture requested; using Electron-provided audio (${audioTracksFromElectron} track(s))`);
     }
+
+    _hardwareVideoEncodingAvailable = await ipcRenderer
+      .invoke('video:hardware-encoding-available')
+      .catch(() => false);
+    stream.getVideoTracks().forEach(track => {
+      _displayVideoTracks.add(track);
+    });
 
     // Auto-teardown when the video track ends (user stops sharing)
     stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => teardownAudioPipeline()));
