@@ -1,53 +1,129 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  HARDWARE_H264_PROFILE,
-  preferHardwareH264Codec,
+  normalizeVideoEncoderPreference,
+  getAvailableVideoEncoderPreferences,
+  applyVideoEncoderPreference,
 } = require('../src/main/screen-share-video');
 
-test('prefers compatible H.264 while retaining every fallback', () => {
-  const vp8 = { mimeType: 'video/VP8' };
-  const incompatibleH264 = {
-    mimeType: 'video/H264',
-    sdpFmtpLine: 'packetization-mode=0;profile-level-id=42e01f',
-  };
-  const preferredH264 = {
-    mimeType: 'video/H264',
-    sdpFmtpLine: 'PROFILE-LEVEL-ID=42E01F;level-asymmetry-allowed=1;packetization-mode=1',
-  };
+const vp8 = { mimeType: 'video/VP8' };
+const rtx = { mimeType: 'video/rtx' };
+const red = { mimeType: 'video/red' };
+const ulpfec = { mimeType: 'video/ulpfec' };
+const flexfec = { mimeType: 'video/flexfec-03' };
+const h264Packet0 = {
+  mimeType: 'video/H264',
+  sdpFmtpLine: 'packetization-mode=0;profile-level-id=42e01f',
+};
+const hardwareH264 = {
+  mimeType: 'video/H264',
+  sdpFmtpLine: 'PROFILE-LEVEL-ID=42E01F;level-asymmetry-allowed=1;packetization-mode=1',
+};
+
+test('normalizes invalid encoder preferences to hardware', () => {
+  assert.equal(normalizeVideoEncoderPreference('vp9'), 'vp9');
+  assert.equal(normalizeVideoEncoderPreference('invalid'), 'hardware');
+});
+
+test('hardware preference forces compatible H.264 and keeps transport codecs', () => {
   let preferences;
   const transceiver = {
     setCodecPreferences(codecs) { preferences = codecs; },
   };
 
-  assert.equal(preferHardwareH264Codec(
+  const result = applyVideoEncoderPreference(
     transceiver,
-    [vp8, incompatibleH264, preferredH264]
-  ), true);
-  assert.deepEqual(preferences, [preferredH264, vp8, incompatibleH264]);
+    [vp8, rtx, h264Packet0, red, hardwareH264, ulpfec, flexfec],
+    'hardware',
+    true
+  );
+
+  assert.equal(result.applied, true);
+  assert.equal(result.codec, 'h264');
+  assert.deepEqual(preferences, [
+    hardwareH264, h264Packet0, rtx, red, ulpfec, flexfec,
+  ]);
 });
 
-test('leaves negotiation untouched without compatible H.264', () => {
+test('hardware preference stays automatic when hardware is unavailable', () => {
   let called = false;
   const transceiver = {
     setCodecPreferences() { called = true; },
   };
 
-  assert.equal(preferHardwareH264Codec(
+  const result = applyVideoEncoderPreference(
     transceiver,
-    [{ mimeType: 'video/VP8' }]
-  ), false);
+    [vp8, hardwareH264],
+    'hardware',
+    false
+  );
+
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, 'hardware-unavailable');
   assert.equal(called, false);
+});
+
+test('explicit VP9 preference excludes other primary codecs', () => {
+  const vp9Profile2 = { mimeType: 'video/VP9', sdpFmtpLine: 'profile-id=2' };
+  const vp9Profile0 = { mimeType: 'video/VP9', sdpFmtpLine: 'profile-id=0' };
+  let preferences;
+  const transceiver = {
+    setCodecPreferences(codecs) { preferences = codecs; },
+  };
+
+  const result = applyVideoEncoderPreference(
+    transceiver,
+    [vp8, vp9Profile2, rtx, vp9Profile0],
+    'vp9',
+    false
+  );
+
+  assert.equal(result.applied, true);
+  assert.deepEqual(preferences, [vp9Profile0, vp9Profile2, rtx]);
+});
+
+test('automatic preference restores Chromium defaults', () => {
+  let preferences;
+  const transceiver = {
+    setCodecPreferences(codecs) { preferences = codecs; },
+  };
+
+  const result = applyVideoEncoderPreference(transceiver, [vp8], 'auto');
+
+  assert.equal(result.applied, true);
+  assert.deepEqual(preferences, []);
+});
+
+test('reports only encoder preferences exposed by Chromium', () => {
+  assert.deepEqual(
+    getAvailableVideoEncoderPreferences(
+      [vp8, hardwareH264, { mimeType: 'video/HEVC' }],
+      true
+    ),
+    {
+      auto: true,
+      hardware: true,
+      h264: true,
+      vp8: true,
+      vp9: false,
+      av1: false,
+      h265: true,
+    }
+  );
 });
 
 test('falls back safely when Chromium rejects codec preferences', () => {
   const transceiver = {
     setCodecPreferences() { throw new Error('invalid codec'); },
   };
-  const codecs = [{
-    mimeType: 'video/H264',
-    sdpFmtpLine: HARDWARE_H264_PROFILE,
-  }];
 
-  assert.equal(preferHardwareH264Codec(transceiver, codecs), false);
+  const result = applyVideoEncoderPreference(
+    transceiver,
+    [hardwareH264],
+    'h264',
+    true
+  );
+
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, 'rejected');
 });

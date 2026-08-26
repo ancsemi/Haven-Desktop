@@ -34,6 +34,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | Feature | Description |
 |---|---|
 | **Per-Application Audio** | Share audio from a **single application** during screen share — just like Discord. Powered by native WASAPI (Windows) and PulseAudio (Linux) hooks. |
+| **Hardware Video Encoding** | Choose the screen-share codec before streaming. Hardware H.264 uses VA-API on Linux or Media Foundation on Windows, with automatic AMD, NVIDIA, or Intel backend selection. |
 | **Audio Device Switching** | Switch your microphone and speaker mid-call without leaving voice chat. |
 | **Desktop Notifications** | Native OS-level notifications via the taskbar / system tray. |
 | **Host or Join** | Run your own Haven server from the app, or connect to someone else's. Auto-detects local servers. |

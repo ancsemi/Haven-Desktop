@@ -12,16 +12,79 @@
 // ═══════════════════════════════════════════════════════════
 
 const { ipcRenderer } = require('electron');
-const { preferHardwareH264Codec } = require('./screen-share-video');
+const {
+  normalizeVideoEncoderPreference,
+  getAvailableVideoEncoderPreferences,
+  applyVideoEncoderPreference,
+} = require('./screen-share-video');
 
 const _displayVideoTracks = new WeakSet();
-const _screenShareTransceivers = new WeakSet();
-let _hardwareVideoEncodingAvailable = false;
+const _screenShareTransceivers = new WeakMap();
+const _encoderStatsTimers = new WeakMap();
+const _encoderStatsGenerations = new WeakMap();
+let _videoEncoderConfig = {
+  preference: 'hardware',
+  hardwareAvailable: false,
+  hardwareStatus: 'unavailable',
+};
+
+function videoEncoderLabel(preference) {
+  return {
+    auto: 'Automatic',
+    hardware: 'Hardware H.264',
+    h264: 'H.264',
+    vp8: 'VP8',
+    vp9: 'VP9',
+    av1: 'AV1',
+    h265: 'H.265 / HEVC',
+  }[preference] || preference;
+}
+
+function publishVideoEncoderStatus(status) {
+  const detail = { ...status, timestamp: Date.now() };
+  window.__havenShareVideoEncoder = detail;
+  window.dispatchEvent(new CustomEvent('haven:share-video-encoder', { detail }));
+
+  if (!document.body) return;
+  let badge = document.getElementById('haven-video-encoder-status');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'haven-video-encoder-status';
+    badge.style.cssText = [
+      'position:fixed', 'right:14px', 'bottom:14px', 'z-index:2147483647',
+      'padding:7px 10px', 'border-radius:7px', 'background:rgba(17,20,31,.94)',
+      'border:1px solid rgba(128,105,232,.55)', 'color:#ddd',
+      'font:12px/1.35 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+      'box-shadow:0 6px 22px rgba(0,0,0,.35)', 'pointer-events:none',
+    ].join(';');
+    document.body.appendChild(badge);
+  }
+
+  const codec = status.mimeType?.replace(/^video\//i, '').toUpperCase()
+    || videoEncoderLabel(status.preference);
+  let acceleration = 'browser managed';
+  if (status.powerEfficientEncoder === true) acceleration = 'GPU confirmed';
+  else if (status.powerEfficientEncoder === false) acceleration = 'software encoder';
+  else if (status.hardwareAvailable && codec.includes('H264')) acceleration = 'GPU path enabled';
+  else if (!status.hardwareAvailable && status.preference === 'hardware') acceleration = 'GPU unavailable';
+
+  badge.textContent = `Screen encoder: ${codec} • ${acceleration}`;
+  badge.title = [
+    status.encoderImplementation,
+    status.sdpFmtpLine,
+    status.reason,
+  ].filter(Boolean).join(' • ');
+}
+
+function clearVideoEncoderStatus() {
+  document.getElementById('haven-video-encoder-status')?.remove();
+  window.__havenShareVideoEncoder = null;
+}
 
 function configureScreenShareTransceiver(track, transceiver) {
   if (!transceiver || transceiver.stopped) return;
 
-  if (!_displayVideoTracks.has(track) || !_hardwareVideoEncodingAvailable) {
+  if (!_displayVideoTracks.has(track)) {
     if (_screenShareTransceivers.has(transceiver)) {
       try { transceiver.setCodecPreferences([]); } catch {}
       _screenShareTransceivers.delete(transceiver);
@@ -30,10 +93,109 @@ function configureScreenShareTransceiver(track, transceiver) {
   }
 
   const codecs = window.RTCRtpSender?.getCapabilities?.('video')?.codecs;
-  if (preferHardwareH264Codec(transceiver, codecs)) {
-    _screenShareTransceivers.add(transceiver);
-    console.log('[Haven Desktop] hardware H.264 preferred for screen share');
+  const preference = normalizeVideoEncoderPreference(_videoEncoderConfig.preference);
+  const result = applyVideoEncoderPreference(
+    transceiver,
+    codecs,
+    preference,
+    _videoEncoderConfig.hardwareAvailable
+  );
+
+  if (result.applied) {
+    _screenShareTransceivers.set(transceiver, { ...result, track });
+    publishVideoEncoderStatus({
+      phase: 'requested',
+      ...result,
+      hardwareAvailable: _videoEncoderConfig.hardwareAvailable,
+      hardwareStatus: _videoEncoderConfig.hardwareStatus,
+    });
+    console.log(`[Haven Desktop] screen encoder requested: ${preference}`);
+  } else {
+    if (_screenShareTransceivers.has(transceiver)) {
+      try { transceiver.setCodecPreferences([]); } catch {}
+      _screenShareTransceivers.delete(transceiver);
+    }
+    publishVideoEncoderStatus({
+      phase: 'fallback',
+      preference,
+      reason: result.reason,
+      hardwareAvailable: _videoEncoderConfig.hardwareAvailable,
+      hardwareStatus: _videoEncoderConfig.hardwareStatus,
+    });
   }
+}
+
+async function reportNegotiatedScreenEncoder(peer) {
+  let hasLiveScreenTrack = false;
+  let reported = false;
+  for (const transceiver of peer.getTransceivers()) {
+    const encoderState = _screenShareTransceivers.get(transceiver);
+    if (!encoderState) continue;
+    const track = transceiver.sender.track;
+    if (track?.readyState !== 'live') {
+      if (_screenShareTransceivers.get(transceiver) === encoderState) {
+        _screenShareTransceivers.delete(transceiver);
+      }
+      continue;
+    }
+    hasLiveScreenTrack = true;
+    try {
+      const stats = await transceiver.sender.getStats();
+      if (_screenShareTransceivers.get(transceiver) !== encoderState) continue;
+      if (track.readyState !== 'live' || transceiver.sender.track !== track) {
+        _screenShareTransceivers.delete(transceiver);
+        continue;
+      }
+      const entries = [...stats.values()];
+      const outbound = entries.find(stat =>
+        stat.type === 'outbound-rtp'
+        && (stat.kind === 'video' || stat.mediaType === 'video')
+      );
+      const codec = entries.find(stat => stat.id === outbound?.codecId);
+      if (!outbound || !codec) continue;
+      publishVideoEncoderStatus({
+        phase: 'negotiated',
+        preference: encoderState.preference,
+        mimeType: codec.mimeType,
+        sdpFmtpLine: codec.sdpFmtpLine || '',
+        encoderImplementation: outbound.encoderImplementation || null,
+        powerEfficientEncoder: outbound.powerEfficientEncoder,
+        hardwareAvailable: _videoEncoderConfig.hardwareAvailable,
+        hardwareStatus: _videoEncoderConfig.hardwareStatus,
+        frameWidth: outbound.frameWidth,
+        frameHeight: outbound.frameHeight,
+        framesPerSecond: outbound.framesPerSecond,
+      });
+      console.log(
+        `[Haven Desktop] negotiated screen encoder: ${codec.mimeType}`,
+        outbound.encoderImplementation || ''
+      );
+      reported = true;
+    } catch (error) {
+      console.warn('[Haven Desktop] screen encoder stats unavailable:', error.message);
+    }
+  }
+  if (!hasLiveScreenTrack) clearVideoEncoderStatus();
+  return { hasLiveScreenTrack, reported };
+}
+
+function scheduleScreenEncoderReport(peer, attempt = 0, generation = null) {
+  if (generation === null) {
+    generation = (_encoderStatsGenerations.get(peer) || 0) + 1;
+    _encoderStatsGenerations.set(peer, generation);
+  }
+  if (_encoderStatsGenerations.get(peer) !== generation) return;
+  const previousTimer = _encoderStatsTimers.get(peer);
+  if (previousTimer) clearTimeout(previousTimer);
+  const timer = setTimeout(async () => {
+    _encoderStatsTimers.delete(peer);
+    const result = await reportNegotiatedScreenEncoder(peer);
+    if (_encoderStatsGenerations.get(peer) !== generation) return;
+    if (result.hasLiveScreenTrack && !result.reported && attempt < 15) {
+      scheduleScreenEncoderReport(peer, attempt + 1, generation);
+    }
+  }, attempt === 0 ? 500 : 2000);
+  _encoderStatsTimers.set(peer, timer);
 }
 
 function installScreenShareEncodingOverride() {
@@ -44,6 +206,9 @@ function installScreenShareEncodingOverride() {
   const originalAddTransceiver = peerPrototype.addTransceiver;
   const originalCreateOffer = peerPrototype.createOffer;
   const originalCreateAnswer = peerPrototype.createAnswer;
+  const originalSetRemoteDescription = peerPrototype.setRemoteDescription;
+  const trackPrototype = window.MediaStreamTrack?.prototype;
+  const originalTrackStop = trackPrototype?.stop;
 
   function configureTransceivers(peer) {
     peer.getTransceivers().forEach(transceiver => {
@@ -75,6 +240,27 @@ function installScreenShareEncodingOverride() {
     configureTransceivers(this);
     return originalCreateAnswer.apply(this, args);
   };
+
+  peerPrototype.setRemoteDescription = function (...args) {
+    const operation = originalSetRemoteDescription.apply(this, args);
+    if (!operation?.then) return operation;
+    return operation.then(result => {
+      scheduleScreenEncoderReport(this);
+      return result;
+    });
+  };
+
+  if (trackPrototype && originalTrackStop) {
+    trackPrototype.stop = function (...args) {
+      const isDisplayTrack = _displayVideoTracks.has(this);
+      const result = originalTrackStop.apply(this, args);
+      if (isDisplayTrack) {
+        _displayVideoTracks.delete(this);
+        clearVideoEncoderStatus();
+      }
+      return result;
+    };
+  }
 
   return true;
 }
@@ -620,16 +806,28 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
 
 // ─── Listen for screen-picker request from main process ──
 ipcRenderer.on('screen:show-picker', (_event, data) => {
-  showScreenPicker(data?.sources || [], data?.audioApps || [], data?.requestId || null);
+  showScreenPicker(
+    data?.sources || [],
+    data?.audioApps || [],
+    data?.requestId || null,
+    data?.videoEncoder || {}
+  );
 });
 
 // ═══════════════════════════════════════════════════════════
 // Screen-Share Picker  (injected as a full-screen overlay)
 // ═══════════════════════════════════════════════════════════
 
-function showScreenPicker(sources, audioApps, requestId) {
+function showScreenPicker(sources, audioApps, requestId, videoEncoder) {
   // Remove stale picker
   document.getElementById('haven-screen-picker')?.remove();
+
+  _videoEncoderConfig = {
+    preference: normalizeVideoEncoderPreference(videoEncoder.preference),
+    hardwareAvailable: videoEncoder.hardwareAvailable === true,
+    hardwareStatus: videoEncoder.hardwareStatus || 'unavailable',
+    platform: videoEncoder.platform,
+  };
 
   const overlay = document.createElement('div');
   overlay.id = 'haven-screen-picker';
@@ -661,6 +859,11 @@ function showScreenPicker(sources, audioApps, requestId) {
         justify-content:center;color:#777;font-size:11px;letter-spacing:.3px}
       .hsp-src-name{color:#ccc;font-size:12px;text-align:center;white-space:nowrap;
         overflow:hidden;text-overflow:ellipsis}
+      .hsp-video{padding:12px 0;border-top:1px solid #2a2a4a;flex-shrink:0}
+      .hsp-video-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+      .hsp-video-select{min-width:260px;background:#16213e;color:#ddd;border:1px solid #4a4270;
+        border-radius:6px;padding:8px 10px;font:inherit}
+      .hsp-video-note{color:#888;font-size:11px;line-height:1.45;margin-top:7px}
       .hsp-audio{padding-top:14px;border-top:1px solid #2a2a4a;flex-shrink:0;margin-top:10px}
       .hsp-apps{display:flex;flex-wrap:wrap;gap:8px}
       .hsp-app{background:#16213e;border-radius:6px;padding:8px 14px;cursor:pointer;
@@ -693,6 +896,14 @@ function showScreenPicker(sources, audioApps, requestId) {
         </div>
       </div>
 
+      <div class="hsp-video">
+        <div class="hsp-sec-title">Video Encoder</div>
+        <div class="hsp-video-row">
+          <select class="hsp-video-select" id="hsp-video-encoder"></select>
+        </div>
+        <div class="hsp-video-note" id="hsp-video-note"></div>
+      </div>
+
       <div class="hsp-audio">
         <div class="hsp-sec-title">🔊 Application Audio — isolate audio from a specific app</div>
         <div class="hsp-apps" id="hsp-audio-apps"></div>
@@ -708,11 +919,52 @@ function showScreenPicker(sources, audioApps, requestId) {
 
   let selSource = null;
   let selAudioPid = null;
+  let selVideoEncoder = _videoEncoderConfig.preference;
 
   const screensEl  = document.getElementById('hsp-screens');
   const windowsEl  = document.getElementById('hsp-windows');
   const appsEl     = document.getElementById('hsp-audio-apps');
   const goBtn      = document.getElementById('hsp-go');
+  const encoderSelect = document.getElementById('hsp-video-encoder');
+  const encoderNote = document.getElementById('hsp-video-note');
+
+  const videoCodecs = window.RTCRtpSender?.getCapabilities?.('video')?.codecs || [];
+  const availableEncoders = getAvailableVideoEncoderPreferences(
+    videoCodecs,
+    _videoEncoderConfig.hardwareAvailable
+  );
+  const encoderOptions = [
+    ['hardware', 'Hardware H.264 (recommended)'],
+    ['auto', 'Automatic (browser default)'],
+    ['h264', 'H.264'],
+    ['vp8', 'VP8'],
+    ['vp9', 'VP9'],
+    ['av1', 'AV1'],
+    ['h265', 'H.265 / HEVC'],
+  ];
+  for (const [value, label] of encoderOptions) {
+    if (value !== 'hardware' && !availableEncoders[value]) continue;
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value === 'hardware' && !availableEncoders.hardware
+      ? `${label} — unavailable`
+      : label;
+    option.disabled = value === 'hardware' && !availableEncoders.hardware;
+    encoderSelect.appendChild(option);
+  }
+  if (!availableEncoders[selVideoEncoder]) selVideoEncoder = 'auto';
+  encoderSelect.value = selVideoEncoder;
+  encoderSelect.onchange = () => {
+    selVideoEncoder = normalizeVideoEncoderPreference(encoderSelect.value);
+  };
+
+  const hardwareNote = _videoEncoderConfig.hardwareAvailable
+    ? 'Hardware video encoding is available. Chromium selects AMD, NVIDIA, or Intel automatically.'
+    : `Hardware encoding is not currently available (${_videoEncoderConfig.hardwareStatus}).`;
+  const h265Note = availableEncoders.h265
+    ? ' H.265 is available in this Chromium build.'
+    : ' H.265 is not exposed by this Chromium/WebRTC build.';
+  encoderNote.textContent = hardwareNote + h265Note;
 
   // ── Populate video sources ─────────────────────────────
   sources.forEach(src => {
@@ -812,7 +1064,12 @@ function showScreenPicker(sources, audioApps, requestId) {
 
     ipcRenderer.send('screen:picker-result', cancelled
       ? { requestId, cancelled: true }
-      : { requestId, sourceId: selSource, audioAppPid: effectiveAudioPid });
+      : {
+          requestId,
+          sourceId: selSource,
+          audioAppPid: effectiveAudioPid,
+          videoEncoderPreference: selVideoEncoder,
+        });
   };
 
   document.getElementById('hsp-cancel').onclick = () => dismiss(true);
@@ -1141,15 +1398,23 @@ function installGetDisplayMediaOverride() {
       console.log(`[Haven Desktop] no native capture requested; using Electron-provided audio (${audioTracksFromElectron} track(s))`);
     }
 
-    _hardwareVideoEncodingAvailable = await ipcRenderer
-      .invoke('video:hardware-encoding-available')
-      .catch(() => false);
+    const encoderConfig = await ipcRenderer
+      .invoke('video:get-encoder-config')
+      .catch(() => _videoEncoderConfig);
+    _videoEncoderConfig = {
+      ...encoderConfig,
+      preference: normalizeVideoEncoderPreference(encoderConfig.preference),
+      hardwareAvailable: encoderConfig.hardwareAvailable === true,
+    };
     stream.getVideoTracks().forEach(track => {
       _displayVideoTracks.add(track);
     });
 
     // Auto-teardown when the video track ends (user stops sharing)
-    stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => teardownAudioPipeline()));
+    stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => {
+      teardownAudioPipeline();
+      clearVideoEncoderStatus();
+    }));
 
     return stream;
   };

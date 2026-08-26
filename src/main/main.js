@@ -13,20 +13,29 @@ const os    = require('os');
 const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
+const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
 try { ({ autoUpdater } = require('electron-updater')); } catch {}
 
 // ── Constants ─────────────────────────────────────────────
-// ── Enable native Wayland support (must be before app.whenReady) ──
+// ── Enable native Wayland and video encoding (must be before app.whenReady) ──
+const enabledFeatures = [
+  'PlatformHEVCEncoderSupport',
+  'WebRtcAllowH265Send',
+  'WebRtcAV1HWEncode',
+];
 if (process.platform === 'linux') {
-  app.commandLine.appendSwitch(
-    'enable-features',
-    'UseOzonePlatform,WaylandWindowDecorations,AcceleratedVideoEncoder'
+  enabledFeatures.push(
+    'UseOzonePlatform',
+    'WaylandWindowDecorations',
+    'AcceleratedVideoEncoder',
+    'VaapiOnNvidiaGPUs'
   );
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 }
+app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
 
 const IS_DEV    = process.argv.includes('--dev');
 const SHOW_SERVER  = process.argv.includes('--show-server');
@@ -57,6 +66,7 @@ const store = new Store({
     hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
     disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
     unlimitFrameRate:  false, // disable Chromium's frame-rate cap (pairs with disableGpuVsync)
+    videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
     serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
   },
 });
@@ -138,8 +148,12 @@ let tray            = null;
 let serverManager   = null;
 let audioCapture    = null;
 let hardwareVideoEncodingAvailable = false;
+let hardwareVideoEncodingStatus = 'unavailable';
 app.on('gpu-info-update', () => {
-  hardwareVideoEncodingAvailable = app.getGPUFeatureStatus().video_encode === 'enabled';
+  hardwareVideoEncodingStatus = String(
+    app.getGPUFeatureStatus().video_encode || 'unavailable'
+  );
+  hardwareVideoEncodingAvailable = hardwareVideoEncodingStatus.startsWith('enabled');
 });
 let serverViews     = new Map();  // serverUrl → BrowserView
 let activeServerUrl = null;
@@ -1932,12 +1946,19 @@ function registerScreenShareHandler() {
       if (!targetContents) { safeCallback({}); return; }
 
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const videoEncoder = {
+        preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
+        hardwareAvailable: hardwareVideoEncodingAvailable,
+        hardwareStatus: hardwareVideoEncodingStatus,
+        platform: process.platform,
+      };
+      const pickerData = { requestId, sources: sourceData, audioApps, videoEncoder };
 
       // Ask renderer to show the picker
       let sentToFrame = false;
       if (requestFrame && !requestFrame.isDestroyed()) {
         try {
-          requestFrame.send('screen:show-picker', { requestId, sources: sourceData, audioApps });
+          requestFrame.send('screen:show-picker', pickerData);
           sentToFrame = true;
           console.log('[ScreenShare] picker request sent to request.frame');
         } catch (err) {
@@ -1947,7 +1968,7 @@ function registerScreenShareHandler() {
       const frameHostId = requestFrame?.host?.id;
       const targetId = targetContents?.id;
       if (!sentToFrame || frameHostId !== targetId) {
-        safeSend(targetContents, 'screen:show-picker', { requestId, sources: sourceData, audioApps });
+        safeSend(targetContents, 'screen:show-picker', pickerData);
         console.log('[ScreenShare] picker request sent to target webContents fallback');
       }
 
@@ -1967,6 +1988,10 @@ function registerScreenShareHandler() {
       });
 
       if (result.cancelled) { safeCallback({}); return; }
+      store.set(
+        'videoEncoderPreference',
+        normalizeVideoEncoderPreference(result.videoEncoderPreference)
+      );
 
       const selected = await resolveSelectedSource(sources, result.sourceId);
       if (!selected) {
@@ -2167,7 +2192,12 @@ function registerIPC() {
   ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
 
-  ipcMain.handle('video:hardware-encoding-available', () => hardwareVideoEncodingAvailable);
+  ipcMain.handle('video:get-encoder-config', () => ({
+    preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
+    hardwareAvailable: hardwareVideoEncodingAvailable,
+    hardwareStatus: hardwareVideoEncodingStatus,
+    platform: process.platform,
+  }));
 
   // ── Audio Devices ─────────────────────────────────────
   ipcMain.handle('devices:get-inputs', async () => {
@@ -2313,12 +2343,17 @@ function registerIPC() {
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
     'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
     'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
-    'disableGpuVsync', 'unlimitFrameRate'
+    'disableGpuVsync', 'unlimitFrameRate', 'videoEncoderPreference'
   ]);
   ipcMain.handle('settings:get', (_e, key)        => store.get(key));
   ipcMain.handle('settings:set', (_e, key, value)  => {
     if (!ALLOWED_SETTINGS_KEYS.has(key)) return false;
-    store.set(key, value);
+    store.set(
+      key,
+      key === 'videoEncoderPreference'
+        ? normalizeVideoEncoderPreference(value)
+        : value
+    );
     return true;
   });
 
@@ -2402,6 +2437,7 @@ function registerIPC() {
     hideMenuBar:      !!store.get('hideMenuBar'),
     disableGpuVsync:  !!store.get('disableGpuVsync'),
     unlimitFrameRate: !!store.get('unlimitFrameRate'),
+    videoEncoderPreference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
   }));
 
   ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {
