@@ -550,14 +550,16 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
 
 // ─── Listen for screen-picker request from main process ──
 ipcRenderer.on('screen:show-picker', (_event, data) => {
-  showScreenPicker(data?.sources || [], data?.audioApps || [], data?.requestId || null);
+  showScreenPicker(data?.sources || [], data?.audioApps || [], data?.requestId || null, {
+    videoOnly: !!data?.videoOnly,
+  });
 });
 
 // ═══════════════════════════════════════════════════════════
 // Screen-Share Picker  (injected as a full-screen overlay)
 // ═══════════════════════════════════════════════════════════
 
-function showScreenPicker(sources, audioApps, requestId) {
+function showScreenPicker(sources, audioApps, requestId, { videoOnly = false } = {}) {
   // Remove stale picker
   document.getElementById('haven-screen-picker')?.remove();
 
@@ -609,7 +611,9 @@ function showScreenPicker(sources, audioApps, requestId) {
 
     <div class="hsp-box">
       <div class="hsp-title">Share Your Screen</div>
-      <div class="hsp-sub">Choose a window or screen — then optionally pick an application whose audio to share.</div>
+      <div class="hsp-sub">${videoOnly
+        ? 'Choose a window or screen for native hardware encoding.'
+        : 'Choose a window or screen — then optionally pick an application whose audio to share.'}</div>
 
       <div class="hsp-scroll">
         <div class="hsp-sec">
@@ -623,7 +627,7 @@ function showScreenPicker(sources, audioApps, requestId) {
         </div>
       </div>
 
-      <div class="hsp-audio">
+      <div class="hsp-audio"${videoOnly ? ' style="display:none"' : ''}>
         <div class="hsp-sec-title">🔊 Application Audio — isolate audio from a specific app</div>
         <div class="hsp-apps" id="hsp-audio-apps"></div>
       </div>
@@ -637,7 +641,7 @@ function showScreenPicker(sources, audioApps, requestId) {
   document.body.appendChild(overlay);
 
   let selSource = null;
-  let selAudioPid = null;
+  let selAudioPid = videoOnly ? 'none' : null;
 
   const screensEl  = document.getElementById('hsp-screens');
   const windowsEl  = document.getElementById('hsp-windows');
@@ -648,10 +652,22 @@ function showScreenPicker(sources, audioApps, requestId) {
   sources.forEach(src => {
     const el = document.createElement('div');
     el.className = 'hsp-src';
-    const preview = src.thumbnail
-      ? `<img src="${src.thumbnail}" alt="">`
-      : `<div class="hsp-thumb-ph">No preview</div>`;
-    el.innerHTML = `${preview}<div class="hsp-src-name" title="${src.name}">${src.name}</div>`;
+    if (src.thumbnail) {
+      const preview = document.createElement('img');
+      preview.src = src.thumbnail;
+      preview.alt = '';
+      el.appendChild(preview);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'hsp-thumb-ph';
+      placeholder.textContent = 'No preview';
+      el.appendChild(placeholder);
+    }
+    const name = document.createElement('div');
+    name.className = 'hsp-src-name';
+    name.textContent = String(src.name || 'Untitled source');
+    name.title = String(src.name || 'Untitled source');
+    el.appendChild(name);
     el.onclick = () => {
       overlay.querySelectorAll('.hsp-src.sel').forEach(s => s.classList.remove('sel'));
       el.classList.add('sel');
@@ -695,9 +711,25 @@ function showScreenPicker(sources, audioApps, requestId) {
       const el = document.createElement('div');
       el.className = 'hsp-app';
       if (a.active === false) el.style.opacity = '0.55';
-      const icon = a.icon ? `<img class="ico" src="${a.icon}" alt="">` : '🔊';
-      const dim  = a.active === false ? ' <span style="color:#888;font-size:11px">(silent)</span>' : '';
-      el.innerHTML = `${icon}<span>${a.name}${dim}</span>`;
+      if (a.icon) {
+        const icon = document.createElement('img');
+        icon.className = 'ico';
+        icon.src = a.icon;
+        icon.alt = '';
+        el.appendChild(icon);
+      } else {
+        el.appendChild(document.createTextNode('🔊'));
+      }
+      const name = document.createElement('span');
+      name.appendChild(document.createTextNode(String(a.name || 'Unknown application')));
+      if (a.active === false) {
+        const silent = document.createElement('span');
+        silent.style.color = '#888';
+        silent.style.fontSize = '11px';
+        silent.textContent = ' (silent)';
+        name.appendChild(silent);
+      }
+      el.appendChild(name);
       el.title = a.active === false
         ? 'This app is currently silent. Capture will start as soon as it produces audio.'
         : a.name;
@@ -724,7 +756,7 @@ function showScreenPicker(sources, audioApps, requestId) {
     let effectiveAudioPid = selAudioPid;
     // Native pipeline applies to per-app PIDs AND to 'system' (which uses
     // WASAPI exclude-mode in main to strip Haven's voice from the share).
-    const wantsNativePipeline = !cancelled && selAudioPid &&
+    const wantsNativePipeline = !videoOnly && !cancelled && selAudioPid &&
                                 selAudioPid !== 'none';
     if (wantsNativePipeline) {
       _capturedAudioPid = selAudioPid;
@@ -1152,6 +1184,22 @@ window.havenDesktop = {
     stopCapture:     ()    => { teardownAudioPipeline(); return ipcRenderer.invoke('audio:stop-capture'); },
     isSupported:     ()    => ipcRenderer.invoke('audio:is-supported'),
     optOutOfDucking: ()    => ipcRenderer.invoke('audio:opt-out-ducking'),
+  },
+
+  nativeScreen: {
+    getCapabilities:      ()     => ipcRenderer.invoke('native-screen:get-capabilities'),
+    start:                options => ipcRenderer.invoke('native-screen:start', options),
+    stop:                 data   => ipcRenderer.invoke('native-screen:stop', data),
+    addPeer:              data   => ipcRenderer.invoke('native-screen:add-peer', data),
+    removePeer:           data   => ipcRenderer.invoke('native-screen:remove-peer', data),
+    setRemoteDescription: data   => ipcRenderer.invoke('native-screen:set-remote-description', data),
+    addIceCandidate:      data   => ipcRenderer.invoke('native-screen:add-ice-candidate', data),
+    onSignal: callback => {
+      if (typeof callback !== 'function') return () => {};
+      const listener = (_event, signal) => callback(signal);
+      ipcRenderer.on('native-screen:signal', listener);
+      return () => ipcRenderer.removeListener('native-screen:signal', listener);
+    },
   },
 
   devices: {

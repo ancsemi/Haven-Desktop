@@ -13,6 +13,7 @@ const os    = require('os');
 const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
+const { NativeScreenManager } = require('./native-screen');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
@@ -134,6 +135,7 @@ let welcomeWindow   = null;
 let tray            = null;
 let serverManager   = null;
 let audioCapture    = null;
+let nativeScreen    = null;
 let serverViews     = new Map();  // serverUrl → BrowserView
 let activeServerUrl = null;
 let primaryServerUrl = null;       // the server the user actually chose to connect to
@@ -288,6 +290,11 @@ app.on('ready', () => {
 app.whenReady().then(async () => {
   serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV });
   audioCapture  = new AudioCaptureManager();
+  nativeScreen  = new NativeScreenManager({
+    selectSource: selectNativeScreenSource,
+    isOwnerActive: owner => owner === getActiveContents(),
+    registryPath: path.join(app.getPath('userData'), 'gstreamer-registry.bin'),
+  });
   badgeIcon     = createBadgeIcon();
 
   // ── Sync start-on-login with OS ──────────────────────
@@ -683,6 +690,7 @@ app.on('before-quit', () => {
   app.isQuitting = true;
   serverManager?.stopServer();
   audioCapture?.cleanup();
+  nativeScreen?.cleanup();
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -1828,6 +1836,128 @@ function createTray() {
 // capture for the selected application.
 // ───────────────────────────────────────────────────────────
 
+async function selectNativeScreenSource(targetContents, capabilities = {}, signal) {
+  if (!targetContents || targetContents.isDestroyed()) return null;
+
+  const wayland = process.platform === 'linux' &&
+    String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland';
+  if (process.platform === 'linux' && capabilities.captureBackends?.includes('pipewire-portal') &&
+      (wayland || !capabilities.captureBackends.includes('x11'))) {
+    // The compositor portal owns source selection and grants the PipeWire FD.
+    return { kind: 'linux-pipewire', handle: '' };
+  }
+
+  let sources;
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 0, height: 0 },
+      fetchWindowIcons: false,
+    });
+  } catch (err) {
+    console.warn(`[NativeScreen] source enumeration failed: ${err.message}`);
+    throw err;
+  }
+
+  if (signal?.aborted) return null;
+  const ownerWindow = BrowserWindow.fromWebContents(targetContents) ||
+    targetContents.getOwnerBrowserWindow?.() || mainWindow;
+  let picker;
+  const chosenSource = await new Promise(resolve => {
+    let settled = false;
+    const finish = source => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      resolve(source);
+    };
+    const abort = () => {
+      try { picker?.closePopup(ownerWindow || undefined); } catch {}
+      finish(null);
+    };
+    const items = sources.map(source => ({
+      label: `${source.id.startsWith('screen:') ? 'Screen' : 'Window'}: ${source.name}`,
+      click: () => finish(source),
+    }));
+    items.push({ type: 'separator' }, { label: 'Cancel', click: () => finish(null) });
+    picker = Menu.buildFromTemplate(items);
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      picker.popup({ window: ownerWindow || undefined, callback: () => finish(null) });
+    } catch {
+      finish(null);
+    }
+  });
+  if (!chosenSource) return null;
+  const freshSources = await desktopCapturer.getSources({
+    types: ['window', 'screen'],
+    thumbnailSize: { width: 0, height: 0 },
+    fetchWindowIcons: false,
+  });
+  const selected = freshSources.find(source =>
+    source.id === chosenSource.id && source.name === chosenSource.name
+  );
+  if (!selected) return null;
+
+  const idMatch = /^(screen|window):([^:]+):/.exec(selected.id);
+  if (!idMatch) throw new Error(`Unsupported screen source identifier: ${selected.id}`);
+  const sourceType = idMatch[1];
+  const sourceHandle = idMatch[2];
+
+  if (process.platform === 'win32') {
+    const displays = screen.getAllDisplays();
+    const display = sourceType === 'screen'
+      ? displays.find(item => String(item.id) === String(selected.display_id)) ||
+        displays[Number(sourceHandle)] || displays[0]
+      : null;
+    if (sourceType === 'screen' && !display) return null;
+    const monitorPoint = display ? screen.dipToScreenPoint({
+      x: Math.round(display.bounds.x + display.bounds.width / 2),
+      y: Math.round(display.bounds.y + display.bounds.height / 2),
+    }) : { x: 0, y: 0 };
+    return {
+      kind: sourceType === 'window' ? 'windows-window' : 'windows-monitor',
+      handle: sourceType === 'window'
+        ? sourceHandle
+        : '',
+      x: monitorPoint.x,
+      y: monitorPoint.y,
+      width: display ? Math.round(display.bounds.width * (display.scaleFactor || 1)) : 0,
+      height: display ? Math.round(display.bounds.height * (display.scaleFactor || 1)) : 0,
+    };
+  }
+
+  if (process.platform === 'linux') {
+    if (sourceType === 'window') {
+      return {
+        kind: 'linux-x11-window',
+        handle: sourceHandle,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+      };
+    }
+    const displays = screen.getAllDisplays();
+    const display = displays.find(item => String(item.id) === String(selected.display_id)) ||
+      displays[Number(sourceHandle)] || displays[0];
+    const physicalX = item => Math.round(item.bounds.x * (item.scaleFactor || 1));
+    const physicalY = item => Math.round(item.bounds.y * (item.scaleFactor || 1));
+    const minX = Math.min(...displays.map(physicalX));
+    const minY = Math.min(...displays.map(physicalY));
+    return {
+      kind: 'linux-x11-screen',
+      handle: sourceHandle,
+      x: display ? physicalX(display) - minX : 0,
+      y: display ? physicalY(display) - minY : 0,
+      width: display ? Math.round(display.bounds.width * (display.scaleFactor || 1)) : 0,
+      height: display ? Math.round(display.bounds.height * (display.scaleFactor || 1)) : 0,
+    };
+  }
+
+  throw new Error('Native screen sharing is unavailable on this platform');
+}
+
 function registerScreenShareHandler() {
   // ── Resolve the user's picker selection at attach time ──
   // The desktopCapturer source IDs are not stable: between the moment the
@@ -2159,6 +2289,32 @@ function registerIPC() {
   ipcMain.handle('audio:stop-capture',   () => { try { audioCapture.stopCapture(); } catch {} });
   ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
+
+  // ── Native Screen Share ───────────────────────────────
+  const isServerView = sender => Array.from(serverViews.values())
+    .some(view => view.webContents === sender);
+  ipcMain.handle('native-screen:get-capabilities', event => {
+    if (!isServerView(event.sender)) return { supported: false, reason: 'untrusted-view' };
+    return nativeScreen.getCapabilities();
+  });
+  ipcMain.handle('native-screen:start', (event, options) => {
+    if (!isServerView(event.sender)) return { started: false, reason: 'untrusted-view' };
+    if (event.sender !== getActiveContents()) {
+      return { started: false, reason: 'inactive-view' };
+    }
+    return nativeScreen.start(event.sender, options);
+  });
+  ipcMain.handle('native-screen:stop', (event, data) => {
+    return nativeScreen.stop(event.sender, false, data?.sessionId || null);
+  });
+  ipcMain.handle('native-screen:add-peer', (event, data) => nativeScreen.addPeer(event.sender, data));
+  ipcMain.handle('native-screen:remove-peer', (event, data) => nativeScreen.removePeer(event.sender, data));
+  ipcMain.handle('native-screen:set-remote-description', (event, data) => {
+    return nativeScreen.setRemoteDescription(event.sender, data);
+  });
+  ipcMain.handle('native-screen:add-ice-candidate', (event, data) => {
+    return nativeScreen.addIceCandidate(event.sender, data);
+  });
 
   // ── Audio Devices ─────────────────────────────────────
   ipcMain.handle('devices:get-inputs', async () => {

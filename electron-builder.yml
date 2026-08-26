@@ -16,6 +16,7 @@ files:
   - "src/**/*"
   - "assets/**/*"
   - "native/build/Release/*.node"
+  - "native/build/Release/haven_screen_share*"
   - "node_modules/**/*"
   - "!node_modules/**/build/Release/obj*"
   - "package.json"
@@ -56,3 +57,6 @@ extraResources:
     to: native/
     filter:
       - "*.node"
+      - "haven_screen_share*"
+  - from: native/runtime/gstreamer/
+    to: native/gstreamer/

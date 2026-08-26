@@ -10,12 +10,14 @@
   "license": "AGPL-3.0",
   "homepage": "https://ancsemi.github.io/Haven/",
   "scripts": {
+    "test": "node --test test/*.test.js",
     "start": "electron .",
     "dev": "electron . --dev",
-    "build": "npm run build:native && electron-builder",
-    "build:win": "npm run build:native && electron-builder --win",
-    "build:linux": "npm run build:native && electron-builder --linux",
+    "build": "npm run build:native && npm run stage:native-runtime && electron-builder",
+    "build:win": "npm run build:native && npm run stage:native-runtime && electron-builder --win",
+    "build:linux": "npm run build:native && npm run stage:native-runtime && electron-builder --linux",
     "build:native": "node ./node_modules/node-gyp/bin/node-gyp.js rebuild --directory=native",
+    "stage:native-runtime": "node scripts/stage-gstreamer.js",
     "rebuild:electron": "node ./node_modules/@electron/rebuild/lib/cli.js && npm run build:native",
     "postinstall": "node ./node_modules/@electron/rebuild/lib/cli.js || echo electron-rebuild skipped"
   },
