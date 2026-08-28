@@ -1,9 +1,8 @@
-# Haven Desktop — ⚠️ PUBLIC BETA
+# Haven Desktop
 
 **Private chat, reimagined for your desktop.**
 
-> **This is a beta release.** Bugs are expected — your feedback is what makes it better.
-> Please [open an issue](https://github.com/ancsemi/Haven-Desktop/issues) if something breaks or feels off. All reports are welcome.
+> Bug reports and feedback are always welcome, please [open an issue](https://github.com/ancsemi/Haven-Desktop/issues) if something breaks or feels off.
 
 Haven Desktop is a standalone Electron application that connects to any [Haven](https://github.com/ancsemi/Haven) server — with features that go beyond the browser.
 
@@ -159,12 +158,12 @@ PCM data arrives via IPC → `AudioWorkletNode` processes it → `MediaStreamDes
 
 ## 💬 Feedback & Bug Reports
 
-This is a **beta release** — your feedback directly shapes the app. If something doesn't work, looks wrong, or could be better:
+Your feedback directly shapes the app. If something doesn't work, looks wrong, or could be better:
 
 1. **[Open an issue](https://github.com/ancsemi/Haven-Desktop/issues)** with as much detail as you can
 2. Include your OS, Haven server version, and steps to reproduce
 
-Every report helps. Thank you for testing.
+Every report helps.
 
 ---
 
