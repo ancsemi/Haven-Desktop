@@ -8,6 +8,13 @@ publish:
     repo: Haven-Desktop
     releaseType: release
 
+# AppImage runtime. The legacy toolset (0.0.0) relies on libfuse2 being
+# installed on the host, and Fedora and Ubuntu 24.04+ no longer ship it, so the
+# AppImage refused to open there with a "requires FUSE" error even with fuse3
+# present. 1.0.3 packs the static runtime, which needs no FUSE library at all.
+toolsets:
+  appimage: "1.0.3"
+
 directories:
   output: dist
   buildResources: assets
@@ -44,9 +51,10 @@ linux:
   icon: assets/icon.png
   category: Network;Chat;InstantMessaging
   desktop:
-    Name: Haven
-    Comment: Private self-hosted chat
-    Terminal: false
+    entry:
+      Name: Haven
+      Comment: Private self-hosted chat
+      Terminal: false
 
 deb:
   afterInstall: assets/linux/postinst.sh
