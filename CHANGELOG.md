@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.29
+
+### Fixed
+- **Linux AppImage would not start on Fedora 44 (and other FUSE3-only distros), even when FUSE was installed and other AppImages ran fine.** electron-builder 25 ships the old FUSE2 runtime, which `dlopen`s `libfuse.so.2`. Fedora dropped that library; FUSE3 is a different soname, so `fuse` being present did not help. Unpacking the AppImage was the only workaround. Builds now use electron-builder 26.8 with the static type-2 runtime (`toolsets.appimage: 1.0.2`), which does not need host FUSE.   Older AppImages can still be run with `./Haven*.AppImage --appimage-extract-and-run`.
+
+---
+
 ## v1.4.28
 
 ### Fixed

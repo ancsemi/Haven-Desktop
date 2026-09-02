@@ -30,7 +30,13 @@ chmod +x Haven*.AppImage
 ./Haven*.AppImage
 ```
 
-Or just double-click in most desktop environments. No installation needed — AppImages are portable.
+Or just double-click in most desktop environments. No installation needed — AppImages are portable, and current builds do not require a host FUSE package.
+
+If a downloaded AppImage errors with `dlopen(): error loading libfuse.so.2` / "requires FUSE", that is an older FUSE2 build. Either update to this release, or run it once with:
+
+```bash
+./Haven*.AppImage --appimage-extract-and-run
+```
 
 ### Linux (.deb)
 

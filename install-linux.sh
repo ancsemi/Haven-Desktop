@@ -6,6 +6,9 @@
 #   - File association
 #
 # Usage:  chmod +x install-linux.sh && ./install-linux.sh
+#
+# Current AppImages do not need libfuse.so.2. If an older build errors with
+# "requires FUSE", run:  ./Haven*.AppImage --appimage-extract-and-run
 
 set -e
 

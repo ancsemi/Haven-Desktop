@@ -23,7 +23,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | **Linux** (.deb) | [Latest Release](https://github.com/ancsemi/Haven-Desktop/releases/latest) |
 
 > **Windows:** Double-click the `.exe` → Haven installs and launches automatically.
-> **Linux AppImage:** `chmod +x Haven*.AppImage && ./Haven*.AppImage` — or just double-click in most desktop environments.
+> **Linux AppImage:** `chmod +x Haven*.AppImage && ./Haven*.AppImage` — or just double-click. No FUSE package needed. If an *older* AppImage says it requires FUSE, run `./Haven*.AppImage --appimage-extract-and-run` or grab this release.
 > **Linux .deb:** `sudo dpkg -i haven*.deb` — or double-click to install via your package manager.
 
 ---

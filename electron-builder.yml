@@ -51,6 +51,13 @@ linux:
 deb:
   afterInstall: assets/linux/postinst.sh
 
+# Static type-2 runtime (1.0.2). The default 0.0.0 runtime dlopens
+# libfuse.so.2, which Fedora 40+/Ubuntu 24.04+ no longer ship, so the
+# AppImage refused to start even when FUSE3 was installed. Other AppImages
+# on the same machine already used this runtime, which is why they worked.
+toolsets:
+  appimage: "1.0.2"
+
 extraResources:
   - from: native/build/Release/
     to: native/
