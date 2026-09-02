@@ -1,6 +1,6 @@
 {
   "name": "haven-desktop",
-  "version": "1.4.28",
+  "version": "1.4.29",
   "description": "Haven Desktop — Private chat, reimagined for your desktop",
   "main": "src/main/main.js",
   "author": {
@@ -31,7 +31,7 @@
   "devDependencies": {
     "@electron/rebuild": "^3.7.1",
     "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.15.7",
     "node-gyp": "^10.3.1"
   }
 }
