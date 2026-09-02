@@ -1,5 +1,16 @@
 # Haven Desktop Changelog
 
+## v1.4.29
+
+### Fixed
+- **The AppImage refused to open on Fedora and newer Ubuntu with a "requires FUSE" error.** It was packed with the legacy AppImage runtime, which needs libfuse2 on the host, and those distributions no longer ship it, so having fuse3 installed did not help. The build now uses the static AppImage runtime, which needs no FUSE library at all. Older builds can still be started with `--appimage-extract-and-run`. Reported by Sunie on Fedora 44.
+- **Chromium Autofill warnings came back on startup.** Chromium keeps only the last occurrence of a command line switch, and a second `disable-features` switch was overwriting the first, so the Autofill feature flag was lost. Folded into a single switch.
+
+### Changed
+- The README no longer labels the desktop app as beta. It has been the daily driver since launch and is at least as stable as the browser client.
+
+---
+
 ## v1.4.28
 
 ### Fixed

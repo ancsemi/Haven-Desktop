@@ -32,6 +32,8 @@ chmod +x Haven*.AppImage
 
 Or just double-click in most desktop environments. No installation needed — AppImages are portable.
 
+Builds after 1.4.28 run without libfuse2, which distributions such as Fedora and Ubuntu 24.04 no longer ship. If an older build says it requires FUSE, start it with `./Haven*.AppImage --appimage-extract-and-run` instead.
+
 ### Linux (.deb)
 
 ```bash

@@ -51,6 +51,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host "Hardware capability unavailable on build runner; validating bundle metadata only." }
           node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==2||p.codec!=='H264'||p.components?.capture!==true||p.components?.transport!==true) process.exit(1)" $probeOutput.Trim()
 
+      # electron-builder 26 uploads the installer and its blockmap in parallel,
+      # and when no release exists yet each upload creates one, so a tag ended
+      # up with two releases (1.4.29). Creating the release first gives both
+      # jobs one place to attach to. releaseType is "release" in
+      # electron-builder.yml, which matches a published release, so the
+      # publisher reuses it instead of refusing it.
+      - name: Create the GitHub release before publishing
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1             || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "${GITHUB_REF_NAME#v}" --notes "Release notes to follow."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build & Publish Windows installer
         run: npx electron-builder --win --publish always
         env:
