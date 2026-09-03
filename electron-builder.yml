@@ -54,6 +54,7 @@ linux:
     entry:
       Name: Haven
       Comment: Private self-hosted chat
+      "Comment[pt_BR]": Conversa privada e auto-hospedada
       Terminal: false
 
 deb:

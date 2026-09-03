@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Haven — Welcome</title>
+  <title data-i18n="welcome.windowTitle">Haven - Welcome</title>
   <link rel="stylesheet" href="welcome.css">
 </head>
 <body>
@@ -12,8 +12,8 @@
   <header class="titlebar" id="titlebar">
     <span class="titlebar-title">Haven Desktop</span>
     <div class="titlebar-controls">
-      <button class="tb-btn" id="btn-min" title="Minimize">&#x2013;</button>
-      <button class="tb-btn tb-close" id="btn-close" title="Close">&#x2715;</button>
+      <button class="tb-btn" id="btn-min" title="Minimize" data-i18n-title="window.minimize">&#x2013;</button>
+      <button class="tb-btn tb-close" id="btn-close" title="Close" data-i18n-title="window.close">&#x2715;</button>
     </div>
   </header>
 
@@ -21,82 +21,88 @@
   <section class="page active" id="page-choose">
     <div class="logo-area">
       <div class="hex-logo">⬡</div>
-      <h1>Welcome to <span class="brand">Haven</span></h1>
-      <p class="tagline">Your private, self-hosted communication hub — now on your desktop.</p>
+      <h1><span data-i18n="welcome.heading">Welcome to</span> <span class="brand">Haven</span></h1>
+      <p class="tagline" data-i18n="welcome.tagline">Your private, self-hosted communication hub - now on your desktop.</p>
     </div>
 
     <div class="cards">
       <button class="card" id="card-host">
         <span class="card-icon">🖥️</span>
-        <span class="card-title">Host My Server</span>
-        <span class="card-desc">Run your own Haven server and connect to it.</span>
+        <span class="card-title" data-i18n="welcome.host.title">Host My Server</span>
+        <span class="card-desc" data-i18n="welcome.host.description">Run your own Haven server and connect to it.</span>
       </button>
 
       <button class="card" id="card-join">
         <span class="card-icon">🔗</span>
-        <span class="card-title">Join a Server</span>
-        <span class="card-desc">Connect to an existing Haven server.</span>
+        <span class="card-title" data-i18n="welcome.join.title">Join a Server</span>
+        <span class="card-desc" data-i18n="welcome.join.description">Connect to an existing Haven server.</span>
       </button>
     </div>
 
-    <label class="remember">
-      <input type="checkbox" id="chk-remember"> Remember my choice
-    </label>
+    <div class="welcome-options">
+      <label class="remember">
+        <input type="checkbox" id="chk-remember"> <span data-i18n="welcome.rememberChoice">Remember my choice</span>
+      </label>
+      <label class="language-picker">
+        <span data-i18n="language.label">Language</span>
+        <select id="language-select"></select>
+      </label>
+    </div>
   </section>
 
   <!-- ═══════════ STEP 2a: Host Flow ═══════════════════ -->
   <section class="page" id="page-host">
-    <button class="back-btn" id="host-back">← Back</button>
-    <h2>Server Setup</h2>
+    <button class="back-btn" id="host-back">← <span data-i18n="welcome.back">Back</span></button>
+    <h2 data-i18n="welcome.serverSetup">Server Setup</h2>
 
     <div id="host-detect" class="info-box">
       <div class="spinner" id="host-spinner"></div>
-      <span id="host-detect-text">Searching for a local Haven server…</span>
+      <span id="host-detect-text" data-i18n="welcome.searchingServer">Searching for a local Haven server...</span>
     </div>
 
     <!-- Detected -->
     <div id="host-found" class="host-block" style="display:none">
-      <p class="found-text">✅ Found Haven server at:</p>
+      <p class="found-text">✅ <span data-i18n="welcome.serverFound">Found Haven server at:</span></p>
       <code id="host-path" class="path-display"></code>
       <p class="version-text" id="host-version"></p>
-      <button class="btn primary" id="btn-start-server">Start Server</button>
+      <button class="btn primary" id="btn-start-server" data-i18n="welcome.startServer">Start Server</button>
     </div>
 
     <!-- Not detected -->
     <div id="host-missing" class="host-block" style="display:none">
-      <p class="missing-text">❌ No Haven server detected automatically.</p>
+      <p class="missing-text">❌ <span data-i18n="welcome.serverNotDetected">No Haven server detected automatically.</span></p>
       <div class="host-actions">
-        <button class="btn secondary" id="btn-browse-server">Browse for server directory…</button>
-        <button class="btn secondary" id="btn-setup-new">Start Fresh Server Setup</button>
+        <button class="btn secondary" id="btn-browse-server" data-i18n="welcome.browseServer">Browse for server directory...</button>
+        <button class="btn secondary" id="btn-setup-new" data-i18n="welcome.freshSetup">Start Fresh Server Setup</button>
       </div>
     </div>
 
     <!-- Starting -->
     <div id="host-starting" class="host-block" style="display:none">
       <div class="spinner"></div>
-      <p>Starting server…</p>
+      <p data-i18n="welcome.startingServer">Starting server...</p>
       <pre class="log-box" id="host-log"></pre>
     </div>
 
     <!-- Error -->
     <div id="host-error" class="host-block" style="display:none">
       <p class="error-text" id="host-error-msg"></p>
-      <button class="btn secondary" id="btn-retry">Try Again</button>
+      <button class="btn secondary" id="btn-retry" data-i18n="welcome.tryAgain">Try Again</button>
     </div>
   </section>
 
   <!-- ═══════════ STEP 2b: Join Flow ═══════════════════ -->
   <section class="page" id="page-join">
-    <button class="back-btn" id="join-back">← Back</button>
-    <h2>Join a Server</h2>
+    <button class="back-btn" id="join-back">← <span data-i18n="welcome.back">Back</span></button>
+    <h2 data-i18n="welcome.joinServer">Join a Server</h2>
 
     <div class="join-form">
-      <label for="server-url">Server Address</label>
+      <label for="server-url" data-i18n="welcome.serverAddress">Server Address</label>
       <div class="input-row">
         <input type="text" id="server-url" placeholder="https://haven.example.com" spellcheck="false" autocomplete="off">
       </div>
-      <p class="hint">Enter the URL or IP address of the Haven server you'd like to join.</p>
-      <button class="btn primary" id="btn-connect" disabled>Connect</button>
+      <p class="hint" data-i18n="welcome.serverAddressHint">Enter the URL or IP address of the Haven server you'd like to join.</p>
+      <button class="btn primary" id="btn-connect" data-i18n="welcome.connect" disabled>Connect</button>
       <p class="error-text" id="join-error" style="display:none"></p>
     </div>
   </section>

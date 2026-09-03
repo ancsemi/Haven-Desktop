@@ -12,6 +12,230 @@
 // ═══════════════════════════════════════════════════════════
 
 const { ipcRenderer } = require('electron');
+const { createTranslator } = require('../i18n');
+const {
+  SERVER_LOCALE_KEY,
+  serverLocaleForDesktop,
+  desktopLocaleForServer,
+  reconcileLanguagePreferences,
+} = require('../i18n/server-bridge');
+
+let i18nState = ipcRenderer.sendSync('i18n:get-state-sync');
+let translate = createTranslator(i18nState.locale);
+let _lastNativeStatus = null;
+let _lastShareModeInfo = null;
+
+const nativeStorageSetItem = typeof Storage !== 'undefined' ? Storage.prototype.setItem : null;
+const nativeStorageRemoveItem = typeof Storage !== 'undefined' ? Storage.prototype.removeItem : null;
+let suppressServerLocaleSync = false;
+
+function readServerLocalePreference() {
+  try { return window.localStorage.getItem(SERVER_LOCALE_KEY); }
+  catch { return null; }
+}
+
+function writeServerLocalePreference(preference) {
+  if (!nativeStorageSetItem) return false;
+  try {
+    suppressServerLocaleSync = true;
+    nativeStorageSetItem.call(window.localStorage, SERVER_LOCALE_KEY, preference);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    suppressServerLocaleSync = false;
+  }
+}
+
+function updatePreloadI18nState(state) {
+  if (!state?.locale) return;
+  i18nState = state;
+  translate = createTranslator(state.locale);
+}
+
+function syncDesktopPreference(desktopPreference) {
+  try {
+    updatePreloadI18nState(ipcRenderer.sendSync('i18n:set-language-sync', desktopPreference));
+  } catch {}
+}
+
+function syncDesktopFromServerPreference(serverPreference) {
+  const desktopPreference = desktopLocaleForServer(serverPreference);
+  if (desktopPreference) syncDesktopPreference(desktopPreference);
+}
+
+function syncServerFromDesktopPreference(state, reload) {
+  const desired = serverLocaleForDesktop(state.preference);
+  if (readServerLocalePreference() === desired) return false;
+  if (!writeServerLocalePreference(desired)) return false;
+  if (reload) {
+    try { window.location.reload(); } catch {}
+  }
+  return true;
+}
+
+function isActiveServerView() {
+  try { return !!ipcRenderer.sendSync('i18n:is-active-server-sync'); }
+  catch { return false; }
+}
+
+if (nativeStorageSetItem && nativeStorageRemoveItem) {
+  Storage.prototype.setItem = function (key, value) {
+    const result = nativeStorageSetItem.call(this, key, value);
+    if (!suppressServerLocaleSync && this === window.localStorage && key === SERVER_LOCALE_KEY) {
+      syncDesktopFromServerPreference(String(value));
+    }
+    return result;
+  };
+  Storage.prototype.removeItem = function (key) {
+    const result = nativeStorageRemoveItem.call(this, key);
+    if (!suppressServerLocaleSync && this === window.localStorage && key === SERVER_LOCALE_KEY) {
+      syncDesktopFromServerPreference('auto');
+    }
+    return result;
+  };
+}
+
+function reconcileCurrentLanguagePreference(reload) {
+  const serverPreference = readServerLocalePreference();
+  const reconciliation = reconcileLanguagePreferences(i18nState, serverPreference, {
+    isActive: isActiveServerView(),
+  });
+  if (reconciliation.action === 'update-server') {
+    const persisted = writeServerLocalePreference(reconciliation.preference);
+    if (persisted && reload) {
+      try { window.location.reload(); } catch {}
+    }
+  } else if (reconciliation.action === 'update-desktop') {
+    syncDesktopPreference(reconciliation.preference);
+  }
+  return reconciliation.action;
+}
+
+(function reconcileInitialLanguagePreference() {
+  reconcileCurrentLanguagePreference(false);
+})();
+
+function t(key, values) {
+  return translate(key, values);
+}
+
+function setI18nText(element, key, values, prefix = '', suffix = '') {
+  if (!element) return;
+  element.dataset.havenI18n = key;
+  element.dataset.havenI18nValues = JSON.stringify(values || {});
+  element.dataset.havenI18nPrefix = prefix;
+  element.dataset.havenI18nSuffix = suffix;
+  element.lang = i18nState.locale;
+  element.textContent = `${prefix}${t(key, values)}${suffix}`;
+}
+
+function setI18nTitle(element, key, values) {
+  if (!element) return;
+  element.dataset.havenI18nTitle = key;
+  element.dataset.havenI18nTitleValues = JSON.stringify(values || {});
+  element.title = t(key, values);
+}
+
+function localizeMessageValues(values = {}) {
+  const localized = { ...values };
+  if (localized.modeKey) localized.mode = t(localized.modeKey);
+  return localized;
+}
+
+function localizeAudioStatus(status) {
+  if (!status?.messageKey) return status;
+  const values = localizeMessageValues(status.messageValues);
+  return { ...status, message: t(status.messageKey, values), messageValues: values };
+}
+
+function localizeShareModeInfo(modeInfo) {
+  if (!modeInfo?.detailKey) return modeInfo;
+  const values = { ...(modeInfo.detailValues || {}) };
+  if (modeInfo.detailReasonKey) {
+    values.reason = t(
+      modeInfo.detailReasonKey,
+      localizeMessageValues(modeInfo.detailReasonValues || {})
+    );
+  } else if (modeInfo.detailReason) {
+    values.reason = modeInfo.detailReason;
+  }
+  return { ...modeInfo, detail: t(modeInfo.detailKey, values) };
+}
+
+function dispatchShareModeInfo(modeInfo) {
+  const localized = localizeShareModeInfo(modeInfo);
+  window.__havenShareAudioMode = localized;
+  window.dispatchEvent(new CustomEvent('haven:share-audio-mode', { detail: localized }));
+}
+
+function applyInjectedTranslations(root = document) {
+  root.querySelectorAll?.('[data-haven-i18n-root]').forEach(element => {
+    element.dir = i18nState.direction;
+    element.lang = i18nState.locale;
+  });
+  root.querySelectorAll?.('[data-haven-i18n]').forEach(element => {
+    let values = {};
+    try { values = JSON.parse(element.dataset.havenI18nValues || '{}'); } catch {}
+    const prefix = element.dataset.havenI18nPrefix || '';
+    const suffix = element.dataset.havenI18nSuffix || '';
+    element.lang = i18nState.locale;
+    element.textContent = `${prefix}${t(element.dataset.havenI18n, values)}${suffix}`;
+  });
+  root.querySelectorAll?.('[data-haven-i18n-title]').forEach(element => {
+    let values = {};
+    try { values = JSON.parse(element.dataset.havenI18nTitleValues || '{}'); } catch {}
+    element.title = t(element.dataset.havenI18nTitle, values);
+  });
+}
+
+ipcRenderer.on('i18n:changed', (_event, state) => {
+  updatePreloadI18nState(state);
+  applyInjectedTranslations();
+  if (_lastNativeStatus) _lastNativeStatus = localizeAudioStatus(_lastNativeStatus);
+  if (_lastShareModeInfo) dispatchShareModeInfo(_lastShareModeInfo);
+  window.dispatchEvent(new CustomEvent('haven-desktop-language-changed', { detail: { ...state } }));
+});
+
+ipcRenderer.on('i18n:sync-server-preference', (_event, state) => {
+  updatePreloadI18nState(state);
+  syncServerFromDesktopPreference(state, true);
+});
+
+ipcRenderer.on('i18n:became-active', (_event, state) => {
+  updatePreloadI18nState(state);
+  reconcileCurrentLanguagePreference(true);
+  reportServerLanguageState();
+});
+
+let lastReportedServerLanguage = '';
+function reportServerLanguageState() {
+  const serverI18n = window.i18n;
+  if (!serverI18n) return;
+  const preference = String(serverI18n.preference || readServerLocalePreference() || 'auto');
+  const locale = String(serverI18n.locale || document.documentElement?.lang || '');
+  if (!locale) return;
+  const signature = `${preference}:${locale}`;
+  if (signature === lastReportedServerLanguage) return;
+  lastReportedServerLanguage = signature;
+  ipcRenderer.send('i18n:server-state', { preference, locale });
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(reportServerLanguageState, 0);
+  setTimeout(reportServerLanguageState, 500);
+  setTimeout(reportServerLanguageState, 2000);
+  if (document.documentElement && typeof MutationObserver !== 'undefined') {
+    const observer = new MutationObserver(reportServerLanguageState);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+  }
+});
+document.addEventListener('haven:localechange', reportServerLanguageState);
+window.addEventListener('languagechange', () => {
+  if (i18nState.preference === 'auto') {
+    ipcRenderer.invoke('i18n:refresh-automatic').catch(() => {});
+  }
+});
 
 // Mark the document as running inside the Electron shell.
 // This lets CSS override responsive breakpoints that would otherwise
@@ -187,26 +411,29 @@ window.addEventListener('DOMContentLoaded', () => {
       // Inject "Switch Server" button fixed to bottom of viewport
       const switchBtn = document.createElement('button');
       switchBtn.id = 'haven-switch-server-btn';
-      switchBtn.textContent = '⬡ Switch Server';
+      setI18nText(switchBtn, 'serverPicker.switch', null, '⬡ ');
       document.body.appendChild(switchBtn);
 
       // Build the server picker overlay
       const overlay = document.createElement('div');
       overlay.id = 'haven-server-picker-overlay';
+      overlay.dataset.havenI18nRoot = '';
+      overlay.dir = i18nState.direction;
+      overlay.lang = i18nState.locale;
       overlay.style.display = 'none';
       overlay.innerHTML = `
         <div id="haven-server-picker">
-          <h3>Switch Server</h3>
+          <h3 data-haven-i18n="serverPicker.switch">${t('serverPicker.switch')}</h3>
           <div class="hsp-form">
             <input type="text" id="hsp-url-input" placeholder="https://haven.example.com" spellcheck="false" autocomplete="off">
-            <button id="hsp-connect-btn">Connect</button>
+            <button id="hsp-connect-btn" data-haven-i18n="serverPicker.connect">${t('serverPicker.connect')}</button>
           </div>
           <div id="hsp-error" class="hsp-error" style="display:none"></div>
           <div id="hsp-recent-section" style="display:none">
-            <div class="hsp-divider-label">Recent Servers</div>
+            <div class="hsp-divider-label" data-haven-i18n="serverPicker.recent">${t('serverPicker.recent')}</div>
             <div id="hsp-recent-list"></div>
           </div>
-          <button id="hsp-cancel-btn" class="hsp-cancel">Cancel</button>
+          <button id="hsp-cancel-btn" class="hsp-cancel" data-haven-i18n="serverPicker.cancel">${t('serverPicker.cancel')}</button>
         </div>
       `;
       document.body.appendChild(overlay);
@@ -244,13 +471,13 @@ window.addEventListener('DOMContentLoaded', () => {
 
         url = _normalizeDesktopServerUrl(url);
         if (!url || !/^https?:\/\//i.test(url)) {
-          errorEl.textContent = 'Please enter a valid URL.';
+          setI18nText(errorEl, 'serverPicker.error.invalidUrl');
           errorEl.style.display = 'block';
           return;
         }
 
         connectBtn.disabled = true;
-        connectBtn.textContent = 'Connecting\u2026';
+        setI18nText(connectBtn, 'serverPicker.connecting');
 
         try {
           const controller = new AbortController();
@@ -259,18 +486,18 @@ window.addEventListener('DOMContentLoaded', () => {
           clearTimeout(timeout);
 
           if (!res || !res.ok) {
-            errorEl.textContent = 'Could not reach server. Check the address and try again.';
+            setI18nText(errorEl, 'serverPicker.error.unreachable');
             errorEl.style.display = 'block';
             return;
           }
 
           ipcRenderer.send('nav:change-primary-server', url);
         } catch {
-          errorEl.textContent = 'Connection failed. Check the address and try again.';
+          setI18nText(errorEl, 'serverPicker.error.connectionFailed');
           errorEl.style.display = 'block';
         } finally {
           connectBtn.disabled = false;
-          connectBtn.textContent = 'Connect';
+          setI18nText(connectBtn, 'serverPicker.connect');
         }
       });
 
@@ -323,7 +550,7 @@ window.addEventListener('DOMContentLoaded', () => {
           const removeBtn = document.createElement('button');
           removeBtn.className = 'hsp-remove-btn';
           removeBtn.textContent = '\u00d7';
-          removeBtn.title = 'Remove from history';
+          setI18nTitle(removeBtn, 'serverPicker.removeHistory');
           removeBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
             await ipcRenderer.invoke('server-history:remove', entry.url);
@@ -489,9 +716,8 @@ let _ipcDataCount = 0;
 // Track latest native capture status reported by the addon. Lets the
 // getDisplayMedia override abort its readiness wait early on hard failure
 // instead of always burning the full timeout.
-let _lastNativeStatus = null;
 ipcRenderer.on('audio:capture-status', (_event, status) => {
-  _lastNativeStatus = status;
+  _lastNativeStatus = localizeAudioStatus(status);
   const codeHex = '0x' + ((status?.code || 0) >>> 0).toString(16);
   console.log(`[Haven Desktop] native capture status: kind=${status?.kind} code=${codeHex} msg=${status?.message}`);
 });
@@ -502,8 +728,8 @@ ipcRenderer.on('audio:capture-status', (_event, status) => {
 ipcRenderer.on('audio:share-mode', (_event, modeInfo) => {
   console.log('[Haven Desktop] share audio mode:', modeInfo);
   try {
-    window.__havenShareAudioMode = modeInfo;
-    window.dispatchEvent(new CustomEvent('haven:share-audio-mode', { detail: modeInfo }));
+    _lastShareModeInfo = modeInfo;
+    dispatchShareModeInfo(modeInfo);
   } catch (e) { console.warn('[Haven Desktop] dispatch share-mode event failed:', e.message); }
 });
 ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
@@ -563,6 +789,9 @@ function showScreenPicker(sources, audioApps, requestId) {
 
   const overlay = document.createElement('div');
   overlay.id = 'haven-screen-picker';
+  overlay.dataset.havenI18nRoot = '';
+  overlay.dir = i18nState.direction;
+  overlay.lang = i18nState.locale;
   overlay.innerHTML = `
     <style>
       #haven-screen-picker {
@@ -608,29 +837,29 @@ function showScreenPicker(sources, audioApps, requestId) {
     </style>
 
     <div class="hsp-box">
-      <div class="hsp-title">Share Your Screen</div>
-      <div class="hsp-sub">Choose a window or screen — then optionally pick an application whose audio to share.</div>
+      <div class="hsp-title" data-haven-i18n="screenPicker.title">${t('screenPicker.title')}</div>
+      <div class="hsp-sub" data-haven-i18n="screenPicker.subtitle">${t('screenPicker.subtitle')}</div>
 
       <div class="hsp-scroll">
         <div class="hsp-sec">
-          <div class="hsp-sec-title">Screens</div>
+          <div class="hsp-sec-title" data-haven-i18n="screenPicker.screens">${t('screenPicker.screens')}</div>
           <div class="hsp-grid" id="hsp-screens"></div>
         </div>
 
         <div class="hsp-sec">
-          <div class="hsp-sec-title">Application Windows</div>
+          <div class="hsp-sec-title" data-haven-i18n="screenPicker.windows">${t('screenPicker.windows')}</div>
           <div class="hsp-grid" id="hsp-windows"></div>
         </div>
       </div>
 
       <div class="hsp-audio">
-        <div class="hsp-sec-title">🔊 Application Audio — isolate audio from a specific app</div>
+        <div class="hsp-sec-title" data-haven-i18n="screenPicker.audio" data-haven-i18n-prefix="🔊 ">🔊 ${t('screenPicker.audio')}</div>
         <div class="hsp-apps" id="hsp-audio-apps"></div>
       </div>
 
       <div class="hsp-btns">
-        <button class="hsp-btn hsp-cancel" id="hsp-cancel">Cancel</button>
-        <button class="hsp-btn hsp-share"  id="hsp-go" disabled>Share</button>
+        <button class="hsp-btn hsp-cancel" id="hsp-cancel" data-haven-i18n="screenPicker.cancel">${t('screenPicker.cancel')}</button>
+        <button class="hsp-btn hsp-share" id="hsp-go" data-haven-i18n="screenPicker.share" disabled>${t('screenPicker.share')}</button>
       </div>
     </div>`;
 
@@ -648,10 +877,22 @@ function showScreenPicker(sources, audioApps, requestId) {
   sources.forEach(src => {
     const el = document.createElement('div');
     el.className = 'hsp-src';
-    const preview = src.thumbnail
-      ? `<img src="${src.thumbnail}" alt="">`
-      : `<div class="hsp-thumb-ph">No preview</div>`;
-    el.innerHTML = `${preview}<div class="hsp-src-name" title="${src.name}">${src.name}</div>`;
+    if (src.thumbnail) {
+      const preview = document.createElement('img');
+      preview.src = src.thumbnail;
+      preview.alt = '';
+      el.appendChild(preview);
+    } else {
+      const preview = document.createElement('div');
+      preview.className = 'hsp-thumb-ph';
+      setI18nText(preview, 'screenPicker.noPreview');
+      el.appendChild(preview);
+    }
+    const sourceName = document.createElement('div');
+    sourceName.className = 'hsp-src-name';
+    sourceName.title = src.name;
+    sourceName.textContent = src.name;
+    el.appendChild(sourceName);
     el.onclick = () => {
       overlay.querySelectorAll('.hsp-src.sel').forEach(s => s.classList.remove('sel'));
       el.classList.add('sel');
@@ -665,7 +906,7 @@ function showScreenPicker(sources, audioApps, requestId) {
   // "No Audio" option — always shown first
   const muteEl = document.createElement('div');
   muteEl.className = 'hsp-app';
-  muteEl.innerHTML = '🔇&nbsp; No Audio';
+  setI18nText(muteEl, 'screenPicker.noAudio', null, '🔇 ');
   muteEl.onclick = () => {
     appsEl.querySelectorAll('.sel').forEach(a => a.classList.remove('sel'));
     muteEl.classList.add('sel');
@@ -679,7 +920,7 @@ function showScreenPicker(sources, audioApps, requestId) {
   // includes Haven voice; can't be helped without OS-level support yet).
   const sysEl = document.createElement('div');
   sysEl.className = 'hsp-app sel';
-  sysEl.innerHTML = '🔊&nbsp; System Audio';
+  setI18nText(sysEl, 'screenPicker.systemAudio', null, '🔊 ');
   selAudioPid = 'system';
   sysEl.onclick = () => {
     appsEl.querySelectorAll('.sel').forEach(a => a.classList.remove('sel'));
@@ -695,12 +936,31 @@ function showScreenPicker(sources, audioApps, requestId) {
       const el = document.createElement('div');
       el.className = 'hsp-app';
       if (a.active === false) el.style.opacity = '0.55';
-      const icon = a.icon ? `<img class="ico" src="${a.icon}" alt="">` : '🔊';
-      const dim  = a.active === false ? ' <span style="color:#888;font-size:11px">(silent)</span>' : '';
-      el.innerHTML = `${icon}<span>${a.name}${dim}</span>`;
-      el.title = a.active === false
-        ? 'This app is currently silent. Capture will start as soon as it produces audio.'
-        : a.name;
+      if (a.icon) {
+        const icon = document.createElement('img');
+        icon.className = 'ico';
+        icon.src = a.icon;
+        icon.alt = '';
+        el.appendChild(icon);
+      } else {
+        el.appendChild(document.createTextNode('🔊'));
+      }
+      const appName = document.createElement('span');
+      const appNameLabel = document.createElement('span');
+      if (a.nameKey) setI18nText(appNameLabel, a.nameKey);
+      else appNameLabel.textContent = a.name;
+      appName.appendChild(appNameLabel);
+      if (a.active === false) {
+        appName.appendChild(document.createTextNode(' '));
+        const silent = document.createElement('span');
+        silent.style.cssText = 'color:#888;font-size:11px';
+        setI18nText(silent, 'screenPicker.silent', null, '(', ')');
+        appName.appendChild(silent);
+      }
+      el.appendChild(appName);
+      if (a.active === false) setI18nTitle(el, 'screenPicker.silentDescription');
+      else if (a.nameKey) setI18nTitle(el, a.nameKey);
+      else el.title = a.name;
       el.onclick = () => {
         appsEl.querySelectorAll('.sel').forEach(x => x.classList.remove('sel'));
         el.classList.add('sel');
@@ -1134,6 +1394,13 @@ window.havenDesktop = {
   platform:     process.platform,
   isDesktopApp: true,
 
+  i18n: {
+    getState: () => ({ ...i18nState }),
+    getLocale: () => i18nState.locale,
+    t,
+    setLanguage: (preference) => ipcRenderer.invoke('i18n:set-language', preference),
+  },
+
   /** Switch to another Haven server inside the app window (hot-swap) */
   switchServer: (url) => ipcRenderer.send('nav:switch-server', url),
 
@@ -1222,6 +1489,7 @@ window.havenDesktop = {
     setHideMenuBar:   (v)     => ipcRenderer.invoke('desktop:set-hide-menu-bar', v),
     setDisableGpuVsync:  (v)  => ipcRenderer.invoke('desktop:set-disable-gpu-vsync', v),
     setUnlimitFrameRate: (v)  => ipcRenderer.invoke('desktop:set-unlimit-frame-rate', v),
+    setLanguage:         (v)  => ipcRenderer.invoke('i18n:set-language', v),
   },
 
   /** Query per-server unread badge state for notification dots */
@@ -1248,18 +1516,18 @@ console.log('[Haven Desktop] App preload ready — per-app audio & enhanced feat
 (function setupAutoUpdateBanner() {
   let bannerEl = null;
 
-  function createBanner(text, buttonLabel, buttonAction) {
+  function createBanner(messageKey, values, buttonKey, buttonAction) {
     removeBanner();
     bannerEl = document.createElement('div');
     bannerEl.id = 'haven-update-banner';
     bannerEl.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999998;background:linear-gradient(135deg,#6b4fdb,#8b6ce7);color:#fff;display:flex;align-items:center;justify-content:center;gap:12px;padding:8px 16px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.3);';
     const msg = document.createElement('span');
-    msg.textContent = text;
+    setI18nText(msg, messageKey, values);
     msg.id = 'haven-update-msg';
     bannerEl.appendChild(msg);
-    if (buttonLabel) {
+    if (buttonKey) {
       const btn = document.createElement('button');
-      btn.textContent = buttonLabel;
+      setI18nText(btn, buttonKey);
       btn.id = 'haven-update-btn';
       btn.style.cssText = 'background:#fff;color:#6b4fdb;border:none;border-radius:4px;padding:4px 14px;font-weight:600;cursor:pointer;font-size:12px;';
       btn.onclick = buttonAction;
@@ -1267,6 +1535,7 @@ console.log('[Haven Desktop] App preload ready — per-app audio & enhanced feat
     }
     const close = document.createElement('button');
     close.textContent = '✕';
+    setI18nTitle(close, 'update.close');
     close.style.cssText = 'background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:16px;padding:0 4px;margin-left:4px;';
     close.onclick = removeBanner;
     bannerEl.appendChild(close);
@@ -1279,16 +1548,19 @@ console.log('[Haven Desktop] App preload ready — per-app audio & enhanced feat
 
   ipcRenderer.on('update:available', (_e, { version }) => {
     createBanner(
-      `Haven Desktop v${version} is available!`,
-      'Update Now',
+      'update.available',
+      { version },
+      'update.now',
       async () => {
         const btn = document.getElementById('haven-update-btn');
         const msg = document.getElementById('haven-update-msg');
         if (btn) btn.disabled = true;
-        if (msg) msg.textContent = 'Downloading update...';
+        setI18nText(msg, 'update.downloading');
         const res = await ipcRenderer.invoke('update:download');
-        if (res?.error) {
-          if (msg) msg.textContent = `Update failed: ${res.error}`;
+        if (res?.errorKey) {
+          setI18nText(msg, res.errorKey);
+        } else if (res?.error) {
+          setI18nText(msg, 'update.failed', { error: res.error });
         }
       }
     );
@@ -1296,19 +1568,20 @@ console.log('[Haven Desktop] App preload ready — per-app audio & enhanced feat
 
   ipcRenderer.on('update:download-progress', (_e, { percent }) => {
     const msg = document.getElementById('haven-update-msg');
-    if (msg) msg.textContent = `Downloading update... ${percent}%`;
+    setI18nText(msg, 'update.downloadingProgress', { percent });
   });
 
   ipcRenderer.on('update:downloaded', () => {
     createBanner(
-      'Update downloaded! Restart to apply.',
-      'Restart Now',
+      'update.downloaded',
+      null,
+      'update.restartNow',
       () => ipcRenderer.send('update:install')
     );
   });
 
   ipcRenderer.on('update:error', (_e, { message }) => {
     const msg = document.getElementById('haven-update-msg');
-    if (msg) msg.textContent = `Update error: ${message}`;
+    setI18nText(msg, 'update.error', { error: message });
   });
 })();

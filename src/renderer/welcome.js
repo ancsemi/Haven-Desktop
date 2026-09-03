@@ -7,6 +7,64 @@
 
   const $ = (sel) => document.querySelector(sel);
   const pages = document.querySelectorAll('.page');
+  const i18n = window.haven.i18n;
+
+  function t(key, values) {
+    return i18n.t(key, values);
+  }
+
+  function setTranslatedText(element, key, values) {
+    if (!element) return;
+    element.dataset.i18n = key;
+    element.dataset.i18nValues = JSON.stringify(values || {});
+    element.textContent = t(key, values);
+  }
+
+  function setErrorText(element, message, fallbackKey) {
+    if (message) {
+      delete element.dataset.i18n;
+      delete element.dataset.i18nValues;
+      element.textContent = message;
+      return;
+    }
+    setTranslatedText(element, fallbackKey);
+  }
+
+  function applyTranslations(state = i18n.getState()) {
+    document.documentElement.lang = state.locale;
+    document.documentElement.dir = state.direction;
+
+    document.querySelectorAll('[data-i18n]').forEach(element => {
+      let values = {};
+      try { values = JSON.parse(element.dataset.i18nValues || '{}'); } catch {}
+      element.textContent = t(element.dataset.i18n, values);
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach(element => {
+      element.title = t(element.dataset.i18nTitle);
+    });
+
+    const languageSelect = $('#language-select');
+    languageSelect.replaceChildren();
+    const systemOption = document.createElement('option');
+    systemOption.value = 'auto';
+    systemOption.textContent = t('language.automatic');
+    languageSelect.appendChild(systemOption);
+    for (const locale of state.supportedLocales) {
+      const option = document.createElement('option');
+      option.value = locale.code;
+      option.textContent = locale.name;
+      languageSelect.appendChild(option);
+    }
+    languageSelect.value = state.preference;
+  }
+
+  applyTranslations();
+  i18n.onChanged(applyTranslations);
+
+  $('#language-select').addEventListener('change', async (event) => {
+    const state = await i18n.setLanguage(event.target.value);
+    applyTranslations(state);
+  });
 
   function showPage(id) {
     pages.forEach(p => p.classList.remove('active'));
@@ -49,7 +107,7 @@
       }
     } catch (err) {
       $('#host-detect').style.display  = 'none';
-      $('#host-error-msg').textContent = err.message || 'Detection failed.';
+      setErrorText($('#host-error-msg'), err.message, 'welcome.error.detectionFailed');
       $('#host-error').style.display   = 'block';
     }
   }
@@ -109,12 +167,13 @@
         window.haven.nav.openApp(serverUrl);
       } else {
         $('#host-starting').style.display = 'none';
-        $('#host-error-msg').textContent  = res.error || 'Failed to start server.';
+        if (res.errorKey) setTranslatedText($('#host-error-msg'), res.errorKey);
+        else setErrorText($('#host-error-msg'), res.error, 'welcome.error.startFailed');
         $('#host-error').style.display    = 'block';
       }
     } catch (err) {
       $('#host-starting').style.display = 'none';
-      $('#host-error-msg').textContent  = err.message || 'Unexpected error.';
+      setErrorText($('#host-error-msg'), err.message, 'welcome.error.unexpected');
       $('#host-error').style.display    = 'block';
     }
   }
@@ -151,7 +210,7 @@
     try {
       parsed = new URL(url);
     } catch {
-      joinError.textContent   = 'Please enter a valid URL (e.g. https://haven.example.com)';
+      setTranslatedText(joinError, 'welcome.error.invalidUrl');
       joinError.style.display = 'block';
       return;
     }
@@ -162,7 +221,7 @@
     urlInput.value = serverUrl;
 
     connectBtn.disabled    = true;
-    connectBtn.textContent = 'Connecting…';
+    setTranslatedText(connectBtn, 'welcome.connecting');
 
     try {
       // Quick health check — try to reach the server
@@ -176,7 +235,7 @@
       clearTimeout(timeout);
 
       if (!res || !res.ok) {
-        joinError.textContent = 'Could not reach the server. Make sure the address is correct and the server is running.';
+        setTranslatedText(joinError, 'welcome.error.serverUnreachable');
         joinError.style.display = 'block';
         return;
       }
@@ -195,11 +254,11 @@
       window.haven.nav.openApp(serverUrl);
 
     } catch (err) {
-      joinError.textContent = 'Could not reach the server. Check the address and try again.';
+      setTranslatedText(joinError, 'welcome.error.connectionFailed');
       joinError.style.display = 'block';
     } finally {
       connectBtn.disabled    = false;
-      connectBtn.textContent = 'Connect';
+      setTranslatedText(connectBtn, 'welcome.connect');
     }
   };
 

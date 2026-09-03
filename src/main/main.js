@@ -13,6 +13,10 @@ const os    = require('os');
 const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
+const {
+  DEFAULT_LOCALE, SYSTEM_LANGUAGE, SUPPORTED_LOCALES, normalizeLocale,
+  resolveLocale, translate, getLocaleMetadata,
+} = require('../i18n');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
@@ -55,8 +59,99 @@ const store = new Store({
     disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
     unlimitFrameRate:  false, // disable Chromium's frame-rate cap (pairs with disableGpuVsync)
     serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
+    language: SYSTEM_LANGUAGE,
+    languagePreferenceSet: false,
   },
 });
+
+const storedLanguage = store.get('language');
+if (storedLanguage === 'system') store.set('language', SYSTEM_LANGUAGE);
+if (storedLanguage && storedLanguage !== SYSTEM_LANGUAGE && storedLanguage !== 'system') {
+  store.set('languagePreferenceSet', true);
+}
+if (storedLanguage && storedLanguage !== SYSTEM_LANGUAGE && storedLanguage !== 'system') {
+  app.commandLine.appendSwitch('lang', resolveLocale(storedLanguage));
+}
+
+let currentLocale = 'en';
+
+function getSystemLanguages() {
+  try {
+    return [...app.getPreferredSystemLanguages(), app.getLocale()];
+  } catch {
+    return [];
+  }
+}
+
+function refreshLocale() {
+  currentLocale = resolveLocale(store.get('language'), getSystemLanguages());
+  return currentLocale;
+}
+
+function t(key, values) {
+  return translate(currentLocale, key, values);
+}
+
+function getI18nState() {
+  const preference = store.get('language') || SYSTEM_LANGUAGE;
+  const metadata = getLocaleMetadata(currentLocale);
+  const systemLocale = resolveLocale(SYSTEM_LANGUAGE, getSystemLanguages());
+  return {
+    preference,
+    locale: currentLocale,
+    systemLocale,
+    isPreferenceStored: !!store.get('languagePreferenceSet'),
+    direction: metadata.direction,
+    supportedLocales: SUPPORTED_LOCALES,
+  };
+}
+
+function broadcastLanguageChange() {
+  const state = getI18nState();
+  const targets = new Set([
+    welcomeWindow?.webContents,
+    mainWindow?.webContents,
+    ...Array.from(serverViews.values(), view => view.webContents),
+  ]);
+  for (const contents of targets) safeSend(contents, 'i18n:changed', state);
+}
+
+function refreshLanguageSurfaces() {
+  Menu.setApplicationMenu(buildAppMenu());
+  rebuildTrayMenu();
+  broadcastLanguageChange();
+  recomputeTaskbarBadge();
+}
+
+function applyAutomaticServerLocale(locale) {
+  if ((store.get('language') || SYSTEM_LANGUAGE) !== SYSTEM_LANGUAGE) return;
+  const resolved = normalizeLocale(locale) || DEFAULT_LOCALE;
+  if (resolved === currentLocale) return;
+  currentLocale = resolved;
+  if (app.isReady()) refreshLanguageSurfaces();
+}
+
+function setLanguagePreference(preference) {
+  if (preference === 'system') preference = SYSTEM_LANGUAGE;
+  const isSupported = preference === SYSTEM_LANGUAGE
+    || SUPPORTED_LOCALES.some(({ code }) => code === preference);
+  if (!isSupported) return getI18nState();
+
+  const currentPreference = store.get('language') || SYSTEM_LANGUAGE;
+  if (currentPreference === preference && store.get('languagePreferenceSet')) {
+    return getI18nState();
+  }
+
+  store.set('language', preference);
+  store.set('languagePreferenceSet', true);
+  refreshLocale();
+  if (app.isReady()) {
+    refreshLanguageSurfaces();
+    const activeView = activeServerUrl ? serverViews.get(activeServerUrl) : null;
+    safeSend(activeView?.webContents, 'i18n:sync-server-preference', getI18nState());
+  }
+  return getI18nState();
+}
 
 // ── Force sRGB color profile when user has HDR issues (must be before app.whenReady) ──
 if (store.get('forceSDR')) {
@@ -132,6 +227,7 @@ app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
 let mainWindow      = null;
 let welcomeWindow   = null;
 let tray            = null;
+let trayRefreshTimer = null;
 let serverManager   = null;
 let audioCapture    = null;
 let serverViews     = new Map();  // serverUrl → BrowserView
@@ -139,6 +235,7 @@ let activeServerUrl = null;
 let primaryServerUrl = null;       // the server the user actually chose to connect to
 let badgeIcon       = null;
 let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
+let serverLanguageStates = new Map(); // serverUrl → { preference, locale }
 // senderUrl → Set<normalizedUrl> of servers that view's sidebar can display.
 // Used to filter the taskbar overlay so a background BrowserView with
 // unreads doesn't light the badge when no open view has a visible icon
@@ -286,8 +383,9 @@ app.on('ready', () => {
 // ═══════════════════════════════════════════════════════════
 
 app.whenReady().then(async () => {
-  serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV });
-  audioCapture  = new AudioCaptureManager();
+  refreshLocale();
+  serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV, t });
+  audioCapture  = new AudioCaptureManager({ t });
   badgeIcon     = createBadgeIcon();
 
   // ── Sync start-on-login with OS ──────────────────────
@@ -729,7 +827,11 @@ function createAppWindow(serverUrl) {
       // the top-level window also hosts splash and (briefly) error pages.
       // Keeping it un-throttled means transient overlays don't add a second
       // throttle layer on top of the per-view setting during screen share. (#5379)
-      webPreferences: { backgroundThrottling: false },
+      webPreferences: {
+        backgroundThrottling: false,
+        preload: path.join(__dirname, 'splash-preload.js'),
+        sandbox: false,
+      },
     });
 
     // Show a splash page in the main window itself while the active server's
@@ -868,6 +970,11 @@ function switchToServer(serverUrl) {
 
   mainWindow.setTopBrowserView(view);
   activeServerUrl = url;
+  if ((store.get('language') || SYSTEM_LANGUAGE) === SYSTEM_LANGUAGE) {
+    const reportedLocale = serverLanguageStates.get(url)?.locale;
+    applyAutomaticServerLocale(reportedLocale || resolveLocale(SYSTEM_LANGUAGE, getSystemLanguages()));
+  }
+  safeSend(view.webContents, 'i18n:became-active', getI18nState());
 
   // Make sure the freshly-promoted view actually fills the window. Newly
   // created views start at 0×0 (so the splash stays visible during load),
@@ -959,6 +1066,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         view.setBounds({ x: 0, y: 0, width: cw, height: ch });
         view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
         mainWindow.setTopBrowserView(view);
+        safeSend(view.webContents, 'i18n:became-active', getI18nState());
       } catch {}
     };
     // Safety net — even if the active server is unreachable, drop the splash
@@ -1035,7 +1143,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           items.push({ type: 'separator' });
         }
         items.push({
-          label: 'Add to Dictionary',
+          label: t('context.addToDictionary'),
           click: () => {
             try { view.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {}
           },
@@ -1046,7 +1154,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       // ── Link actions ──
       if (params.linkURL) {
         items.push({
-          label: 'Copy Link',
+          label: t('context.copyLink'),
           click: () => { try { require('electron').clipboard.writeText(params.linkURL); } catch {} },
         });
         items.push({ type: 'separator' });
@@ -1059,11 +1167,11 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       const flags = params.editFlags || {};
       const hasSelection = !!(params.selectionText && params.selectionText.trim());
       if (params.isEditable || hasSelection) {
-        if (params.isEditable) items.push({ label: 'Cut', role: 'cut', enabled: flags.canCut });
-        items.push({ label: 'Copy', role: 'copy', enabled: flags.canCopy });
-        if (params.isEditable) items.push({ label: 'Paste', role: 'paste', enabled: flags.canPaste });
+        if (params.isEditable) items.push({ label: t('menu.cut'), role: 'cut', enabled: flags.canCut });
+        items.push({ label: t('menu.copy'), role: 'copy', enabled: flags.canCopy });
+        if (params.isEditable) items.push({ label: t('menu.paste'), role: 'paste', enabled: flags.canPaste });
         items.push({ type: 'separator' });
-        items.push({ label: 'Select All', role: 'selectAll' });
+        items.push({ label: t('menu.selectAll'), role: 'selectAll' });
       }
 
       // Trim any trailing separator so the menu doesn't end with a divider.
@@ -1118,7 +1226,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
             switchToServer(primaryServerUrl);
             const wc = serverViews.get(primaryServerUrl)?.webContents;
             if (wc && !wc.isDestroyed()) {
-              wc.executeJavaScript(`if (typeof app !== 'undefined' && typeof app._showToast === 'function') { app._showToast("That server doesn't look like Haven — returned to your server.", 'error'); }`).catch(() => {});
+              const toastMessage = JSON.stringify(t('connection.notHaven'));
+              wc.executeJavaScript(`if (typeof app !== 'undefined' && typeof app._showToast === 'function') { app._showToast(${toastMessage}, 'error'); }`).catch(() => {});
             }
           } else {
             resetToWelcome();
@@ -1146,10 +1255,10 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         const { response, timedOut } = await showDialogWithTimeout(mainWindow, {
           type: 'warning',
-          buttons: [isSecondary ? 'Go Back to My Server' : 'Go Back to Welcome', 'Keep Waiting'],
+          buttons: [isSecondary ? t('connection.goBackServer') : t('connection.goBackWelcome'), t('connection.keepWaiting')],
           defaultId: 0,
-          title: 'Connection Problem',
-          message: `Haven couldn't load the server at ${url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue. Auto-returns home in 30 seconds.`,
+          title: t('connection.problemTitle'),
+          message: t('connection.problemMessage', { url }),
         });
         if (timedOut) console.warn('[main] "Connection Problem" dialog timed out, returning home');
         const wantsOut = response !== 1; // 0 / -1 / undefined / Esc
@@ -1228,9 +1337,10 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           if (!background) {
             const wc = serverViews.get(primaryServerUrl)?.webContents;
             if (wc && !wc.isDestroyed()) {
+              const toastMessage = JSON.stringify(t('connection.failed'));
               wc.executeJavaScript(`
                 if (typeof app !== 'undefined' && typeof app._showToast === 'function') {
-                  app._showToast("Couldn't connect to that server", 'error');
+                  app._showToast(${toastMessage}, 'error');
                 }
               `).catch(() => {});
             }
@@ -1565,6 +1675,23 @@ function handleWindowOpen(url) {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
 }
 
+function getServerUrlForContents(contents) {
+  for (const [url, view] of serverViews) {
+    if (view.webContents === contents) return url;
+  }
+  try {
+    const normalized = normalizeServerUrl(contents?.getURL());
+    if (normalized && serverViews.has(normalized)) return normalized;
+  } catch {}
+  return null;
+}
+
+function isLanguageSenderAllowed(contents) {
+  if (welcomeWindow?.webContents === contents) return true;
+  const serverUrl = getServerUrlForContents(contents);
+  return !!serverUrl && serverUrl === activeServerUrl;
+}
+
 function getActiveContents() {
   if (activeServerUrl && serverViews.has(activeServerUrl))
     return serverViews.get(activeServerUrl).webContents;
@@ -1658,7 +1785,7 @@ function setNotificationBadge() {
   if (!mainWindow) return;
   // Overlay/dock badge: always show when there are unreads (even if window is focused —
   // the user may be in a different channel and hasn't seen the new message yet).
-  if (process.platform === 'win32' && badgeIcon) mainWindow.setOverlayIcon(badgeIcon, 'New messages');
+  if (process.platform === 'win32' && badgeIcon) mainWindow.setOverlayIcon(badgeIcon, t('badge.newMessages'));
   if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(1);
   // Taskbar flash: only when the window is not already in focus (avoids annoying flicker).
   if (!mainWindow.isFocused()) mainWindow.flashFrame(true);
@@ -1706,54 +1833,85 @@ function recomputeTaskbarBadge() {
 
 // Build a custom app menu that routes Reload / DevTools to the active
 // BrowserView instead of the (empty) mainWindow webContents.
+function buildLanguageSubmenu() {
+  const languagePreference = store.get('language') || SYSTEM_LANGUAGE;
+  return [
+    {
+      label: t('language.automatic'),
+      type: 'radio',
+      checked: languagePreference === SYSTEM_LANGUAGE,
+      click: () => setLanguagePreference(SYSTEM_LANGUAGE),
+    },
+    { type: 'separator' },
+    ...SUPPORTED_LOCALES.map(locale => ({
+      label: locale.name,
+      type: 'radio',
+      checked: languagePreference === locale.code,
+      click: () => setLanguagePreference(locale.code),
+    })),
+  ];
+}
+
 function buildAppMenu() {
   const isMac = process.platform === 'darwin';
   return Menu.buildFromTemplate([
     ...(isMac ? [{ role: 'appMenu' }] : []),
     {
-      label: 'Edit',
+      label: t('menu.edit'),
       submenu: [
-        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
-        { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
-        { role: 'selectAll' },
+        { label: t('menu.undo'), role: 'undo' },
+        { label: t('menu.redo'), role: 'redo' },
+        { type: 'separator' },
+        { label: t('menu.cut'), role: 'cut' },
+        { label: t('menu.copy'), role: 'copy' },
+        { label: t('menu.paste'), role: 'paste' },
+        { label: t('menu.selectAll'), role: 'selectAll' },
       ],
     },
     {
-      label: 'View',
+      label: t('menu.view'),
       submenu: [
         {
-          label: 'Reload',
+          label: t('menu.reload'),
           accelerator: 'CmdOrCtrl+R',
           click() { getActiveContents()?.reload(); },
         },
         {
-          label: 'Force Reload',
+          label: t('menu.forceReload'),
           accelerator: 'CmdOrCtrl+Shift+R',
           click() { getActiveContents()?.reloadIgnoringCache(); },
         },
         {
-          label: 'Toggle Developer Tools',
+          label: t('menu.toggleDeveloperTools'),
           accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
           click() { getActiveContents()?.toggleDevTools(); },
         },
         { type: 'separator' },
-        { role: 'togglefullscreen' },
+        { label: t('menu.toggleFullScreen'), role: 'togglefullscreen' },
         { type: 'separator' },
         {
-          label: 'Reset to Welcome Screen',
+          label: t('menu.resetWelcome'),
           accelerator: 'CmdOrCtrl+Shift+Home',
           click() { if (mainWindow) resetToWelcome(true); },
         },
       ],
     },
     {
-      label: 'Window',
+      label: t('menu.window'),
       submenu: [
-        { role: 'minimize' },
+        { label: t('menu.minimize'), role: 'minimize' },
         ...(isMac
-          ? [{ role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
-          : [{ role: 'close' }]),
+          ? [
+              { label: t('menu.zoom'), role: 'zoom' },
+              { type: 'separator' },
+              { label: t('menu.bringAllToFront'), role: 'front' },
+            ]
+          : [{ label: t('menu.close'), role: 'close' }]),
       ],
+    },
+    {
+      label: t('menu.language'),
+      submenu: buildLanguageSubmenu(),
     },
   ]);
 }
@@ -1763,6 +1921,11 @@ function buildAppMenu() {
 // ═══════════════════════════════════════════════════════════
 
 function createTray() {
+  if (tray && !tray.isDestroyed()) {
+    rebuildTrayMenu();
+    return;
+  }
+
   let icon;
   try {
     const raw = nativeImage.createFromPath(ICON_PATH);
@@ -1783,49 +1946,52 @@ function createTray() {
 
   tray = new Tray(icon);
   tray.setToolTip('Haven Desktop');
-
-  const rebuildMenu = () => {
-    const running = serverManager?.isRunning();
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: `Haven Desktop v${app.getVersion()}`, enabled: false },
-      { type: 'separator' },
-      { label: 'Show Haven', click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
-      ...(mainWindow ? [{
-        label: (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl) ? 'Back to My Server' : 'Change Server',
-        click: () => {
-          if (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl) {
-            // Viewing a secondary server — just switch back to primary
-            const secondaryUrl = activeServerUrl;
-            const secondaryView = serverViews.get(secondaryUrl);
-            if (secondaryView) {
-              mainWindow?.removeBrowserView(secondaryView);
-              try { secondaryView.webContents.destroy(); } catch {}
-              serverViews.delete(secondaryUrl);
-              serverBadgeState.delete(secondaryUrl);
-              knownServerUrlsByView.delete(secondaryUrl);
-              recomputeTaskbarBadge();
-            }
-            switchToServer(primaryServerUrl);
-          } else {
-            resetToWelcome(true);
-          }
-        }
-      }] : []),
-      { type: 'separator' },
-      { label: running ? '● Server Running' : '○ Server Stopped', enabled: false },
-      { type: 'separator' },
-      { label: 'Quit Haven', click: () => { app.isQuitting = true; app.quit(); } },
-    ]));
-  };
-
-  rebuildMenu();
+  rebuildTrayMenu();
   // Refresh tray menu periodically so server status stays current
-  setInterval(rebuildMenu, 60000);
+  if (!trayRefreshTimer) trayRefreshTimer = setInterval(rebuildTrayMenu, 60000);
 
   tray.on('click', () => {
     const win = mainWindow || welcomeWindow;
     if (win) { win.isVisible() ? win.focus() : win.show(); }
   });
+}
+
+function rebuildTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  const running = serverManager?.isRunning();
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: `Haven Desktop v${app.getVersion()}`, enabled: false },
+    { type: 'separator' },
+    { label: t('tray.show'), click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
+    ...(mainWindow ? [{
+      label: (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl)
+        ? t('tray.backToServer')
+        : t('tray.changeServer'),
+      click: () => {
+        if (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl) {
+          const secondaryUrl = activeServerUrl;
+          const secondaryView = serverViews.get(secondaryUrl);
+          if (secondaryView) {
+            mainWindow?.removeBrowserView(secondaryView);
+            try { secondaryView.webContents.destroy(); } catch {}
+            serverViews.delete(secondaryUrl);
+            serverBadgeState.delete(secondaryUrl);
+            knownServerUrlsByView.delete(secondaryUrl);
+            recomputeTaskbarBadge();
+          }
+          switchToServer(primaryServerUrl);
+        } else {
+          resetToWelcome(true);
+        }
+      },
+    }] : []),
+    { type: 'separator' },
+    { label: t('menu.language'), submenu: buildLanguageSubmenu() },
+    { type: 'separator' },
+    { label: `${running ? '●' : '○'} ${running ? t('tray.serverRunning') : t('tray.serverStopped')}`, enabled: false },
+    { type: 'separator' },
+    { label: t('tray.quit'), click: () => { app.isQuitting = true; app.quit(); } },
+  ]));
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1991,7 +2157,7 @@ function registerScreenShareHandler() {
       //                       (still includes Haven voice — kept only as a
       //                        last-resort path; UI now defaults to 'system')
       const startNative = (mode, pid) => {
-        const reasonRef = { msg: null };
+        const reasonRef = { status: null };
         let ok = false;
         try {
           console.log(`[ScreenShare] starting native capture: mode=${mode} pid=${pid}`);
@@ -2011,14 +2177,19 @@ function registerScreenShareHandler() {
             },
             onStatus: (s) => {
               safeSend(targetContents, 'audio:capture-status', s);
-              if (s.kind === 'failed') reasonRef.msg = s.message;
+              if (s.kind === 'failed') reasonRef.status = s;
             },
           });
         } catch (err) {
           console.error(`[ScreenShare] native capture (${mode}) threw:`, err.message);
-          reasonRef.msg = err.message;
+          reasonRef.status = {
+            kind: 'failed',
+            message: err.message,
+            messageKey: err.messageKey,
+            messageValues: err.messageValues,
+          };
         }
-        return { ok, reason: reasonRef.msg };
+        return { ok, reason: reasonRef.status?.message || null, status: reasonRef.status };
       };
 
       // What the user wanted, and what we ended up with.
@@ -2028,6 +2199,20 @@ function registerScreenShareHandler() {
       let requestedMode = 'legacy-loopback';
       let appliedMode   = 'system-loopback';
       let appliedDetail = null; // optional human-readable string
+      let appliedDetailKey = null;
+      let appliedDetailValues = null;
+      let appliedDetailReasonKey = null;
+      let appliedDetailReasonValues = null;
+      let appliedDetailReason = null;
+
+      const setAppliedErrorDetail = (detailKey, status, fallbackReasonKey) => {
+        const reason = status?.message || t(fallbackReasonKey);
+        appliedDetail = t(detailKey, { reason });
+        appliedDetailKey = detailKey;
+        appliedDetailReasonKey = status?.messageKey || (!status?.message ? fallbackReasonKey : null);
+        appliedDetailReasonValues = status?.messageValues || null;
+        appliedDetailReason = status?.messageKey ? null : status?.message || null;
+      };
 
       let usePerAppAudio = false;
 
@@ -2036,12 +2221,15 @@ function registerScreenShareHandler() {
         appliedMode   = 'none';
       } else if (typeof result.audioAppPid === 'number' && result.audioAppPid > 0) {
         requestedMode = 'app';
-        const appName = (audioApps.find(a => a.pid === result.audioAppPid) || {}).name || `pid ${result.audioAppPid}`;
+        const audioApp = audioApps.find(a => a.pid === result.audioAppPid);
+        const appName = audioApp?.name || t('audio.process', { pid: result.audioAppPid });
         const r1 = startNative('include', result.audioAppPid);
         if (r1.ok) {
           usePerAppAudio = true;
           appliedMode    = 'app';
           appliedDetail  = appName;
+          appliedDetailKey = audioApp?.nameKey || (!audioApp ? 'audio.process' : null);
+          appliedDetailValues = !audioApp ? { pid: result.audioAppPid } : null;
           console.log(`[ScreenShare] per-app capture active for "${appName}"`);
         } else {
           // Per-app capture failed. Fall back to system-minus-Haven so the
@@ -2051,7 +2239,7 @@ function registerScreenShareHandler() {
           if (r2.ok) {
             usePerAppAudio = true;
             appliedMode    = 'fallback-system-clean';
-            appliedDetail  = `app capture failed: ${r1.reason || 'unknown reason'}`;
+            setAppliedErrorDetail('audio.detail.appCaptureFailed', r1.status, 'audio.unknownReason');
             console.log('[ScreenShare] fallback to system-minus-Haven active');
           } else {
             // Even exclude-mode failed. As a final last-resort, ask Electron
@@ -2059,7 +2247,7 @@ function registerScreenShareHandler() {
             // but better than silence per user preference for per-app fail).
             console.warn(`[ScreenShare] system-minus-Haven also failed (${r2.reason || 'unknown'}); using Electron loopback as last resort`);
             appliedMode   = 'system-loopback';
-            appliedDetail = `native capture unavailable: ${r2.reason || r1.reason || 'unknown'}`;
+            setAppliedErrorDetail('audio.detail.nativeUnavailable', r2.status || r1.status, 'audio.unknown');
           }
         }
       } else if (result.audioAppPid === 'system') {
@@ -2071,7 +2259,7 @@ function registerScreenShareHandler() {
         } else {
           console.warn(`[ScreenShare] exclude-mode failed (${r.reason || 'unknown'}); using Electron loopback as fallback`);
           appliedMode   = 'system-loopback';
-          appliedDetail = `clean system audio unavailable: ${r.reason || 'unknown'}`;
+          setAppliedErrorDetail('audio.detail.cleanSystemUnavailable', r.status, 'audio.unknown');
         }
       }
 
@@ -2080,6 +2268,11 @@ function registerScreenShareHandler() {
         requested: requestedMode,
         applied:   appliedMode,
         detail:    appliedDetail,
+        detailKey: appliedDetailKey,
+        detailValues: appliedDetailValues,
+        detailReasonKey: appliedDetailReasonKey,
+        detailReasonValues: appliedDetailReasonValues,
+        detailReason: appliedDetailReason,
       });
 
       // Audio routing for the share:
@@ -2111,6 +2304,48 @@ function registerScreenShareHandler() {
 
 function registerIPC() {
 
+  // ── Internationalization ──────────────────────────────
+  ipcMain.on('i18n:get-state-sync', (event) => {
+    event.returnValue = getI18nState();
+  });
+  ipcMain.on('i18n:is-active-server-sync', (event) => {
+    const serverUrl = getServerUrlForContents(event.sender);
+    event.returnValue = !!serverUrl && serverUrl === activeServerUrl;
+  });
+  ipcMain.on('i18n:set-language-sync', (event, preference) => {
+    if (!isLanguageSenderAllowed(event.sender)) {
+      event.returnValue = getI18nState();
+      return;
+    }
+    event.returnValue = setLanguagePreference(preference);
+  });
+  ipcMain.handle('i18n:set-language', (event, preference) => {
+    if (!isLanguageSenderAllowed(event.sender)) return getI18nState();
+    return setLanguagePreference(preference);
+  });
+  ipcMain.handle('i18n:refresh-automatic', (event) => {
+    if (!isLanguageSenderAllowed(event.sender)) return getI18nState();
+    if ((store.get('language') || SYSTEM_LANGUAGE) === SYSTEM_LANGUAGE) {
+      const activeServerLocale = activeServerUrl
+        ? serverLanguageStates.get(activeServerUrl)?.locale
+        : null;
+      if (activeServerLocale) applyAutomaticServerLocale(activeServerLocale);
+      else {
+        refreshLocale();
+        refreshLanguageSurfaces();
+      }
+    }
+    return getI18nState();
+  });
+  ipcMain.on('i18n:server-state', (event, state = {}) => {
+    const url = getServerUrlForContents(event.sender);
+    if (!url) return;
+    const preference = typeof state.preference === 'string' ? state.preference.slice(0, 20) : 'auto';
+    const locale = typeof state.locale === 'string' ? state.locale.slice(0, 20) : '';
+    serverLanguageStates.set(url, { preference, locale });
+    if (url === activeServerUrl && locale) applyAutomaticServerLocale(locale);
+  });
+
   // ── Server Management ─────────────────────────────────
   ipcMain.handle('server:detect',      ()        => serverManager.detectServer());
   ipcMain.handle('server:start',       (_e, dir) => serverManager.startServer(dir));
@@ -2120,7 +2355,7 @@ function registerIPC() {
   ipcMain.handle('server:browse', async () => {
     const lastPath = store.get('userPrefs.serverPath');
     const r = await dialog.showOpenDialog(welcomeWindow || mainWindow, {
-      title: 'Select Haven Server Directory',
+      title: t('dialog.selectServerDirectory'),
       defaultPath: lastPath || undefined,
       properties: ['openDirectory'],
     });
@@ -2129,7 +2364,7 @@ function registerIPC() {
 
   ipcMain.handle('server:browse-file', async () => {
     const r = await dialog.showOpenDialog(welcomeWindow || mainWindow, {
-      title: 'Select server.js',
+      title: t('dialog.selectServerFile'),
       properties: ['openFile'],
       filters: [{ name: 'JavaScript', extensions: ['js'] }],
     });
@@ -2138,7 +2373,7 @@ function registerIPC() {
 
   // ── Auto-Update ───────────────────────────────────────
   ipcMain.handle('update:download', async () => {
-    if (!autoUpdater) return { error: 'Auto-updater not available' };
+    if (!autoUpdater) return { errorKey: 'update.unavailable' };
     try { await autoUpdater.downloadUpdate(); return { success: true }; }
     catch (err) { return { error: err.message }; }
   });
@@ -2174,18 +2409,20 @@ function registerIPC() {
   ipcMain.handle('devices:get-inputs', async () => {
     const wc = getActiveContents();
     if (!wc) return [];
+    const fallbackLabel = JSON.stringify(t('device.microphone'));
     return wc.executeJavaScript(`
       navigator.mediaDevices.enumerateDevices()
-        .then(d => d.filter(x => x.kind==='audioinput').map(x => ({ deviceId:x.deviceId, label:x.label||'Mic '+x.deviceId.slice(0,8), groupId:x.groupId })))
+        .then(d => d.filter(x => x.kind==='audioinput').map(x => ({ deviceId:x.deviceId, label:x.label||${fallbackLabel}+' '+x.deviceId.slice(0,8), groupId:x.groupId })))
     `);
   });
 
   ipcMain.handle('devices:get-outputs', async () => {
     const wc = getActiveContents();
     if (!wc) return [];
+    const fallbackLabel = JSON.stringify(t('device.speaker'));
     return wc.executeJavaScript(`
       navigator.mediaDevices.enumerateDevices()
-        .then(d => d.filter(x => x.kind==='audiooutput').map(x => ({ deviceId:x.deviceId, label:x.label||'Speaker '+x.deviceId.slice(0,8), groupId:x.groupId })))
+        .then(d => d.filter(x => x.kind==='audiooutput').map(x => ({ deviceId:x.deviceId, label:x.label||${fallbackLabel}+' '+x.deviceId.slice(0,8), groupId:x.groupId })))
     `);
   });
 
@@ -2403,6 +2640,7 @@ function registerIPC() {
     hideMenuBar:      !!store.get('hideMenuBar'),
     disableGpuVsync:  !!store.get('disableGpuVsync'),
     unlimitFrameRate: !!store.get('unlimitFrameRate'),
+    language:         getI18nState(),
   }));
 
   ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {
@@ -2613,7 +2851,7 @@ function registerIPC() {
     // the getBoundingClientRect reflow storm and executeJavaScript health checks,
     // not these dialog calls.
     dialog.showMessageBoxSync(mainWindow, {
-      type: 'info', buttons: ['OK'], title: 'Haven',
+      type: 'info', buttons: [t('dialog.ok')], title: 'Haven',
       message: String(message || ''),
     });
     event.returnValue = true;
@@ -2625,7 +2863,7 @@ function registerIPC() {
       mainWindow.focus();
     }
     const r = dialog.showMessageBoxSync(mainWindow, {
-      type: 'question', buttons: ['Cancel', 'OK'],
+      type: 'question', buttons: [t('dialog.cancel'), t('dialog.ok')],
       defaultId: 1, cancelId: 0, title: 'Haven',
       message: String(message || ''),
     });
@@ -2640,11 +2878,11 @@ function registerIPC() {
     // Native Electron dialog — no cscript.exe, no execSync, no 5-minute timeout.
     const r = dialog.showMessageBoxSync(mainWindow, {
       type: 'question',
-      buttons: ['Cancel', 'OK'],
+      buttons: [t('dialog.cancel'), t('dialog.ok')],
       defaultId: 1, cancelId: 0,
       title: 'Haven',
       message: String(message || ''),
-      detail: defaultValue ? `Default: ${defaultValue}` : undefined,
+      detail: defaultValue ? t('dialog.defaultValue', { value: defaultValue }) : undefined,
     });
     event.returnValue = r === 1 ? (defaultValue || '') : null;
   });
@@ -2670,7 +2908,9 @@ function installLinuxDesktopEntry() {
   // Skip if already registered for this AppImage path
   if (fs.existsSync(desktopFile)) {
     try {
-      if (fs.readFileSync(desktopFile, 'utf-8').includes(appImagePath)) return;
+      const existingEntry = fs.readFileSync(desktopFile, 'utf-8');
+      const localizedComment = `Comment[pt_BR]=${translate('pt-BR', 'linux.desktopComment')}`;
+      if (existingEntry.includes(appImagePath) && existingEntry.includes(localizedComment)) return;
     } catch {}
   }
 
@@ -2683,7 +2923,8 @@ function installLinuxDesktopEntry() {
     const entry = [
       '[Desktop Entry]',
       'Name=Haven',
-      'Comment=Private self-hosted chat',
+      `Comment=${translate('en', 'linux.desktopComment')}`,
+      `Comment[pt_BR]=${translate('pt-BR', 'linux.desktopComment')}`,
       `Exec="${appImagePath}" %U`,
       `Icon=${iconDest}`,
       'Type=Application',
