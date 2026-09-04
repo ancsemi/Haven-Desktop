@@ -1,5 +1,18 @@
 # Haven Desktop Changelog
 
+## v1.4.30
+
+### Added
+- **The app speaks Portuguese (Brazil), with more languages ready to follow.** The welcome screen, splash, menus, tray, dialogs, update banner, server picker and screen share picker are all translated, with a Language menu (Automatic, English, Português) that applies without a restart. The app follows the language you pick inside Haven, and picking one in the app updates Haven to match. Thanks to @bernardokcosta.
+
+### Fixed
+- **Maximizing or going fullscreen on GNOME Wayland could leave the app at its old size with the splash showing around it.** The active server view now follows the window natively and re-checks its size once the transition settles. The same fix covers X11 window managers such as dwm. Thanks to @bernardokcosta, and to lzhecz for confirming the X11 case.
+
+### Changed
+- The release workflow creates the GitHub release before the build uploads its files, so a tag can no longer end up with two releases the way 1.4.29 did.
+
+---
+
 ## v1.4.29
 
 ### Fixed
