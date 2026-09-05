@@ -34,6 +34,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | Feature | Description |
 |---|---|
 | **Per-Application Audio** | Share audio from a **single application** during screen share — just like Discord. Powered by native WASAPI (Windows) and PulseAudio (Linux) hooks. |
+| **Screen-Share Encoder Controls** | Choose the codec before streaming. The native transport uses VA-API, Media Foundation, or another available GPU backend; the browser transport requests H.264 and reports whether Chromium confirms hardware acceleration. |
 | **Audio Device Switching** | Switch your microphone and speaker mid-call without leaving voice chat. |
 | **Desktop Notifications** | Native OS-level notifications via the taskbar / system tray. |
 | **Host or Join** | Run your own Haven server from the app, or connect to someone else's. Auto-detects local servers. |
@@ -48,7 +49,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 - **Windows 10** (build 19041+) / **Windows 11**
 - **Linux** (PulseAudio or PipeWire with `pipewire-pulse`)
 
-> Per-app audio on Windows requires build 19041+ (Windows 10 version 2004, May 2020 Update).
+> Per-app audio on Windows requires build 20348+; earlier Windows 10 builds can still run Haven but cannot use process-isolated audio capture.
 
 ---
 
@@ -62,13 +63,17 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 - **npm** 10+
 - **C++ Build Tools:**
   - **Windows:** Visual Studio Build Tools 2019+ with the "Desktop development with C++" workload
-  - **Linux:** `build-essential`, `libpulse-dev`
+  - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
+- **GStreamer:**
+  - **Windows:** GStreamer MSVC x86-64 runtime and development packages. Install them under `C:\gstreamer\1.0\msvc_x86_64`, or set `GSTREAMER_1_0_ROOT_MSVC_X86_64` to the installation directory.
+  - **Linux:** `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-plugins-bad1.0-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-nice`, `gstreamer1.0-pipewire`, `gstreamer1.0-vaapi`
 
 ### Quick Start (Windows — No Terminal)
 
-1. Double-click **`Setup.bat`** — installs everything
-2. Double-click **`Start Haven Desktop.bat`** — launches the app
-3. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
+1. Install the Windows prerequisites listed above
+2. Double-click **`Setup.bat`** — installs npm dependencies and builds the native components
+3. Double-click **`Start Haven Desktop.bat`** — launches the app
+4. Double-click **`Build Installer.bat`** — stages GStreamer and creates a distributable `.exe` in `dist/`
 
 ### Quick Start (Terminal)
 
@@ -80,8 +85,11 @@ cd Haven-Desktop
 # Install dependencies
 npm install
 
-# Build the native audio addon
+# Build the native audio addon and screen-share helper
 npm run build:native
+
+# Stage the GStreamer runtime used by the native helper
+npm run stage:native-runtime
 
 # Run in dev mode
 npm run dev
@@ -147,7 +155,7 @@ Haven-Desktop/
 ### How Per-App Audio Works
 
 **Windows (WASAPI Process Loopback):**
-The app uses the Windows 10 2004+ `ActivateAudioInterfaceAsync` API with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` to capture audio exclusively from a target process. This is the same API Discord uses. The native addon runs in a background thread, captures 48 kHz float32 PCM, and streams it to the renderer via IPC.
+The app uses `ActivateAudioInterfaceAsync` with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` on Windows build 20348+ to capture audio exclusively from a target process. The native addon runs in a background thread, captures 48 kHz float32 PCM, and streams it to the renderer via IPC.
 
 **Linux (PulseAudio):**
 The app creates a virtual null sink, moves the target application's audio stream to it, records from the sink's monitor, and loops the audio back to the default output so the user still hears it.

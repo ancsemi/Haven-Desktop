@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════
 // Haven Desktop — Windows WASAPI Per-Process Audio Capture
 //
-// Captures audio from a single process using the Windows 10
-// 2004+ (build 19041) Process Loopback API.
+// Captures audio from a single process using the Windows
+// build 20348+ Process Loopback API.
 //
 // Flow:
 //   1) ActivateAudioInterfaceAsync with process-loopback params
@@ -37,6 +37,7 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <unordered_map>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "mmdevapi.lib")
@@ -70,6 +71,33 @@ static std::string ProcessNameFromPid(DWORD pid) {
     }
     CloseHandle(h);
     return "Unknown";
+}
+
+static std::unordered_map<DWORD, DWORD> SnapshotProcessParents() {
+    std::unordered_map<DWORD, DWORD> parents;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return parents;
+
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            parents[entry.th32ProcessID] = entry.th32ParentProcessID;
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return parents;
+}
+
+static bool IsProcessInTree(DWORD pid, DWORD rootPid,
+                            const std::unordered_map<DWORD, DWORD>& parents) {
+    for (size_t depth = 0; pid != 0 && depth <= parents.size(); depth++) {
+        if (pid == rootPid) return true;
+        auto it = parents.find(pid);
+        if (it == parents.end() || it->second == pid) break;
+        pid = it->second;
+    }
+    return false;
 }
 
 // ── Completion handler for ActivateAudioInterfaceAsync ────
@@ -155,7 +183,7 @@ WasapiCapture::~WasapiCapture() {
 }
 
 // ── IsSupported ────────────────────────────────────────────
-// Process loopback requires Windows 10 build 19041+
+// Process loopback activation is supported starting with build 20348.
 bool WasapiCapture::IsSupported() const {
     OSVERSIONINFOEXW ovi = {};
     ovi.dwOSVersionInfoSize = sizeof(ovi);
@@ -164,9 +192,9 @@ bool WasapiCapture::IsSupported() const {
     auto RtlGetVersion = (RtlGetVersionFn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
     if (RtlGetVersion) {
         RtlGetVersion((PRTL_OSVERSIONINFOW)&ovi);
-        // Win10 20H1 = build 19041
+        // Windows Server 2022 / Windows 11 generation.
         return (ovi.dwMajorVersion > 10) ||
-               (ovi.dwMajorVersion == 10 && ovi.dwBuildNumber >= 19041);
+               (ovi.dwMajorVersion == 10 && ovi.dwBuildNumber >= 20348);
     }
     return false;
 }
@@ -182,6 +210,7 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
     // Track PIDs we've already seen across all endpoints (avoid duplicates)
     std::vector<DWORD> seen;
     DWORD ourPid = GetCurrentProcessId();
+    const auto processParents = SnapshotProcessParents();
 
     IMMDeviceEnumerator* enumerator = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
@@ -232,7 +261,7 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
 
             DWORD pid = 0;
             ctrl2->GetProcessId(&pid);
-            if (pid == 0 || pid == ourPid ||
+            if (pid == 0 || IsProcessInTree(pid, ourPid, processParents) ||
                 std::find(seen.begin(), seen.end(), pid) != seen.end()) {
                 ctrl2->Release(); ctrl->Release(); continue;
             }
