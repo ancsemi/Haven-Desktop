@@ -49,14 +49,22 @@ if %ERRORLEVEL% neq 0 (
     echo        install-app-deps complete.
 )
 
-:: ─── Build native audio addon ──────────────────────────
+:: ─── Build native media components ─────────────────────
 echo.
-echo [4/4] Building native per-app audio addon...
-echo        (Requires Visual Studio Build Tools with C++ workload^)
+echo [4/4] Building native media components...
+echo        (Requires Visual Studio Build Tools and the GStreamer SDK^)
 echo.
 
 :: Use explicit path to node-gyp (avoids npx @ path resolution bug)
 node "./node_modules/node-gyp/bin/node-gyp.js" rebuild --directory=native
+
+if exist "native\build\Release\haven_screen_share.exe" (
+    call npm run stage:native-runtime
+    if errorlevel 1 (
+        echo        WARNING: GStreamer runtime staging failed.
+        echo        Native GPU screen sharing will be unavailable in dev mode.
+    )
+)
 
 :: node-gyp sends info to stderr so exit code can be wrong — check the file
 if exist "native\build\Release\haven_audio.node" (

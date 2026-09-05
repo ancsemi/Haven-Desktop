@@ -50,8 +50,8 @@ private:
     uint32_t          m_targetPid = 0;
     CaptureMode       m_mode = CaptureMode::IncludeProcess;
     std::mutex        m_mutex;
-    uint32_t          m_nullSinkModule = 0;  // PulseAudio module index
-    uint32_t          m_loopbackModule = 0;  // loopback module index
+    uint32_t          m_nullSinkModule = UINT32_MAX; // PulseAudio module index
+    uint32_t          m_loopbackModule = UINT32_MAX; // loopback/combine module index
 };
 
 } // namespace haven

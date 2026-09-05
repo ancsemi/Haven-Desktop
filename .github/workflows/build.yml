@@ -21,11 +21,35 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install GStreamer SDK
+        shell: pwsh
+        run: |
+          choco install gstreamer gstreamer-devel --version=1.26.9 -y
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer\1.0\msvc_x86_64" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "C:\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
       - name: Install dependencies
         run: npm ci
 
+      - name: Run tests
+        run: npm test
+
       - name: Build native audio addon
         run: npm run build:native
+
+      - name: Stage native media runtime
+        run: npm run stage:native-runtime
+
+      - name: Probe staged native media runtime
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\native\runtime\gstreamer\bin;$env:PATH"
+          $env:GST_PLUGIN_PATH_1_0 = "$PWD\native\runtime\gstreamer\plugins"
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $env:GST_PLUGIN_PATH_1_0
+          $env:GST_PLUGIN_SCANNER_1_0 = "$PWD\native\runtime\gstreamer\libexec\gst-plugin-scanner.exe"
+          $probeOutput = .\native\build\Release\haven_screen_share.exe --probe | Out-String
+          if ($LASTEXITCODE -ne 0) { Write-Host "Hardware capability unavailable on build runner; validating bundle metadata only." }
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==3||p.components?.capture!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" $probeOutput.Trim()
 
       # electron-builder 26 uploads the installer and its blockmap in parallel,
       # and when no release exists yet each upload creates one, so a tag ended
@@ -37,7 +61,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1             || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "${GITHUB_REF_NAME#v}" --notes "Release notes to follow."
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "${GITHUB_REF_NAME#v}" --notes "Release notes to follow."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -57,7 +82,7 @@ jobs:
   # ─── Linux Build ────────────────────────────────────────
   build-linux:
     needs: [build-windows]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -66,14 +91,25 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install PulseAudio dev headers
-        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev
+      - name: Install native media development packages
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-pipewire gstreamer1.0-vaapi
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Run tests
+        run: npm test
+
       - name: Build native audio addon
         run: npm run build:native
+
+      - name: Stage native media runtime
+        run: npm run stage:native-runtime
+
+      - name: Probe staged native media runtime
+        run: |
+          probe_output=$(LD_LIBRARY_PATH="$PWD/native/runtime/gstreamer/lib" GST_PLUGIN_PATH_1_0="$PWD/native/runtime/gstreamer/plugins" GST_PLUGIN_SYSTEM_PATH_1_0="$PWD/native/runtime/gstreamer/plugins" GST_PLUGIN_SCANNER_1_0="$PWD/native/runtime/gstreamer/libexec/gst-plugin-scanner" native/build/Release/haven_screen_share --probe || true)
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==3||p.components?.capture!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" "$probe_output"
 
       - name: Build & Publish Linux packages
         run: npx electron-builder --linux --publish always

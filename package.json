@@ -16,11 +16,13 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "test": "node --test test/*.test.js",
     "i18n:check": "node scripts/check-i18n.js && node scripts/check-language-sync.js",
-    "build": "npm run i18n:check && npm run build:native && electron-builder",
-    "build:win": "npm run i18n:check && npm run build:native && electron-builder --win",
-    "build:linux": "npm run i18n:check && npm run build:native && electron-builder --linux",
+    "build": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder",
+    "build:win": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder --win",
+    "build:linux": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder --linux",
     "build:native": "node ./node_modules/node-gyp/bin/node-gyp.js rebuild --directory=native",
+    "stage:native-runtime": "node scripts/stage-gstreamer.js",
     "rebuild:electron": "electron-builder install-app-deps && npm run build:native",
     "postinstall": "electron-builder install-app-deps || echo electron-rebuild skipped"
   },
