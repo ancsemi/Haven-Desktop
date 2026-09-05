@@ -9,16 +9,22 @@
   },
   "license": "AGPL-3.0",
   "homepage": "https://ancsemi.github.io/Haven/",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "test": "node --test test/*.test.js",
     "i18n:check": "node scripts/check-i18n.js && node scripts/check-language-sync.js",
-    "build": "npm run i18n:check && npm run build:native && electron-builder",
-    "build:win": "npm run i18n:check && npm run build:native && electron-builder --win",
-    "build:linux": "npm run i18n:check && npm run build:native && electron-builder --linux",
+    "build": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder",
+    "build:win": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder --win",
+    "build:linux": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder --linux",
     "build:native": "node ./node_modules/node-gyp/bin/node-gyp.js rebuild --directory=native",
-    "rebuild:electron": "node ./node_modules/@electron/rebuild/lib/cli.js && npm run build:native",
-    "postinstall": "node ./node_modules/@electron/rebuild/lib/cli.js || echo electron-rebuild skipped"
+    "stage:native-runtime": "node scripts/stage-gstreamer.js",
+    "rebuild:electron": "electron-builder install-app-deps && npm run build:native",
+    "postinstall": "electron-builder install-app-deps || echo electron-rebuild skipped"
   },
   "dependencies": {
     "electron-store": "^8.2.0",
@@ -29,8 +35,7 @@
     "uiohook-napi": "^1.5.4"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.7.1",
-    "electron": "^33.2.0",
+    "electron": "^42.10.1",
     "electron-builder": "^26.15.7",
     "node-gyp": "^10.3.1"
   }

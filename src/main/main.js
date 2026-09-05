@@ -17,17 +17,35 @@ const {
   DEFAULT_LOCALE, SYSTEM_LANGUAGE, SUPPORTED_LOCALES, normalizeLocale,
   resolveLocale, translate, getLocaleMetadata,
 } = require('../i18n');
+const { PipeWireStreamRouter } = require('./pipewire-stream-router');
+const {
+  createAudioCaptureController,
+  resolveAudioSelection,
+} = require('./screen-share-audio');
+const { normalizeVideoEncoderPreference } = require('./screen-share-video');
+const { NativeScreenManager } = require('./native-screen');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
 try { ({ autoUpdater } = require('electron-updater')); } catch {}
 
 // ── Constants ─────────────────────────────────────────────
-// ── Enable native Wayland support (must be before app.whenReady) ──
+// ── Enable native Wayland and video encoding (must be before app.whenReady) ──
+const enabledFeatures = [
+  'PlatformHEVCEncoderSupport',
+  'WebRtcAllowH265Send',
+  'WebRtcAV1HWEncode',
+];
 if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('enable-features', 'UseOzonePlatform,WaylandWindowDecorations');
+  enabledFeatures.push(
+    'UseOzonePlatform',
+    'WaylandWindowDecorations',
+    'AcceleratedVideoEncoder',
+    'VaapiOnNvidiaGPUs'
+  );
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 }
+app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
 
 const IS_DEV    = process.argv.includes('--dev');
 const SHOW_SERVER  = process.argv.includes('--show-server');
@@ -58,6 +76,7 @@ const store = new Store({
     hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
     disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
     unlimitFrameRate:  false, // disable Chromium's frame-rate cap (pairs with disableGpuVsync)
+    videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
     serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
     language: SYSTEM_LANGUAGE,
     languagePreferenceSet: false,
@@ -230,6 +249,22 @@ let tray            = null;
 let trayRefreshTimer = null;
 let serverManager   = null;
 let audioCapture    = null;
+const pipeWireStreamRouter = process.platform === 'linux'
+  ? new PipeWireStreamRouter()
+  : null;
+const audioCaptureController = createAudioCaptureController(() => {
+  try { audioCapture?.stopCapture(); } catch {}
+});
+let screenShareRequestInProgress = false;
+let hardwareVideoEncodingAvailable = false;
+let hardwareVideoEncodingStatus = 'unavailable';
+app.on('gpu-info-update', () => {
+  hardwareVideoEncodingStatus = String(
+    app.getGPUFeatureStatus().video_encode || 'unavailable'
+  );
+  hardwareVideoEncodingAvailable = hardwareVideoEncodingStatus.startsWith('enabled');
+});
+let nativeScreen    = null;
 let serverViews     = new Map();  // serverUrl → BrowserView
 let activeServerUrl = null;
 let primaryServerUrl = null;       // the server the user actually chose to connect to
@@ -385,7 +420,44 @@ app.on('ready', () => {
 app.whenReady().then(async () => {
   refreshLocale();
   serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV, t });
-  audioCapture  = new AudioCaptureManager({ t });
+  audioCapture  = new AudioCaptureManager(null, () => pipeWireStreamRouter?.stop(), t);
+  nativeScreen  = new NativeScreenManager({
+    selectSource: selectNativeScreenSource,
+    isOwnerActive: owner => owner === getActiveContents(),
+    registryPath: path.join(app.getPath('userData'), 'gstreamer-registry.bin'),
+    getAudioCapabilities: () => {
+      const supported = !!audioCapture?.isSupported();
+      return {
+        supported,
+        modes: supported ? ['application', 'system'] : [],
+      };
+    },
+    startAudioCapture: (selection, onData, onStatus) => {
+      if (audioCaptureController.hasActive()) return false;
+      const captureId = `native:${selection.sessionId}`;
+      audioCaptureController.start(captureId, selection.owner);
+      const started = audioCapture.startCapture(selection.pid, {
+        mode: selection.mode,
+        onData,
+        onStatus: status => {
+          if (selection.mode === 'exclude' && process.platform === 'linux') {
+            if (status?.kind === 'started') {
+              pipeWireStreamRouter?.start(`HavenCombined_${process.pid}`, process.pid);
+            } else if (status?.kind === 'failed' || status?.kind === 'stopped') {
+              pipeWireStreamRouter?.stop();
+            }
+          }
+          onStatus(status);
+        },
+      });
+      if (!started) audioCaptureController.stop(captureId, selection.owner.id);
+      return started;
+    },
+    stopAudioCapture: selection => audioCaptureController.stop(
+      `native:${selection.sessionId}`,
+      selection.owner.id
+    ),
+  });
   badgeIcon     = createBadgeIcon();
 
   // ── Sync start-on-login with OS ──────────────────────
@@ -780,7 +852,9 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   app.isQuitting = true;
   serverManager?.stopServer();
+  pipeWireStreamRouter?.stop();
   audioCapture?.cleanup();
+  nativeScreen?.cleanup();
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -2004,6 +2078,240 @@ function rebuildTrayMenu() {
 // capture for the selected application.
 // ───────────────────────────────────────────────────────────
 
+function getScreenAudioPickerData() {
+  let audioApps = [];
+  try {
+    audioApps = audioCapture.getAudioApplications().filter(candidate =>
+      Number.isSafeInteger(candidate?.pid) && candidate.pid > 0 && candidate.pid !== process.pid
+    );
+  } catch (err) {
+    console.warn('[ScreenShare] audio app enumeration failed:', err.message);
+  }
+  const supported = audioCapture.isSupported() && !audioCaptureController.hasActive();
+  const system = supported && (process.platform === 'win32' || process.platform === 'linux');
+  return {
+    audioApps,
+    audioCapabilities: {
+      application: supported,
+      systemNative: system,
+      system,
+    },
+  };
+}
+
+function requestScreenPicker(targetContents, pickerData, { requestFrame = null, signal = null } = {}) {
+  return new Promise(resolve => {
+    let settled = false;
+    let timeoutId;
+    const requestId = pickerData.requestId;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', ownerGone);
+      ipcMain.removeListener('screen:picker-result', handler);
+      targetContents.removeListener('destroyed', ownerGone);
+      targetContents.removeListener('render-process-gone', ownerGone);
+      resolve(value);
+    };
+    const handler = (event, result = {}) => {
+      if (event.sender.id !== targetContents.id || result.requestId !== requestId) return;
+      finish(result);
+    };
+    const ownerGone = () => finish({ cancelled: true, requestId });
+    timeoutId = setTimeout(ownerGone, 60000);
+    ipcMain.on('screen:picker-result', handler);
+    targetContents.once('destroyed', ownerGone);
+    targetContents.once('render-process-gone', ownerGone);
+    signal?.addEventListener('abort', ownerGone, { once: true });
+    if (targetContents.isDestroyed() || signal?.aborted) return ownerGone();
+
+    let sentToFrame = false;
+    if (requestFrame && !requestFrame.isDestroyed()) {
+      try {
+        requestFrame.send('screen:show-picker', pickerData);
+        sentToFrame = true;
+      } catch (err) {
+        console.warn(`[ScreenShare] request.frame send failed: ${err.message}`);
+      }
+    }
+    if (!sentToFrame || requestFrame?.host?.id !== targetContents.id) {
+      safeSend(targetContents, 'screen:show-picker', pickerData);
+    }
+  });
+}
+
+async function selectNativeScreenSource(targetContents, capabilities = {}, signal, options = {}) {
+  if (!targetContents || targetContents.isDestroyed()) return null;
+
+  const wayland = process.platform === 'linux' &&
+    String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland';
+  const usePortal = process.platform === 'linux' &&
+    capabilities.captureBackends?.includes('pipewire-portal') &&
+    (wayland || !capabilities.captureBackends.includes('x11'));
+
+  let sources;
+  if (usePortal) {
+    sources = [{
+      id: 'portal:screen',
+      name: t('screenPicker.systemPortal'),
+      thumbnail: null,
+      appIcon: null,
+      display_id: null,
+    }];
+  } else try {
+    sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: true,
+    });
+  } catch (err) {
+    console.warn(`[NativeScreen] source enumeration with previews failed: ${err.message}`);
+    sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 0, height: 0 },
+      fetchWindowIcons: false,
+    });
+  }
+
+  if (signal?.aborted) return null;
+  const hostAudio = getScreenAudioPickerData();
+  const nativeAudioModes = new Set(capabilities.audio?.supported === true
+    ? capabilities.audio.modes || []
+    : []);
+  const audioApps = nativeAudioModes.has('application') ? hostAudio.audioApps : [];
+  const audioCapabilities = {
+    application: nativeAudioModes.has('application') && hostAudio.audioCapabilities.application,
+    systemNative: nativeAudioModes.has('system') && hostAudio.audioCapabilities.systemNative,
+    system: nativeAudioModes.has('system') && hostAudio.audioCapabilities.system,
+  };
+  const allowedCodecs = new Set((Array.isArray(options.codecs) ? options.codecs : [])
+    .map(codec => String(codec).toUpperCase()));
+  const codecs = (capabilities.codecs || []).filter(codec =>
+    allowedCodecs.size === 0 || allowedCodecs.has(codec.name)
+  );
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const result = await requestScreenPicker(targetContents, {
+    requestId,
+    sources: sources.map(source => ({
+      id: source.id,
+      name: source.name,
+      thumbnail: source.thumbnail && !source.thumbnail.isEmpty?.()
+        ? source.thumbnail.toDataURL()
+        : source.thumbnail || null,
+      appIcon: source.appIcon && !source.appIcon.isEmpty?.()
+        ? source.appIcon.toDataURL()
+        : source.appIcon || null,
+      display_id: source.display_id,
+    })),
+    audioApps,
+    audioCapabilities,
+    nativeMode: true,
+    videoEncoder: {
+      native: true,
+      preference: 'auto',
+      hardwareAvailable: true,
+      hardwareStatus: codecs.map(codec => codec.encoder).join(', '),
+      codecs,
+      platform: process.platform,
+    },
+  }, { signal });
+  if (!result || result.cancelled || signal?.aborted) return null;
+  const chosenSource = sources.find(source => source.id === result.sourceId);
+  if (!chosenSource) return null;
+
+  const selectedAudio = resolveAudioSelection(result.audioAppPid, audioApps, audioCapabilities);
+  let audio = null;
+  if (selectedAudio.app) {
+    audio = { mode: 'include', pid: selectedAudio.app.pid };
+  } else if (selectedAudio.type === 'system') {
+    audio = { mode: 'exclude', pid: process.pid };
+  }
+  const requestedCodec = String(result.videoEncoderPreference || 'auto').toUpperCase();
+  const codecPreference = requestedCodec === 'AUTO' || codecs.some(codec => codec.name === requestedCodec)
+    ? requestedCodec
+    : 'AUTO';
+
+  if (usePortal) {
+    return { kind: 'linux-pipewire', handle: '', audio, codecPreference };
+  }
+  const freshSources = await desktopCapturer.getSources({
+    types: ['window', 'screen'],
+    thumbnailSize: { width: 0, height: 0 },
+    fetchWindowIcons: false,
+  });
+  const selected = freshSources.find(source => source.id === chosenSource.id) ||
+    freshSources.find(source =>
+      source.name === chosenSource.name &&
+      (!chosenSource.display_id || source.display_id === chosenSource.display_id)
+    );
+  if (!selected) return null;
+
+  const idMatch = /^(screen|window):([^:]+):/.exec(selected.id);
+  if (!idMatch) throw new Error(`Unsupported screen source identifier: ${selected.id}`);
+  const sourceType = idMatch[1];
+  const sourceHandle = idMatch[2];
+
+  if (process.platform === 'win32') {
+    const displays = screen.getAllDisplays();
+    const display = sourceType === 'screen'
+      ? displays.find(item => String(item.id) === String(selected.display_id)) ||
+        displays[Number(sourceHandle)] || displays[0]
+      : null;
+    if (sourceType === 'screen' && !display) return null;
+    const monitorPoint = display ? screen.dipToScreenPoint({
+      x: Math.round(display.bounds.x + display.bounds.width / 2),
+      y: Math.round(display.bounds.y + display.bounds.height / 2),
+    }) : { x: 0, y: 0 };
+    return {
+      kind: sourceType === 'window' ? 'windows-window' : 'windows-monitor',
+      handle: sourceType === 'window'
+        ? sourceHandle
+        : '',
+      x: monitorPoint.x,
+      y: monitorPoint.y,
+      width: display ? Math.round(display.bounds.width * (display.scaleFactor || 1)) : 0,
+      height: display ? Math.round(display.bounds.height * (display.scaleFactor || 1)) : 0,
+      audio,
+      codecPreference,
+    };
+  }
+
+  if (process.platform === 'linux') {
+    if (sourceType === 'window') {
+      return {
+        kind: 'linux-x11-window',
+        handle: sourceHandle,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        audio,
+        codecPreference,
+      };
+    }
+    const displays = screen.getAllDisplays();
+    const display = displays.find(item => String(item.id) === String(selected.display_id)) ||
+      displays[Number(sourceHandle)] || displays[0];
+    const physicalX = item => Math.round(item.bounds.x * (item.scaleFactor || 1));
+    const physicalY = item => Math.round(item.bounds.y * (item.scaleFactor || 1));
+    const minX = Math.min(...displays.map(physicalX));
+    const minY = Math.min(...displays.map(physicalY));
+    return {
+      kind: 'linux-x11-screen',
+      handle: sourceHandle,
+      x: display ? physicalX(display) - minX : 0,
+      y: display ? physicalY(display) - minY : 0,
+      width: display ? Math.round(display.bounds.width * (display.scaleFactor || 1)) : 0,
+      height: display ? Math.round(display.bounds.height * (display.scaleFactor || 1)) : 0,
+      audio,
+      codecPreference,
+    };
+  }
+
+  throw new Error('Native screen sharing is unavailable on this platform');
+}
+
 function registerScreenShareHandler() {
   // ── Resolve the user's picker selection at attach time ──
   // The desktopCapturer source IDs are not stable: between the moment the
@@ -2062,6 +2370,12 @@ function registerScreenShareHandler() {
       callback(payload);
     };
 
+    if (screenShareRequestInProgress) {
+      safeCallback({});
+      return;
+    }
+    screenShareRequestInProgress = true;
+
     try {
       // Video sources
       let sources;
@@ -2084,8 +2398,21 @@ function registerScreenShareHandler() {
 
       // Audio-producing applications (native addon)
       let audioApps = [];
-      try { audioApps = audioCapture.getAudioApplications(); }
+      try {
+        audioApps = audioCapture.getAudioApplications().filter(app =>
+          Number.isSafeInteger(app?.pid) && app.pid > 0 && app.pid !== process.pid
+        );
+      }
       catch (err) { console.warn('[ScreenShare] audio app enumeration failed:', err.message); }
+
+      const nativeAudioAvailable = audioCapture.isSupported();
+      const nativeSystemAudio = nativeAudioAvailable &&
+        (process.platform === 'win32' || process.platform === 'linux');
+      const audioCapabilities = {
+        application: nativeAudioAvailable,
+        systemNative: nativeSystemAudio,
+        system: nativeSystemAudio,
+      };
 
       const sourceData = sources.map(s => ({
         id:         s.id,
@@ -2099,45 +2426,46 @@ function registerScreenShareHandler() {
       const requestFrame = request?.frame;
       const targetContents = requestFrame?.host || getActiveContents();
       if (!targetContents) { safeCallback({}); return; }
+      if (targetContents !== getActiveContents()) {
+        console.warn('[ScreenShare] rejected display capture outside the active Haven view');
+        safeCallback({});
+        return;
+      }
 
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const videoEncoder = {
+        preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
+        hardwareAvailable: hardwareVideoEncodingAvailable,
+        hardwareStatus: hardwareVideoEncodingStatus,
+        platform: process.platform,
+      };
+      const pickerData = {
+        requestId,
+        sources: sourceData,
+        audioApps,
+        audioCapabilities,
+        videoEncoder,
+      };
 
-      // Ask renderer to show the picker
-      let sentToFrame = false;
-      if (requestFrame && !requestFrame.isDestroyed()) {
-        try {
-          requestFrame.send('screen:show-picker', { requestId, sources: sourceData, audioApps });
-          sentToFrame = true;
-          console.log('[ScreenShare] picker request sent to request.frame');
-        } catch (err) {
-          console.warn(`[ScreenShare] request.frame send failed: ${err.message}`);
-        }
-      }
-      const frameHostId = requestFrame?.host?.id;
-      const targetId = targetContents?.id;
-      if (!sentToFrame || frameHostId !== targetId) {
-        safeSend(targetContents, 'screen:show-picker', { requestId, sources: sourceData, audioApps });
-        console.log('[ScreenShare] picker request sent to target webContents fallback');
-      }
-
-      // Wait for picker result (or 60 s timeout)
-      const result = await new Promise(resolve => {
-        const handler = (_e, res = {}) => {
-          if (res.requestId !== requestId) return;
-          clearTimeout(timeoutId);
-          ipcMain.removeListener('screen:picker-result', handler);
-          resolve(res);
-        };
-        const timeoutId = setTimeout(() => {
-          ipcMain.removeListener('screen:picker-result', handler);
-          resolve({ cancelled: true, requestId });
-        }, 60000);
-        ipcMain.on('screen:picker-result', handler);
-      });
+      const result = await requestScreenPicker(targetContents, pickerData, { requestFrame });
 
       if (result.cancelled) { safeCallback({}); return; }
+      if (targetContents.isDestroyed() || targetContents !== getActiveContents()) {
+        console.warn('[ScreenShare] active Haven view changed while the picker was open');
+        safeCallback({});
+        return;
+      }
+      store.set(
+        'videoEncoderPreference',
+        normalizeVideoEncoderPreference(result.videoEncoderPreference)
+      );
 
       const selected = await resolveSelectedSource(sources, result.sourceId);
+      if (targetContents.isDestroyed() || targetContents !== getActiveContents()) {
+        console.warn('[ScreenShare] active Haven view changed before capture attachment');
+        safeCallback({});
+        return;
+      }
       if (!selected) {
         // Truly nothing usable — log so we can tell this apart from a normal cancel.
         console.warn(`[ScreenShare] could not resolve selected source ${result.sourceId} after re-enumeration; aborting`);
@@ -2148,152 +2476,195 @@ function registerScreenShareHandler() {
         console.log(`[ScreenShare] selected source ID changed between picker and attach: ${result.sourceId} -> ${selected.id} (${selected.name})`);
       }
 
-      // Decide capture path based on picker result.
-      //   audioAppPid > 0  → INCLUDE-mode capture of that PID
-      //   audioAppPid === 'system' → EXCLUDE-mode capture of OUR PID
-      //                       (= all system audio minus Haven; no voice loop)
-      //   audioAppPid === 'none'   → no audio at all
-      //   undefined         → legacy "system audio" via Electron loopback
-      //                       (still includes Haven voice — kept only as a
-      //                        last-resort path; UI now defaults to 'system')
-      const startNative = (mode, pid) => {
+      // Only PIDs included in this picker's enumeration may be captured.
+      // Unknown, stale, or forged values resolve to no audio.
+      const audioSelection = resolveAudioSelection(
+        result.audioAppPid,
+        audioApps,
+        audioCapabilities
+      );
+      const selectedAudioApp = audioSelection.app;
+      if (typeof result.audioAppPid === 'number' && !selectedAudioApp) {
+        console.warn(`[ScreenShare] rejected unlisted audio PID ${result.audioAppPid}`);
+      }
+
+      const startNative = (mode, pid, detail = null, detailKey = null, detailValues = null) => {
         const reasonRef = { status: null };
         let ok = false;
+        if (audioCaptureController.hasActive()) {
+          reasonRef.status = {
+            message: t('audio.error.captureBusy'),
+            messageKey: 'audio.error.captureBusy',
+          };
+          return { ok: false, reason: reasonRef.status.message, status: reasonRef.status };
+        }
+        audioCaptureController.start(requestId, targetContents);
         try {
           console.log(`[ScreenShare] starting native capture: mode=${mode} pid=${pid}`);
           ok = audioCapture.startCapture(pid, {
             mode,
-            onData: (pcmData) => {
+            onData: (pcmData, capturedAt) => {
               try {
                 if (!pcmData || !pcmData.buffer) return;
                 const ab = pcmData.buffer.slice(
                   pcmData.byteOffset,
                   pcmData.byteOffset + pcmData.byteLength
                 );
-                safeSend(targetContents, 'audio:capture-data', ab);
+                if (!audioCaptureController.isActive(requestId)) return;
+                safeSend(targetContents, 'audio:capture-data', {
+                  captureId: requestId,
+                  capturedAt,
+                  data: ab,
+                });
               } catch (cbErr) {
                 console.warn('[ScreenShare] audio callback error:', cbErr.message);
               }
             },
             onStatus: (s) => {
-              safeSend(targetContents, 'audio:capture-status', s);
-              if (s.kind === 'failed') reasonRef.status = s;
+              if (!audioCaptureController.isActive(requestId)) return;
+              safeSend(targetContents, 'audio:capture-status', { ...s, captureId: requestId });
+              const isSystemMode = mode === 'exclude' || mode === 'system';
+              if (s.kind === 'started') {
+                if (mode === 'exclude' && process.platform === 'linux') {
+                  pipeWireStreamRouter?.start(`HavenCombined_${process.pid}`, process.pid);
+                }
+                safeSend(targetContents, 'audio:share-mode', {
+                  captureId: requestId,
+                  requested: isSystemMode ? 'system' : 'app',
+                  applied: isSystemMode ? 'system-clean' : 'app',
+                  detail,
+                  detailKey,
+                  detailValues,
+                });
+              } else if (s.kind === 'failed') {
+                pipeWireStreamRouter?.stop();
+                reasonRef.status = s;
+                audioCaptureController.clear(requestId);
+                safeSend(targetContents, 'audio:share-mode', {
+                  captureId: requestId,
+                  requested: isSystemMode ? 'system' : 'app',
+                  applied: 'none',
+                  detail: s.message || null,
+                  detailKey: s.messageKey || null,
+                  detailValues: s.messageValues || null,
+                });
+                setImmediate(() => {
+                  if (!audioCaptureController.hasActive()) {
+                    try { audioCapture.stopCapture(); } catch {}
+                  }
+                });
+              }
             },
           });
         } catch (err) {
           console.error(`[ScreenShare] native capture (${mode}) threw:`, err.message);
           reasonRef.status = {
-            kind: 'failed',
             message: err.message,
             messageKey: err.messageKey,
             messageValues: err.messageValues,
           };
         }
+        if (!ok) {
+          const reasonKey = reasonRef.status?.messageKey
+            || (!reasonRef.status?.message ? 'audio.unknown' : null);
+          const reasonValues = reasonRef.status?.messageValues || null;
+          const reason = reasonKey
+            ? t(reasonKey, reasonValues || {})
+            : reasonRef.status.message;
+          const message = t('audio.detail.nativeUnavailable', {
+            reason,
+          });
+          safeSend(targetContents, 'audio:capture-status', {
+            captureId: requestId,
+            kind: 'failed',
+            message,
+            messageKey: 'audio.detail.nativeUnavailable',
+            messageValues: { reason, reasonKey, reasonValues },
+            code: 0,
+          });
+          audioCaptureController.stop(requestId, targetContents.id);
+        }
         return { ok, reason: reasonRef.status?.message || null, status: reasonRef.status };
       };
 
-      // What the user wanted, and what we ended up with.
-      // requestedMode: 'app' | 'system' | 'none' | 'legacy-loopback'
-      // appliedMode  : 'app' | 'system-clean' | 'fallback-system-clean'
-      //              | 'system-loopback' | 'none'
-      let requestedMode = 'legacy-loopback';
-      let appliedMode   = 'system-loopback';
+      // Audio choices are strict: application capture never degrades to full
+      // system loopback, which could feed Haven's own voice back into the call.
+      let requestedMode = 'none';
+      let appliedMode   = 'none';
       let appliedDetail = null; // optional human-readable string
       let appliedDetailKey = null;
       let appliedDetailValues = null;
       let appliedDetailReasonKey = null;
       let appliedDetailReasonValues = null;
       let appliedDetailReason = null;
+      let useNativeAudio = false;
 
-      const setAppliedErrorDetail = (detailKey, status, fallbackReasonKey) => {
-        const reason = status?.message || t(fallbackReasonKey);
+      const setAppliedErrorDetail = (detailKey, capture, fallbackReasonKey) => {
+        const reason = capture.status?.message || capture.reason || t(fallbackReasonKey);
         appliedDetail = t(detailKey, { reason });
         appliedDetailKey = detailKey;
-        appliedDetailReasonKey = status?.messageKey || (!status?.message ? fallbackReasonKey : null);
-        appliedDetailReasonValues = status?.messageValues || null;
-        appliedDetailReason = status?.messageKey ? null : status?.message || null;
+        appliedDetailReasonKey = capture.status?.messageKey
+          || (!capture.reason ? fallbackReasonKey : null);
+        appliedDetailReasonValues = capture.status?.messageValues || null;
+        appliedDetailReason = capture.status?.messageKey ? null : capture.reason || null;
       };
 
-      let usePerAppAudio = false;
+      audioCaptureController.stop();
 
-      if (result.audioAppPid === 'none') {
-        requestedMode = 'none';
-        appliedMode   = 'none';
-      } else if (typeof result.audioAppPid === 'number' && result.audioAppPid > 0) {
+      if (selectedAudioApp) {
         requestedMode = 'app';
-        const audioApp = audioApps.find(a => a.pid === result.audioAppPid);
-        const appName = audioApp?.name || t('audio.process', { pid: result.audioAppPid });
-        const r1 = startNative('include', result.audioAppPid);
-        if (r1.ok) {
-          usePerAppAudio = true;
+        const appName = selectedAudioApp.name || t('audio.process', { pid: selectedAudioApp.pid });
+        const appNameKey = selectedAudioApp.nameKey
+          || (!selectedAudioApp.name ? 'audio.process' : null);
+        const appNameValues = !selectedAudioApp.name ? { pid: selectedAudioApp.pid } : null;
+        const capture = startNative(
+          'include', selectedAudioApp.pid, appName, appNameKey, appNameValues
+        );
+        if (capture.ok) {
+          useNativeAudio = true;
           appliedMode    = 'app';
           appliedDetail  = appName;
-          appliedDetailKey = audioApp?.nameKey || (!audioApp ? 'audio.process' : null);
-          appliedDetailValues = !audioApp ? { pid: result.audioAppPid } : null;
+          appliedDetailKey = appNameKey;
+          appliedDetailValues = appNameValues;
           console.log(`[ScreenShare] per-app capture active for "${appName}"`);
         } else {
-          // Per-app capture failed. Fall back to system-minus-Haven so the
-          // user gets *something* without creating a voice loop.
-          console.warn(`[ScreenShare] per-app capture failed (${r1.reason || 'unknown'}); falling back to system-minus-Haven`);
-          const r2 = startNative('exclude', process.pid);
-          if (r2.ok) {
-            usePerAppAudio = true;
-            appliedMode    = 'fallback-system-clean';
-            setAppliedErrorDetail('audio.detail.appCaptureFailed', r1.status, 'audio.unknownReason');
-            console.log('[ScreenShare] fallback to system-minus-Haven active');
-          } else {
-            // Even exclude-mode failed. As a final last-resort, ask Electron
-            // for raw loopback (will include Haven voice — voice loop risk —
-            // but better than silence per user preference for per-app fail).
-            console.warn(`[ScreenShare] system-minus-Haven also failed (${r2.reason || 'unknown'}); using Electron loopback as last resort`);
-            appliedMode   = 'system-loopback';
-            setAppliedErrorDetail('audio.detail.nativeUnavailable', r2.status || r1.status, 'audio.unknown');
-          }
+          setAppliedErrorDetail('audio.detail.appCaptureFailed', capture, 'audio.unknownReason');
+          console.warn(`[ScreenShare] per-app capture failed (${capture.reason || 'unknown'}); continuing without audio`);
         }
-      } else if (result.audioAppPid === 'system') {
+      } else if (audioSelection.type === 'system') {
         requestedMode = 'system';
-        const r = startNative('exclude', process.pid);
-        if (r.ok) {
-          usePerAppAudio = true;
-          appliedMode    = 'system-clean';
+        const capture = startNative('exclude', process.pid);
+        if (capture.ok) {
+          useNativeAudio = true;
+          appliedMode = 'system-clean';
         } else {
-          console.warn(`[ScreenShare] exclude-mode failed (${r.reason || 'unknown'}); using Electron loopback as fallback`);
-          appliedMode   = 'system-loopback';
-          setAppliedErrorDetail('audio.detail.cleanSystemUnavailable', r.status, 'audio.unknown');
+          setAppliedErrorDetail('audio.detail.cleanSystemUnavailable', capture, 'audio.unknown');
         }
       }
 
-      // Tell the renderer which mode we ended up in (for the indicator)
-      safeSend(targetContents, 'audio:share-mode', {
-        requested: requestedMode,
-        applied:   appliedMode,
-        detail:    appliedDetail,
-        detailKey: appliedDetailKey,
-        detailValues: appliedDetailValues,
-        detailReasonKey: appliedDetailReasonKey,
-        detailReasonValues: appliedDetailReasonValues,
-        detailReason: appliedDetailReason,
-      });
-
-      // Audio routing for the share:
-      //   Native per-app / system-clean capture now takes the no-audio
-      //   callback path on purpose. We start the native pipeline first,
-      //   let getDisplayMedia() resolve with video only, and then the
-      //   renderer adds the native track once the first PCM arrives.
-      //   That avoids the old race where Electron loopback got attached
-      //   immediately, then the override had to guess whether it was safe
-      //   to strip / replace that track before native audio was actually
-      //   flowing. Only pure loopback fallback asks Electron for audio
-      //   up front; 'none' requests no audio at all. (#30)
-      if (appliedMode === 'none' || usePerAppAudio) {
-        safeCallback({ video: selected });
-      } else {
-        safeCallback({ video: selected, audio: 'loopback' });
+      if (!useNativeAudio) {
+        safeSend(targetContents, 'audio:share-mode', {
+          captureId: requestId,
+          requested: requestedMode,
+          applied:   appliedMode,
+          detail:    appliedDetail,
+          detailKey: appliedDetailKey,
+          detailValues: appliedDetailValues,
+          detailReasonKey: appliedDetailReasonKey,
+          detailReasonValues: appliedDetailReasonValues,
+          detailReason: appliedDetailReason,
+        });
       }
+
+      // Native audio is attached by the preload only after the isolated track
+      // is ready. Never request raw Electron loopback, which includes Haven.
+      safeCallback({ video: selected });
 
     } catch (err) {
       console.error('[ScreenShare] handler error:', err);
       safeCallback({});
+    } finally {
+      screenShareRequestInProgress = false;
     }
   });
 }
@@ -2385,25 +2756,45 @@ function registerIPC() {
   });
 
   // ── Audio Capture ─────────────────────────────────────
-  ipcMain.handle('audio:get-apps',      () => { try { return audioCapture.getAudioApplications(); } catch { return []; } });
-  ipcMain.handle('audio:start-capture',  (_e, pid) => {
-    try {
-      return audioCapture.startCapture(pid, {
-        mode: 'include',
-        onData: pcm => {
-          try {
-            if (!pcm || !pcm.buffer) return;
-            const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
-            safeSend(getActiveContents(), 'audio:capture-data', ab);
-          } catch { /* non-critical */ }
-        },
-        onStatus: s => safeSend(getActiveContents(), 'audio:capture-status', s),
-      });
-    } catch (e) { console.error('[AudioCapture] start-capture IPC failed:', e.message); return false; }
+  ipcMain.handle('audio:stop-capture', (event, { captureId } = {}) => {
+    if (typeof captureId !== 'string') return false;
+    return audioCaptureController.stop(captureId, event.sender.id);
   });
-  ipcMain.handle('audio:stop-capture',   () => { try { audioCapture.stopCapture(); } catch {} });
   ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
+
+  ipcMain.handle('video:get-encoder-config', () => ({
+    preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
+    hardwareAvailable: hardwareVideoEncodingAvailable,
+    hardwareStatus: hardwareVideoEncodingStatus,
+    platform: process.platform,
+  }));
+
+  // ── Native Screen Share ───────────────────────────────
+  const isServerView = sender => Array.from(serverViews.values())
+    .some(view => view.webContents === sender);
+  ipcMain.handle('native-screen:get-capabilities', event => {
+    if (!isServerView(event.sender)) return { supported: false, reason: 'untrusted-view' };
+    return nativeScreen.getCapabilities();
+  });
+  ipcMain.handle('native-screen:start', (event, options) => {
+    if (!isServerView(event.sender)) return { started: false, reason: 'untrusted-view' };
+    if (event.sender !== getActiveContents()) {
+      return { started: false, reason: 'inactive-view' };
+    }
+    return nativeScreen.start(event.sender, options);
+  });
+  ipcMain.handle('native-screen:stop', (event, data) => {
+    return nativeScreen.stop(event.sender, false, data?.sessionId || null);
+  });
+  ipcMain.handle('native-screen:add-peer', (event, data) => nativeScreen.addPeer(event.sender, data));
+  ipcMain.handle('native-screen:remove-peer', (event, data) => nativeScreen.removePeer(event.sender, data));
+  ipcMain.handle('native-screen:set-remote-description', (event, data) => {
+    return nativeScreen.setRemoteDescription(event.sender, data);
+  });
+  ipcMain.handle('native-screen:add-ice-candidate', (event, data) => {
+    return nativeScreen.addIceCandidate(event.sender, data);
+  });
 
   // ── Audio Devices ─────────────────────────────────────
   ipcMain.handle('devices:get-inputs', async () => {
@@ -2551,12 +2942,17 @@ function registerIPC() {
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
     'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
     'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
-    'disableGpuVsync', 'unlimitFrameRate'
+    'disableGpuVsync', 'unlimitFrameRate', 'videoEncoderPreference'
   ]);
   ipcMain.handle('settings:get', (_e, key)        => store.get(key));
   ipcMain.handle('settings:set', (_e, key, value)  => {
     if (!ALLOWED_SETTINGS_KEYS.has(key)) return false;
-    store.set(key, value);
+    store.set(
+      key,
+      key === 'videoEncoderPreference'
+        ? normalizeVideoEncoderPreference(value)
+        : value
+    );
     return true;
   });
 
@@ -2641,6 +3037,7 @@ function registerIPC() {
     disableGpuVsync:  !!store.get('disableGpuVsync'),
     unlimitFrameRate: !!store.get('unlimitFrameRate'),
     language:         getI18nState(),
+    videoEncoderPreference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
   }));
 
   ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {

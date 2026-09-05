@@ -38,25 +38,33 @@ if %ERRORLEVEL% neq 0 (
 echo.
 echo        Dependencies installed successfully.
 
-:: ─── electron-rebuild ──────────────────────────────────
+:: ─── electron-builder install-app-deps ───────────────
 echo.
 echo [3/4] Rebuilding native modules for Electron...
 echo.
-node "./node_modules/@electron/rebuild/lib/cli.js" 2>nul
+node "./node_modules/electron-builder/out/cli/cli.js" install-app-deps 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo        electron-rebuild skipped (non-critical^)
+    echo        install-app-deps skipped (non-critical^)
 ) else (
-    echo        electron-rebuild complete.
+    echo        install-app-deps complete.
 )
 
-:: ─── Build native audio addon ──────────────────────────
+:: ─── Build native media components ─────────────────────
 echo.
-echo [4/4] Building native per-app audio addon...
-echo        (Requires Visual Studio Build Tools with C++ workload^)
+echo [4/4] Building native media components...
+echo        (Requires Visual Studio Build Tools and the GStreamer SDK^)
 echo.
 
 :: Use explicit path to node-gyp (avoids npx @ path resolution bug)
 node "./node_modules/node-gyp/bin/node-gyp.js" rebuild --directory=native
+
+if exist "native\build\Release\haven_screen_share.exe" (
+    call npm run stage:native-runtime
+    if errorlevel 1 (
+        echo        WARNING: GStreamer runtime staging failed.
+        echo        Native GPU screen sharing will be unavailable in dev mode.
+    )
+)
 
 :: node-gyp sends info to stderr so exit code can be wrong — check the file
 if exist "native\build\Release\haven_audio.node" (
