@@ -38,15 +38,15 @@ if %ERRORLEVEL% neq 0 (
 echo.
 echo        Dependencies installed successfully.
 
-:: ─── electron-rebuild ──────────────────────────────────
+:: ─── electron-builder install-app-deps ───────────────
 echo.
 echo [3/4] Rebuilding native modules for Electron...
 echo.
-node "./node_modules/@electron/rebuild/lib/cli.js" 2>nul
+node "./node_modules/electron-builder/out/cli/cli.js" install-app-deps 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo        electron-rebuild skipped (non-critical^)
+    echo        install-app-deps skipped (non-critical^)
 ) else (
-    echo        electron-rebuild complete.
+    echo        install-app-deps complete.
 )
 
 :: ─── Build native audio addon ──────────────────────────
