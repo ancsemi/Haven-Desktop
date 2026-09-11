@@ -209,7 +209,7 @@ Your server data (messages, uploads, config) is stored separately in the Haven d
   - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
 - **GStreamer:**
   - **Windows:** MSVC x86-64 runtime and development packages under `C:\gstreamer\1.0\msvc_x86_64`, or set `GSTREAMER_1_0_ROOT_MSVC_X86_64`
-  - **Linux:** `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-plugins-bad1.0-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-nice`, `gstreamer1.0-pipewire`, `gstreamer1.0-vaapi`
+  - **Linux:** `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-plugins-bad1.0-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-ugly`, `gstreamer1.0-nice`, `gstreamer1.0-pipewire`, `gstreamer1.0-vaapi`
 
 ### Windows — No Terminal
 

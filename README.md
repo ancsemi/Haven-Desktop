@@ -34,7 +34,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | Feature | Description |
 |---|---|
 | **Per-Application Audio** | Share audio from a **single application** during screen share — just like Discord. Powered by native WASAPI (Windows) and PulseAudio (Linux) hooks. |
-| **Screen-Share Encoder Controls** | Choose the codec before streaming. The native transport uses VA-API, Media Foundation, or another available GPU backend; the browser transport requests H.264 and reports whether Chromium confirms hardware acceleration. |
+| **Screen-Share Encoder Controls** | Choose the codec before streaming. The native transport prefers VA-API, Media Foundation, or another GPU backend and limits its H.264 software fallback to 720p30; the browser transport requests H.264 and reports whether Chromium confirms hardware acceleration. |
 | **Audio Device Switching** | Switch your microphone and speaker mid-call without leaving voice chat. |
 | **Desktop Notifications** | Native OS-level notifications via the taskbar / system tray. |
 | **Host or Join** | Run your own Haven server from the app, or connect to someone else's. Auto-detects local servers. |
@@ -66,7 +66,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
   - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
 - **GStreamer:**
   - **Windows:** GStreamer MSVC x86-64 runtime and development packages. Install them under `C:\gstreamer\1.0\msvc_x86_64`, or set `GSTREAMER_1_0_ROOT_MSVC_X86_64` to the installation directory.
-  - **Linux:** `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-plugins-bad1.0-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-nice`, `gstreamer1.0-pipewire`, `gstreamer1.0-vaapi`
+  - **Linux:** `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-plugins-bad1.0-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-ugly`, `gstreamer1.0-nice`, `gstreamer1.0-pipewire`, `gstreamer1.0-vaapi`
 
 ### Quick Start (Windows — No Terminal)
 

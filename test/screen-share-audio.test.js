@@ -130,3 +130,35 @@ test('runs capture teardown before stopping the native addon', () => {
 
   assert.deepEqual(events, ['router', 'native']);
 });
+
+test('reports a stalled backend before the watchdog stops it', () => {
+  let now = 0;
+  let watchdog;
+  let nativeStops = 0;
+  const statuses = [];
+  const addon = {
+    startCapture() { return true; },
+    stopCapture() { nativeStops++; },
+  };
+  const manager = new AudioCaptureManager(addon, null, key => key, {
+    now: () => now,
+    setInterval: callback => {
+      watchdog = callback;
+      return { unref() {} };
+    },
+    clearInterval() {},
+    watchdogStallMs: 100,
+  });
+
+  manager.startCapture(1, {
+    onData() {},
+    onStatus: status => statuses.push(status),
+  });
+  now = 101;
+  watchdog();
+
+  assert.equal(statuses.at(-1).kind, 'failed');
+  assert.equal(statuses.at(-1).messageKey, 'audio.status.captureStalled');
+  assert.equal(nativeStops, 1);
+  assert.equal(manager._capturing, false);
+});

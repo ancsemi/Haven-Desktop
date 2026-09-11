@@ -6,6 +6,7 @@ const test = require('node:test');
 const {
   LINUX_REQUIRED_PLUGIN_GROUPS,
   WINDOWS_REQUIRED_PLUGIN_GROUPS,
+  selectLinuxEncoderPlugins,
   selectRequiredPlugins,
 } = require('../scripts/stage-gstreamer');
 
@@ -67,4 +68,28 @@ test('staged runtimes require the test source used for encoder preflight', () =>
     WINDOWS_REQUIRED_PLUGIN_GROUPS.some(group => group.includes('gstvideotestsrc.dll')),
     true
   );
+});
+
+test('staged runtimes require an H.264 software fallback', () => {
+  assert.equal(
+    LINUX_REQUIRED_PLUGIN_GROUPS.some(group =>
+      group.includes('libgstx264.so') && group.includes('libgstopenh264.so')),
+    true
+  );
+  assert.equal(
+    WINDOWS_REQUIRED_PLUGIN_GROUPS.some(group =>
+      group.includes('gstx264.dll') && group.includes('gstopenh264.dll')),
+    true
+  );
+});
+
+test('Linux staging keeps every available hardware and software encoder plugin', () => {
+  const plugins = [
+    '/opt/gstreamer/libgstva.so',
+    '/opt/gstreamer/libgstx264.so',
+    '/opt/gstreamer/libgstopenh264.so',
+    '/opt/gstreamer/libgstcoreelements.so',
+  ];
+
+  assert.deepEqual(selectLinuxEncoderPlugins(plugins), plugins.slice(0, 3));
 });

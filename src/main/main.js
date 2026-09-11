@@ -23,7 +23,7 @@ const {
   resolveAudioSelection,
 } = require('./screen-share-audio');
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
-const { NativeScreenManager } = require('./native-screen');
+const { NativeScreenManager, isWaylandSession } = require('./native-screen');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
@@ -2116,7 +2116,9 @@ function showUpdateBox(type, message) {
 
 function checkForUpdatesFromMenu() {
   if (!autoUpdater || !app.isPackaged) {
-    showUpdateBox('info', t(app.isPackaged ? 'update.unavailable' : 'update.notPackaged'));
+    showUpdateBox('info', app.isPackaged
+      ? t('update.unavailable')
+      : t('update.notPackaged'));
     return;
   }
   _manualUpdateCheck = true;
@@ -2351,8 +2353,7 @@ function requestScreenPicker(targetContents, pickerData, { requestFrame = null, 
 async function selectNativeScreenSource(targetContents, capabilities = {}, signal, options = {}) {
   if (!targetContents || targetContents.isDestroyed()) return null;
 
-  const wayland = process.platform === 'linux' &&
-    String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland';
+  const wayland = isWaylandSession();
   const usePortal = process.platform === 'linux' &&
     capabilities.captureBackends?.includes('pipewire-portal') &&
     (wayland || !capabilities.captureBackends.includes('x11'));
@@ -2414,6 +2415,7 @@ async function selectNativeScreenSource(targetContents, capabilities = {}, signa
     audioApps,
     audioCapabilities,
     nativeMode: true,
+    portalOnly: usePortal,
     videoEncoder: {
       native: true,
       preference: 'auto',
@@ -2617,8 +2619,14 @@ function registerScreenShareHandler() {
       // the capturing, so it is added by hand from the window's own media
       // source id, with a fresh capture of the page as its preview. It goes
       // into the raw list so the attach-time lookup finds it by id as well.
+      const wayland = isWaylandSession();
+      if (wayland && sources.length === 0) {
+        console.warn('[ScreenShare] the Wayland portal returned no capture source');
+        safeCallback({});
+        return;
+      }
       try {
-        if (mainWindow && !mainWindow.isDestroyed()) {
+        if (!wayland && mainWindow && !mainWindow.isDestroyed()) {
           const ownId = mainWindow.getMediaSourceId();
           if (ownId && !sources.some(s => s.id === ownId)) {
             let thumbnail = null;
@@ -2681,6 +2689,7 @@ function registerScreenShareHandler() {
         sources: sourceData,
         audioApps,
         audioCapabilities,
+        portalOnly: wayland && sourceData.length === 1,
         videoEncoder,
       };
 

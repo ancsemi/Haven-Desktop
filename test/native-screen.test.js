@@ -9,6 +9,7 @@ const {
   NativeScreenManager,
   decodeField,
   encodeField,
+  isWaylandSession,
 } = require('../src/main/native-screen');
 
 function createOwner() {
@@ -43,7 +44,12 @@ function createFakeHelper() {
       const values = fields.map(decodeField);
       child.commands.push({ command, values });
       if (command === 'START') {
-        child.stdout.write(`READY\t${encodeField(values[0])}\n`);
+        child.stdout.write([
+          'READY',
+          encodeField(values[0]),
+          encodeField('vah264enc'),
+          encodeField('1'),
+        ].join('\t') + '\n');
       } else if (command === 'STOP') {
         child.stdout.write(`STOPPED\t${encodeField(values[0])}\n`);
       }
@@ -81,6 +87,14 @@ function createManager(overrides = {}) {
   return { manager, helper };
 }
 
+test('detects Wayland from either session marker', () => {
+  assert.equal(isWaylandSession('linux', { XDG_SESSION_TYPE: 'wayland' }), true);
+  assert.equal(isWaylandSession('linux', { WAYLAND_DISPLAY: 'wayland-0' }), true);
+  assert.equal(isWaylandSession('linux', { XDG_SESSION_TYPE: 'x11', WAYLAND_DISPLAY: 'wayland-0' }), false);
+  assert.equal(isWaylandSession('linux', { XDG_SESSION_TYPE: 'x11' }), false);
+  assert.equal(isWaylandSession('win32', { XDG_SESSION_TYPE: 'wayland' }), false);
+});
+
 test('starts the helper and forwards native offers to the owning renderer', async () => {
   const owner = createOwner();
   const { manager, helper } = createManager();
@@ -104,6 +118,8 @@ test('starts the helper and forwards native offers to the owning renderer', asyn
   });
 
   assert.equal(result.started, true);
+  assert.equal(result.encoder, 'vah264enc');
+  assert.equal(result.hardware, true);
   assert.match(result.sessionId, /^[A-Za-z0-9_-]{8,64}$/);
   assert.equal(helper.commands[0].command, 'START');
   assert.equal(helper.commands[0].values[0], result.sessionId);
@@ -158,9 +174,10 @@ test('pipes isolated mono PCM to an audio-enabled helper session', async () => {
       audio: { mode: 'include', pid: 42 },
       codecPreference: 'H264',
     }),
-    startAudioCapture: (selection, onData) => {
+    startAudioCapture: (selection, onData, onStatus) => {
       audioSelection = selection;
       pushAudio = onData;
+      onStatus({ kind: 'started' });
       return true;
     },
     stopAudioCapture: () => { stopAudioCalls++; },
@@ -197,7 +214,10 @@ test('tears down native audio when the helper reports a fatal runtime error', as
       handle: '0',
       audio: { mode: 'include', pid: 42 },
     }),
-    startAudioCapture: () => true,
+    startAudioCapture: (_selection, _onData, onStatus) => {
+      onStatus({ kind: 'started' });
+      return true;
+    },
     stopAudioCapture: () => { stopAudioCalls++; },
   });
   const result = await manager.start(owner, {});
@@ -230,6 +250,7 @@ test('tears down the session when native audio fails after startup', async () =>
     }),
     startAudioCapture: (_selection, _onData, onStatus) => {
       reportAudioStatus = onStatus;
+      onStatus({ kind: 'started' });
       return true;
     },
     stopAudioCapture: () => { stopAudioCalls++; },
@@ -271,10 +292,56 @@ test('does not report startup success when audio fails synchronously', async () 
 
   assert.equal(result.started, false);
   assert.equal(result.reason, 'native-helper-start-failed');
-  assert.match(result.detail, /audio capture failed during startup/);
+  assert.match(result.detail, /capture initialization failed/);
   assert.equal(stopAudioCalls, 1);
   assert.equal(helper.killed, true);
   assert.equal(manager._session, null);
+});
+
+test('does not announce a session when native audio never becomes ready', async () => {
+  const owner = createOwner();
+  let stopAudioCalls = 0;
+  const { manager, helper } = createManager({
+    audioStartupTimeoutMs: 10,
+    getAudioCapabilities: () => ({ supported: true, modes: ['application'] }),
+    selectSource: async () => ({
+      kind: 'linux-x11-screen',
+      handle: '0',
+      audio: { mode: 'include', pid: 42 },
+    }),
+    startAudioCapture: () => true,
+    stopAudioCapture: () => { stopAudioCalls++; },
+  });
+
+  const result = await manager.start(owner, {});
+
+  assert.equal(result.started, false);
+  assert.match(result.detail, /audio capture timed out/i);
+  assert.equal(stopAudioCalls, 1);
+  assert.equal(helper.killed, true);
+  assert.equal(manager._session, null);
+});
+
+test('stopping a pending audio handshake rejects it immediately', async () => {
+  const owner = createOwner();
+  const { manager } = createManager({
+    audioStartupTimeoutMs: 60000,
+    getAudioCapabilities: () => ({ supported: true, modes: ['application'] }),
+    selectSource: async () => ({
+      kind: 'linux-x11-screen',
+      handle: '0',
+      audio: { mode: 'include', pid: 42 },
+    }),
+    startAudioCapture: () => true,
+  });
+
+  const starting = manager.start(owner, {});
+  await new Promise(resolve => setImmediate(resolve));
+  await manager.stop(owner);
+  const result = await starting;
+
+  assert.equal(result.started, false);
+  assert.match(result.detail, /audio capture stopped during startup/i);
 });
 
 test('handles helper pipe errors without leaving the session active', async () => {

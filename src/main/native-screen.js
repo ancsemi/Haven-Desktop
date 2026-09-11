@@ -71,6 +71,14 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, normalized));
 }
 
+function isWaylandSession(platform = process.platform, env = process.env) {
+  if (platform !== 'linux') return false;
+  const sessionType = String(env?.XDG_SESSION_TYPE || '').toLowerCase();
+  if (sessionType === 'wayland') return true;
+  if (sessionType === 'x11') return false;
+  return Boolean(env?.WAYLAND_DISPLAY);
+}
+
 class NativeScreenManager {
   constructor(options = {}) {
     this._selectSource = options.selectSource;
@@ -100,6 +108,7 @@ class NativeScreenManager {
     }));
     this._startAudioCapture = options.startAudioCapture || null;
     this._stopAudioCapture = options.stopAudioCapture || null;
+    this._audioStartupTimeoutMs = options.audioStartupTimeoutMs ?? 12000;
     this._session = null;
     this._starting = false;
     this._pendingStart = null;
@@ -199,8 +208,7 @@ class NativeScreenManager {
     const backends = Array.isArray(capabilities.captureBackends)
       ? capabilities.captureBackends
       : [];
-    const wayland = this._platform === 'linux' &&
-      String(this._env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland';
+    const wayland = isWaylandSession(this._platform, this._env);
     if (wayland && !backends.includes('pipewire-portal')) {
       return finish({ ...capabilities, supported: false, reason: 'wayland-portal-unavailable' });
     }
@@ -352,12 +360,16 @@ class NativeScreenManager {
       audioInput: child.stdio?.[3] || null,
       audioStarted: false,
       audioBackpressured: false,
+      audioReadyReject: null,
+      encoder: null,
+      hardware: null,
     };
     this._session = session;
     this._wireProcess(session);
     this._wireOwner(session);
 
     let startupTimer;
+    let audioStartupTimer;
     try {
       const ready = new Promise((resolve, reject) => {
         session.readyResolve = resolve;
@@ -386,7 +398,7 @@ class NativeScreenManager {
       await Promise.race([
         ready,
         new Promise((_, reject) => {
-          const timeout = source.kind === 'linux-pipewire' ? 125000 : 10000;
+          const timeout = source.kind === 'linux-pipewire' ? 180000 : 45000;
           startupTimer = setTimeout(() => reject(new Error('native helper startup timed out')), timeout);
         }),
       ]);
@@ -400,12 +412,49 @@ class NativeScreenManager {
           if (this._session === session) session.audioBackpressured = false;
         });
         session.audioStarted = true;
+        let audioReadySettled = false;
+        let resolveAudioReady;
+        let rejectAudioReady;
+        const audioReady = new Promise((resolve, reject) => {
+          resolveAudioReady = resolve;
+          rejectAudioReady = reject;
+        });
+        audioReady.catch(() => {});
+        const settleAudioReady = (callback, value) => {
+          if (audioReadySettled) return;
+          audioReadySettled = true;
+          callback(value);
+        };
+        session.audioReadyReject = error => settleAudioReady(
+          rejectAudioReady,
+          error instanceof Error ? error : new Error(String(error))
+        );
+        session.onAudioStatus = status => {
+          const rejectReady = session.audioReadyReject;
+          if (status?.kind === 'failed') {
+            rejectReady?.(
+              new Error(status.message || 'Native screen audio capture failed during startup')
+            );
+          }
+          this._handleAudioStatus(session, status);
+          if (status?.kind === 'started') settleAudioReady(resolveAudioReady);
+        };
         const audioStarted = await Promise.resolve(this._startAudioCapture(
           { mode: audioMode, pid: audioPid, sessionId: session.id, owner },
           samples => this._writeAudio(session, samples),
-          status => this._handleAudioStatus(session, status)
+          status => session.onAudioStatus?.(status)
         ));
         if (!audioStarted) throw new Error('Native screen audio capture failed to start');
+        if (!audioReadySettled) {
+          audioStartupTimer = setTimeout(
+            () => session.audioReadyReject?.(
+              new Error('Native screen audio capture timed out during startup')
+            ),
+            this._audioStartupTimeoutMs
+          );
+        }
+        await audioReady;
+        session.audioReadyReject = null;
         if (this._session !== session) {
           throw new Error('Native screen audio capture failed during startup');
         }
@@ -414,7 +463,14 @@ class NativeScreenManager {
           return { started: false, reason: 'inactive-view' };
         }
       }
-      return { started: true, sessionId, codec, hasAudio };
+      return {
+        started: true,
+        sessionId,
+        codec,
+        hasAudio,
+        encoder: session.encoder,
+        hardware: session.hardware,
+      };
     } catch (err) {
       if (this._session === session) {
         await this.stop(owner, true);
@@ -429,6 +485,7 @@ class NativeScreenManager {
       };
     } finally {
       if (startupTimer) clearTimeout(startupTimer);
+      if (audioStartupTimer) clearTimeout(audioStartupTimer);
     }
   }
 
@@ -652,6 +709,10 @@ class NativeScreenManager {
     if (values[0] !== session.id) return;
 
     if (event === 'READY') {
+      session.encoder = /^[A-Za-z0-9_-]{1,64}$/.test(values[1] || '')
+        ? values[1]
+        : null;
+      session.hardware = values[2] === '1' ? true : values[2] === '0' ? false : null;
       session.readyResolve?.();
       session.readyResolve = null;
       session.readyReject = null;
@@ -788,6 +849,9 @@ class NativeScreenManager {
     const wasStarted = session.audioStarted;
     session.audioStarted = false;
     session.audioBackpressured = false;
+    session.audioReadyReject?.(new Error('Native screen audio capture stopped during startup'));
+    session.audioReadyReject = null;
+    session.onAudioStatus = null;
     if (wasStarted) {
       try {
         this._stopAudioCapture?.({ sessionId: session.id, owner: session.owner });
@@ -836,4 +900,5 @@ module.exports = {
   PROTOCOL_VERSION,
   decodeField,
   encodeField,
+  isWaylandSession,
 };

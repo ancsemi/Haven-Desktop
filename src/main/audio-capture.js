@@ -13,12 +13,17 @@
 const path = require('path');
 
 class AudioCaptureManager {
-  constructor(addon = null, beforeStop = null, t = key => key) {
+  constructor(addon = null, beforeStop = null, t = key => key, timers = {}) {
     this._t        = t;
     this._addon    = addon;
     this._beforeStop = beforeStop;
     this._capturing = false;
     this._generation = 0;
+    this._now = timers.now || Date.now;
+    this._setInterval = timers.setInterval || setInterval;
+    this._clearInterval = timers.clearInterval || clearInterval;
+    this._watchdogIntervalMs = timers.watchdogIntervalMs || 2000;
+    this._watchdogStallMs = timers.watchdogStallMs || 11000;
     if (!this._addon) this._loadAddon();
   }
 
@@ -93,6 +98,7 @@ class AudioCaptureManager {
       ['pa_context_connect failed (PulseAudio/PipeWire daemon not reachable)', 'audio.status.pulseUnavailable'],
       ['pa_context_get_sink_input_info_list returned NULL', 'audio.status.pulseEnumerationFailed'],
       ['pulse capture active', 'audio.status.pulseActive'],
+      ['Native audio capture stopped producing data', 'audio.status.captureStalled'],
     ]);
 
     let messageKey = exact.get(rawMessage);
@@ -181,13 +187,13 @@ class AudioCaptureManager {
 
     const generation = ++this._generation;
     this._capturing  = true;
-    this._lastDataAt = Date.now();
+    this._lastDataAt = this._now();
     this._initFailed = false;
     this._lastStatus = null;
 
     const dataWrap = (pcm, capturedAt) => {
       if (!this._capturing || this._generation !== generation) return;
-      this._lastDataAt = Date.now();
+      this._lastDataAt = this._now();
       onData(pcm, capturedAt);
     };
 
@@ -212,17 +218,21 @@ class AudioCaptureManager {
       }
       console.log(`[AudioCapture] Capturing PID ${pid} (mode=${mode})`);
 
-      // Watchdog: if no data arrives for 12 seconds after start, the native
-      // capture thread likely went silent on us (target PID exited, etc).
-      // Bumped from 8s because some sources (paused games) take a while to
-      // produce real audio; the native heartbeat keeps lastDataAt fresh.
-      this._watchdog = setTimeout(() => {
+      // Keep checking for the lifetime of the capture. Native heartbeats keep
+      // silent but healthy sources alive, while a dead backend is torn down.
+      this._watchdog = this._setInterval(() => {
         if (this._capturing && this._generation === generation &&
-            Date.now() - this._lastDataAt > 11000) {
+            this._now() - this._lastDataAt > this._watchdogStallMs) {
           console.warn('[AudioCapture] No data received in 11s — stopping capture');
-          this.stopCapture();
+          statusWrap({
+            kind: 'failed',
+            message: 'Native audio capture stopped producing data',
+            code: 0,
+          });
+          if (this._capturing && this._generation === generation) this.stopCapture();
         }
-      }, 12000);
+      }, this._watchdogIntervalMs);
+      this._watchdog.unref?.();
 
       return true;
     } catch (e) {
@@ -233,7 +243,7 @@ class AudioCaptureManager {
 
   /** Stop active capture. */
   stopCapture() {
-    clearTimeout(this._watchdog);
+    this._clearInterval(this._watchdog);
     this._generation++;
     if (this._beforeStop) {
       try { this._beforeStop(); } catch { /* */ }

@@ -19,6 +19,7 @@ const LINUX_REQUIRED_PLUGIN_GROUPS = [
   ['libgstximagesrc.so'],
   ['libgstpipewire.so'],
   ['libgstvideoparsersbad.so'],
+  ['libgstx264.so', 'libgstopenh264.so'],
   ['libgstrtp.so'],
   ['libgstrtpmanager.so'],
   ['libgstwebrtc.so'],
@@ -30,7 +31,7 @@ const WINDOWS_PLUGIN_TOKENS = [
   'coreelements', 'gstapp', 'videotestsrc', 'videorate', 'videoconvert', 'videoscale', 'audioconvert',
   'audioresample', 'opus', 'd3d11', 'd3d12', 'nvcodec', 'qsv', 'amfcodec',
   'mediafoundation', 'gstmf', 'videoparsersbad', 'rsrtp', 'rtp', 'webrtc', 'nice',
-  'dtls', 'srtp',
+  'dtls', 'srtp', 'x264', 'openh264',
 ];
 const WINDOWS_REQUIRED_PLUGIN_GROUPS = [
   ['gstcoreelements.dll'], ['gstapp.dll'], ['gstvideotestsrc.dll'], ['gstvideorate.dll'],
@@ -39,6 +40,7 @@ const WINDOWS_REQUIRED_PLUGIN_GROUPS = [
   ['gstaudioconvert.dll'], ['gstaudioresample.dll'], ['gstopus.dll'],
   ['gstd3d11.dll'], ['gstmediafoundation.dll', 'gstmf.dll'],
   ['gstvideoparsersbad.dll'], ['gstrtp.dll'],
+  ['gstx264.dll', 'gstopenh264.dll'],
   ['gstwebrtc.dll'], ['gstnice.dll'], ['gstdtls.dll'], ['gstsrtp.dll'],
 ];
 
@@ -72,6 +74,12 @@ function selectRequiredPlugins(allPlugins, pluginGroups) {
   });
 }
 
+function selectLinuxEncoderPlugins(allPlugins) {
+  return allPlugins.filter(file =>
+    /libgst(?:va(?:api)?|nvcodec|qsv|amfcodec|x264|openh264)\.so$/.test(path.basename(file))
+  );
+}
+
 function stageLinux(output) {
   const pluginDirectory = process.env.GSTREAMER_PLUGIN_DIR || execFileSync(
     'pkg-config',
@@ -83,10 +91,7 @@ function stageLinux(output) {
 
   const allPlugins = listFiles(pluginDirectory, name => name.endsWith('.so'));
   const selected = selectRequiredPlugins(allPlugins, LINUX_REQUIRED_PLUGIN_GROUPS);
-  const encoderPlugins = allPlugins.filter(file =>
-    /libgst(?:va(?:api)?|nvcodec|qsv|amfcodec)\.so$/.test(path.basename(file))
-  );
-  if (!encoderPlugins.length) throw new Error('Missing a supported hardware encoder plugin');
+  const encoderPlugins = selectLinuxEncoderPlugins(allPlugins);
   selected.push(...encoderPlugins);
 
   const optionalPlugins = ['rsrtp'];
@@ -196,5 +201,6 @@ if (require.main === module) main();
 module.exports = {
   LINUX_REQUIRED_PLUGIN_GROUPS,
   WINDOWS_REQUIRED_PLUGIN_GROUPS,
+  selectLinuxEncoderPlugins,
   selectRequiredPlugins,
 };

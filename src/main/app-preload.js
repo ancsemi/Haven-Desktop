@@ -1160,7 +1160,11 @@ ipcRenderer.on('screen:show-picker', (_event, data) => {
     data?.audioCapabilities || {},
     data?.requestId || null,
     data?.videoEncoder || {},
-    { videoOnly: !!data?.videoOnly, nativeMode: !!data?.nativeMode }
+    {
+      videoOnly: !!data?.videoOnly,
+      nativeMode: !!data?.nativeMode,
+      portalOnly: !!data?.portalOnly,
+    }
   );
 });
 
@@ -1173,6 +1177,7 @@ function getScreenPickerCopy() {
     title: t('screenPicker.title'),
     subtitle: t('screenPicker.subtitle'),
     nativeSubtitle: t('screenPicker.nativeSubtitle'),
+    portalSubtitle: t('screenPicker.portalSubtitle'),
     screens: t('screenPicker.screens'),
     windows: t('screenPicker.windows'),
     audio: t('screenPicker.audio'),
@@ -1188,11 +1193,13 @@ function getScreenPickerCopy() {
     noPreview: t('screenPicker.noPreview'),
     cancel: t('screenPicker.cancel'),
     share: t('screenPicker.share'),
+    continue: t('screenPicker.continue'),
   };
 }
 
 function showScreenPicker(sources, audioApps, audioCapabilities, requestId, videoEncoder, options = {}) {
   const { videoOnly = false, nativeMode = false } = options;
+  const portalOnly = options.portalOnly === true && sources.length === 1;
   const stalePicker = document.getElementById('haven-screen-picker');
   const staleRequestId = stalePicker?.dataset.requestId;
   if (staleRequestId && staleRequestId !== requestId) {
@@ -1288,7 +1295,7 @@ function showScreenPicker(sources, audioApps, audioCapabilities, requestId, vide
 
     <div class="hsp-box" role="dialog" aria-modal="true" aria-labelledby="hsp-title">
       <div class="hsp-title" id="hsp-title" data-haven-i18n="screenPicker.title">${copy.title}</div>
-      <div class="hsp-sub" id="hsp-subtitle" data-haven-i18n="screenPicker.subtitle">${nativeMode ? copy.nativeSubtitle : copy.subtitle}</div>
+      <div class="hsp-sub" id="hsp-subtitle" data-haven-i18n="screenPicker.subtitle">${portalOnly ? copy.portalSubtitle : nativeMode ? copy.nativeSubtitle : copy.subtitle}</div>
 
       <div class="hsp-scroll">
         <div class="hsp-sec" id="hsp-screens-section">
@@ -1319,16 +1326,16 @@ function showScreenPicker(sources, audioApps, audioCapabilities, requestId, vide
 
       <div class="hsp-btns">
         <button class="hsp-btn hsp-cancel" id="hsp-cancel" type="button" data-haven-i18n="screenPicker.cancel">${copy.cancel}</button>
-        <button class="hsp-btn hsp-share" id="hsp-go" type="button" data-haven-i18n="screenPicker.share" disabled>${copy.share}</button>
+        <button class="hsp-btn hsp-share" id="hsp-go" type="button" data-haven-i18n="screenPicker.share" disabled>${portalOnly ? copy.continue : copy.share}</button>
       </div>
     </div>`;
 
   document.body.appendChild(overlay);
-  if (nativeMode) {
-    document.getElementById('hsp-subtitle').dataset.havenI18n = 'screenPicker.nativeSubtitle';
-  }
+  const subtitle = document.getElementById('hsp-subtitle');
+  if (portalOnly) subtitle.dataset.havenI18n = 'screenPicker.portalSubtitle';
+  else if (nativeMode) subtitle.dataset.havenI18n = 'screenPicker.nativeSubtitle';
 
-  let selSource = null;
+  let selSource = portalOnly && sources.length === 1 ? sources[0].id : null;
   let selAudioPid = 'none';
   let selVideoEncoder = _videoEncoderConfig.preference;
 
@@ -1339,6 +1346,8 @@ function showScreenPicker(sources, audioApps, audioCapabilities, requestId, vide
   const goBtn      = document.getElementById('hsp-go');
   const encoderSelect = document.getElementById('hsp-video-encoder');
   const encoderNote = document.getElementById('hsp-video-note');
+  if (portalOnly) goBtn.dataset.havenI18n = 'screenPicker.continue';
+  goBtn.disabled = !selSource;
 
   const videoCodecs = window.RTCRtpSender?.getCapabilities?.('video')?.codecs || [];
   const nativeCodecs = new Set(_videoEncoderConfig.codecs.map(codec =>
@@ -1397,7 +1406,7 @@ function showScreenPicker(sources, audioApps, audioCapabilities, requestId, vide
   encoderNote.textContent = hardwareNote + h265Note;
 
   // ── Populate video sources ─────────────────────────────
-  sources.forEach(src => {
+  if (!portalOnly) sources.forEach(src => {
     const el = document.createElement('button');
     el.type = 'button';
     el.className = 'hsp-src';
@@ -1416,8 +1425,8 @@ function showScreenPicker(sources, audioApps, audioCapabilities, requestId, vide
     const sourceName = document.createElement('div');
     sourceName.className = 'hsp-src-name';
     sourceName.title = src.name;
-      sourceName.textContent = src.name;
-      el.appendChild(sourceName);
+    sourceName.textContent = src.name;
+    el.appendChild(sourceName);
     el.onclick = () => {
       overlay.querySelectorAll('.hsp-src.sel').forEach(source => {
         source.classList.remove('sel');
@@ -1430,8 +1439,8 @@ function showScreenPicker(sources, audioApps, audioCapabilities, requestId, vide
     };
     (src.id.startsWith('screen:') ? screensEl : windowsEl).appendChild(el);
   });
-  if (!screensEl.children.length) document.getElementById('hsp-screens-section').hidden = true;
-  if (!windowsEl.children.length) document.getElementById('hsp-windows-section').hidden = true;
+  if (portalOnly || !screensEl.children.length) document.getElementById('hsp-screens-section').hidden = true;
+  if (portalOnly || !windowsEl.children.length) document.getElementById('hsp-windows-section').hidden = true;
 
   const selectAudio = (element, value) => {
     overlay.querySelectorAll('.hsp-app.sel').forEach(option => {

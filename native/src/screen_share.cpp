@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -82,11 +84,15 @@ struct App {
   GstElement* audioSource = nullptr;
   guint busWatch = 0;
   std::string sessionId;
+  std::string activeEncoder;
   CaptureConfig config;
   std::unordered_map<std::string, std::unique_ptr<Peer>> peers;
   std::vector<std::unique_ptr<Peer>> retiredPeers;
   std::mutex outputMutex;
   std::mutex audioMutex;
+  std::mutex videoReadyMutex;
+  std::condition_variable videoReadyCondition;
+  bool firstVideoRtp = false;
   std::atomic<bool> stopping{false};
   bool starting = false;
   bool cancelStartup = false;
@@ -98,6 +104,9 @@ struct App {
   guint portalClosedSubscription = 0;
   GMainLoop* portalRequestLoop = nullptr;
   int pipewireFd = -1;
+  std::string pipewireSource;
+  int pipewireSourceWidth = 0;
+  int pipewireSourceHeight = 0;
 #endif
 };
 
@@ -127,7 +136,7 @@ struct CodecSpec {
 
 const CodecSpec* codec_spec(const std::string& name) {
   static const CodecSpec specs[] = {
-      {"H264", "h264parse", "rtph264pay", "video/x-h264,profile=baseline", "H264"},
+      {"H264", "h264parse", "rtph264pay", "video/x-h264,profile=constrained-baseline", "H264"},
       {"AV1", "av1parse", "rtpav1pay", "video/x-av1", "AV1"},
       {"H265", "h265parse", "rtph265pay", "video/x-h265", "H265"},
   };
@@ -141,6 +150,7 @@ std::vector<std::string> encoder_candidates(const std::string& codec) {
 #ifdef G_OS_WIN32
   if (codec == "H264") return {
       "nvd3d11h264enc", "amfh264enc", "qsvh264enc", "mfh264enc", "nvh264enc",
+      "x264enc", "openh264enc",
   };
   if (codec == "AV1") return {"amfav1enc", "qsvav1enc", "nvav1enc"};
   if (codec == "H265") return {
@@ -149,6 +159,7 @@ std::vector<std::string> encoder_candidates(const std::string& codec) {
 #else
   if (codec == "H264") return {
       "nvh264enc", "qsvh264enc", "vah264enc", "vaapih264enc",
+      "x264enc", "openh264enc",
   };
   if (codec == "AV1") return {"nvav1enc", "qsvav1enc", "vaav1enc"};
   if (codec == "H265") return {
@@ -156,6 +167,10 @@ std::vector<std::string> encoder_candidates(const std::string& codec) {
   };
 #endif
   return {};
+}
+
+bool encoder_is_software(const std::string& encoder) {
+  return encoder == "x264enc" || encoder == "openh264enc";
 }
 
 bool encoder_is_usable(const std::string& name) {
@@ -178,7 +193,10 @@ std::vector<std::string> available_encoders(const std::string& codec) {
   if (!spec || !factory_exists(spec->parser) || !factory_exists(spec->payloader)) {
     return available;
   }
+  const bool forceSoftware = g_strcmp0(
+      g_getenv("HAVEN_NATIVE_FORCE_SOFTWARE"), "1") == 0;
   for (const auto& encoder : encoder_candidates(codec)) {
+    if (forceSoftware && !encoder_is_software(encoder)) continue;
     if (encoder_is_usable(encoder)) available.push_back(encoder);
   }
   return available;
@@ -198,14 +216,18 @@ void append_encoder_properties(std::ostringstream* pipeline,
                                const std::string& encoder,
                                int bitrateKbps, int keyInterval) {
   *pipeline << ' ' << encoder;
+  const int encoderBitrate = encoder == "openh264enc"
+      ? bitrateKbps * 1000
+      : bitrateKbps;
   if (factory_has_property(encoder.c_str(), "bitrate")) {
-    *pipeline << " bitrate=" << bitrateKbps;
+    *pipeline << " bitrate=" << encoderBitrate;
   }
   if (factory_has_property(encoder.c_str(), "max-bitrate")) {
-    *pipeline << " max-bitrate=" << bitrateKbps;
+    *pipeline << " max-bitrate=" << encoderBitrate;
   }
   if (factory_has_property(encoder.c_str(), "rate-control")) {
-    *pipeline << " rate-control=cbr";
+    *pipeline << " rate-control="
+              << (encoder == "openh264enc" ? "bitrate" : "cbr");
   } else if (factory_has_property(encoder.c_str(), "rc-mode")) {
     *pipeline << " rc-mode=cbr";
   }
@@ -220,12 +242,19 @@ void append_encoder_properties(std::ostringstream* pipeline,
     *pipeline << " b-frames=0";
   } else if (factory_has_property(encoder.c_str(), "max-bframes")) {
     *pipeline << " max-bframes=0";
+  } else if (factory_has_property(encoder.c_str(), "bframes")) {
+    *pipeline << " bframes=0";
   }
   if (factory_has_property(encoder.c_str(), "low-latency")) {
     *pipeline << " low-latency=true";
   }
   if (factory_has_property(encoder.c_str(), "zerolatency")) {
     *pipeline << " zerolatency=true";
+  }
+  if (encoder == "x264enc") {
+    *pipeline << " speed-preset=ultrafast tune=zerolatency sliced-threads=true threads=2";
+  } else if (encoder == "openh264enc") {
+    *pipeline << " complexity=low usage-type=screen enable-frame-skip=true";
   }
 }
 
@@ -344,10 +373,11 @@ std::vector<TurnServer> parse_turn_servers(const std::string& encoded) {
   return servers;
 }
 
-std::string output_caps(const CaptureConfig& config, bool d3d11Memory) {
+std::string output_caps(const CaptureConfig& config, bool d3d11Memory,
+                        const char* format = "NV12") {
   std::ostringstream caps;
   caps << (d3d11Memory ? "video/x-raw(memory:D3D11Memory)" : "video/x-raw")
-       << ",format=NV12,framerate=" << config.frameRate << "/1";
+       << ",format=" << format << ",framerate=" << config.frameRate << "/1";
   if (config.outputHeight > 0) {
     if (config.sourceWidth > 0 && config.sourceHeight > 0) {
       int width = static_cast<int>(
@@ -488,6 +518,9 @@ void close_portal_capture(App* app) {
     app->pipewireFd = -1;
   }
   app->portalSession.clear();
+  app->pipewireSource.clear();
+  app->pipewireSourceWidth = 0;
+  app->pipewireSourceHeight = 0;
   g_clear_object(&app->portalBus);
 }
 
@@ -513,6 +546,13 @@ guint portal_cursor_mode(GDBusConnection* bus) {
 
 bool open_pipewire_portal(App* app, CaptureConfig* config,
                           std::ostringstream* source, std::string* error) {
+  if (app->pipewireFd >= 0 && !app->pipewireSource.empty()) {
+    config->sourceWidth = app->pipewireSourceWidth;
+    config->sourceHeight = app->pipewireSourceHeight;
+    *source << app->pipewireSource;
+    return true;
+  }
+
   GError* busError = nullptr;
   app->portalBus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &busError);
   if (!app->portalBus) {
@@ -643,16 +683,21 @@ bool open_pipewire_portal(App* app, CaptureConfig* config,
     return false;
   }
 
-  *source << "pipewiresrc fd=" << app->pipewireFd;
+  std::ostringstream portalSource;
+  portalSource << "pipewiresrc fd=" << app->pipewireFd;
   if (serial > 0 && factory_has_property("pipewiresrc", "target-object")) {
-    *source << " target-object=" << serial;
+    portalSource << " target-object=" << serial;
   } else {
-    *source << " path=" << nodeId;
+    portalSource << " path=" << nodeId;
   }
   if (factory_has_property("pipewiresrc", "on-disconnect")) {
-    *source << " on-disconnect=error";
+    portalSource << " on-disconnect=error";
   }
-  *source << " do-timestamp=true";
+  portalSource << " do-timestamp=true";
+  app->pipewireSource = portalSource.str();
+  app->pipewireSourceWidth = config->sourceWidth;
+  app->pipewireSourceHeight = config->sourceHeight;
+  *source << app->pipewireSource;
   return true;
 }
 #endif
@@ -726,6 +771,7 @@ bool build_pipeline_description(App* app, CaptureConfig config,
 
   const int bitrateKbps = std::max(250, config.bitrate / 1000);
   const int keyInterval = std::max(1, config.frameRate * 2);
+  const char* rawFormat = encoderName == "openh264enc" ? "I420" : "NV12";
   std::ostringstream pipeline;
   pipeline << source.str()
            << " ! queue max-size-buffers=2 leaky=downstream"
@@ -735,11 +781,11 @@ bool build_pipeline_description(App* app, CaptureConfig config,
     pipeline << " ! d3d11convert ! " << output_caps(config, true);
     if (!encoder_accepts_d3d11(encoderName)) {
       pipeline << " ! d3d11download ! videoconvert ! videoscale add-borders=false ! "
-               << output_caps(config, false);
+               << output_caps(config, false, rawFormat);
     }
   } else {
     pipeline << " ! videoscale add-borders=false ! videoconvert ! "
-             << output_caps(config, false);
+             << output_caps(config, false, rawFormat);
   }
 
   pipeline << " !";
@@ -757,7 +803,8 @@ bool build_pipeline_description(App* app, CaptureConfig config,
   }
   pipeline << " ! application/x-rtp,media=video,encoding-name="
            << codec->rtpEncoding << ",payload=96,clock-rate=90000"
-           << " ! tee name=videortptee videortptee. ! queue ! fakesink sync=false";
+           << " ! tee name=videortptee videortptee. ! queue ! "
+              "fakesink name=videoready sync=false signal-handoffs=true";
   if (config.hasAudio) {
     pipeline << " appsrc name=audiosrc is-live=true format=time do-timestamp=true"
               << " block=true max-bytes=19200"
@@ -772,7 +819,15 @@ bool build_pipeline_description(App* app, CaptureConfig config,
   return true;
 }
 
-void stop_pipeline(App* app);
+void stop_pipeline(App* app, bool preservePortal = false);
+
+void on_video_handoff(GstElement*, GstBuffer*, GstPad*, gpointer userData) {
+  App* app = static_cast<App*>(userData);
+  std::lock_guard<std::mutex> lock(app->videoReadyMutex);
+  if (app->firstVideoRtp) return;
+  app->firstVideoRtp = true;
+  app->videoReadyCondition.notify_all();
+}
 
 gboolean stop_after_terminal_message(gpointer userData) {
   App* app = static_cast<App*>(userData);
@@ -1170,7 +1225,7 @@ void remove_peer(App* app, const std::string& peerId) {
   app->retiredPeers.push_back(std::move(peer));
 }
 
-void stop_pipeline(App* app) {
+void stop_pipeline(App* app, bool preservePortal) {
   for (auto& entry : app->peers) {
     Peer* peer = entry.second.get();
     peer->active = false;
@@ -1217,26 +1272,43 @@ void stop_pipeline(App* app) {
     app->retiredPeers.push_back(std::move(entry.second));
   }
   app->peers.clear();
+  app->activeEncoder.clear();
 #ifndef G_OS_WIN32
-  close_portal_capture(app);
+  if (!preservePortal) close_portal_capture(app);
 #endif
+}
+
+CaptureConfig config_for_encoder(const CaptureConfig& config,
+                                 const std::string& encoder) {
+  CaptureConfig effective = config;
+  if (encoder_is_software(encoder)) {
+    if (effective.outputHeight == 0 || effective.outputHeight > 720) {
+      effective.outputHeight = effective.sourceHeight > 0
+          ? std::min(effective.sourceHeight, 720)
+          : 720;
+    }
+    effective.frameRate = std::min(effective.frameRate, 30);
+    effective.bitrate = std::min(effective.bitrate, 4000000);
+  }
+  return effective;
 }
 
 bool start_pipeline_with_encoder(App* app, const CaptureConfig& config,
                                  const std::string& encoder,
                                  std::string* error) {
+  const CaptureConfig effectiveConfig = config_for_encoder(config, encoder);
   std::string pipelineDescription;
   if (!build_pipeline_description(
-          app, config, encoder, &pipelineDescription, error)) {
+          app, effectiveConfig, encoder, &pipelineDescription, error)) {
     return false;
   }
-  const CodecSpec* codec = codec_spec(config.codec);
+  const CodecSpec* codec = codec_spec(effectiveConfig.codec);
   const bool commonTransport = factory_exists("webrtcbin") &&
       factory_exists("nicesrc") && factory_exists("nicesink") &&
       factory_exists("dtlsenc") && factory_exists("srtpenc");
   const bool videoTransport = codec && factory_exists(codec->payloader) &&
       factory_exists(codec->parser) && factory_exists(encoder.c_str());
-  const bool audioTransport = !config.hasAudio ||
+  const bool audioTransport = !effectiveConfig.hasAudio ||
       (factory_exists("appsrc") && factory_exists("audioconvert") &&
        factory_exists("audioresample") && factory_exists("opusenc") &&
        factory_exists("rtpopuspay"));
@@ -1257,26 +1329,36 @@ bool start_pipeline_with_encoder(App* app, const CaptureConfig& config,
     return false;
   }
   app->videoRtpTee = gst_bin_get_by_name(GST_BIN(app->pipeline), "videortptee");
-  app->audioRtpTee = config.hasAudio
+  app->audioRtpTee = effectiveConfig.hasAudio
       ? gst_bin_get_by_name(GST_BIN(app->pipeline), "audiortptee")
       : nullptr;
-  if (!app->videoRtpTee || (config.hasAudio && !app->audioRtpTee)) {
+  if (!app->videoRtpTee || (effectiveConfig.hasAudio && !app->audioRtpTee)) {
     *error = "Encoded media RTP tee was not created";
-    stop_pipeline(app);
     return false;
   }
   gst_object_unref(app->videoRtpTee);
   if (app->audioRtpTee) gst_object_unref(app->audioRtpTee);
-  if (config.hasAudio) {
+  if (effectiveConfig.hasAudio) {
     GstElement* audioSource = gst_bin_get_by_name(GST_BIN(app->pipeline), "audiosrc");
     if (!audioSource) {
       *error = "Native audio input was not created";
-      stop_pipeline(app);
       return false;
     }
     std::lock_guard<std::mutex> lock(app->audioMutex);
     app->audioSource = audioSource;
   }
+
+  GstElement* videoReady = gst_bin_get_by_name(GST_BIN(app->pipeline), "videoready");
+  if (!videoReady) {
+    *error = "Encoded video readiness sink was not created";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(app->videoReadyMutex);
+    app->firstVideoRtp = false;
+  }
+  g_signal_connect(videoReady, "handoff", G_CALLBACK(on_video_handoff), app);
+  gst_object_unref(videoReady);
 
   GstBus* bus = gst_element_get_bus(app->pipeline);
   app->busWatch = gst_bus_add_watch(bus, bus_watch_cb, app);
@@ -1285,19 +1367,26 @@ bool start_pipeline_with_encoder(App* app, const CaptureConfig& config,
       app->pipeline, GST_STATE_PLAYING);
   if (state == GST_STATE_CHANGE_FAILURE) {
     *error = "GStreamer capture pipeline failed to start";
-    stop_pipeline(app);
     return false;
   }
   if (state == GST_STATE_CHANGE_ASYNC) {
     const GstStateChangeReturn settled = gst_element_get_state(
-        app->pipeline, nullptr, nullptr, 5 * GST_SECOND);
+        app->pipeline, nullptr, nullptr, 3 * GST_SECOND);
     if (settled != GST_STATE_CHANGE_SUCCESS &&
         settled != GST_STATE_CHANGE_NO_PREROLL) {
       *error = "GStreamer capture pipeline did not reach PLAYING";
-      stop_pipeline(app);
       return false;
     }
   }
+  {
+    std::unique_lock<std::mutex> lock(app->videoReadyMutex);
+    if (!app->videoReadyCondition.wait_for(
+            lock, std::chrono::seconds(3), [&] { return app->firstVideoRtp; })) {
+      *error = "GStreamer capture pipeline produced no encoded video";
+      return false;
+    }
+  }
+  app->activeEncoder = encoder;
   return true;
 }
 
@@ -1311,6 +1400,7 @@ bool preflight_encoder_pipeline(App* app, const CaptureConfig& config,
   testConfig.sourceHeight = 720;
   testConfig.outputHeight = config.outputHeight > 0 ? config.outputHeight : 720;
   testConfig.hasAudio = false;
+  testConfig = config_for_encoder(testConfig, encoder);
 
   std::string description;
   if (!build_pipeline_description(
@@ -1328,7 +1418,7 @@ bool preflight_encoder_pipeline(App* app, const CaptureConfig& config,
 
   GstStateChangeReturn state = gst_element_set_state(pipeline, GST_STATE_PLAYING);
   if (state == GST_STATE_CHANGE_ASYNC) {
-    state = gst_element_get_state(pipeline, nullptr, nullptr, 5 * GST_SECOND);
+    state = gst_element_get_state(pipeline, nullptr, nullptr, 3 * GST_SECOND);
   }
   const bool usable = state == GST_STATE_CHANGE_SUCCESS ||
       state == GST_STATE_CHANGE_NO_PREROLL;
@@ -1355,10 +1445,13 @@ bool start_pipeline(App* app, const CaptureConfig& config, std::string* error) {
                   << lastError << std::endl;
         continue;
       }
-      if (start_pipeline_with_encoder(app, config, encoder, error)) return true;
-      stop_pipeline(app);
-      return false;
+      std::string attemptError;
+      if (start_pipeline_with_encoder(app, config, encoder, &attemptError)) return true;
+      stop_pipeline(app, true);
+      lastError = encoder + ": " + attemptError;
+      std::cerr << "[NativeScreen] encoder attempt failed: " << lastError << std::endl;
     }
+    stop_pipeline(app);
     *error = "No native encoder pipeline could start for " + config.codec;
     if (!lastError.empty()) *error += " (" + lastError + ")";
     return false;
@@ -1465,7 +1558,11 @@ void handle_start(App* app, const std::vector<std::string>& fields) {
     emit_error(app, "", error, true);
     return;
   }
-  emit_event(app, "READY", {app->sessionId});
+  emit_event(app, "READY", {
+      app->sessionId,
+      app->activeEncoder,
+      encoder_is_software(app->activeEncoder) ? "0" : "1",
+  });
 }
 
 void handle_command(App* app, const std::string& line) {
@@ -1610,7 +1707,8 @@ int probe() {
     if (wroteCodec) std::cout << ',';
     wroteCodec = true;
     std::cout << "{\"name\":\"" << name << "\",\"encoder\":\""
-              << selected << "\",\"hardware\":true}";
+              << selected << "\",\"hardware\":"
+              << (encoder_is_software(selected) ? "false" : "true") << '}';
   };
   writeCodec("H264", h264Encoder);
   writeCodec("AV1", av1Encoder);
