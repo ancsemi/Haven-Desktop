@@ -1,6 +1,7 @@
 name: Build Haven Desktop
 
 on:
+  pull_request:
   push:
     tags:
       - 'v*'          # Trigger on version tags like v1.0.0
@@ -42,7 +43,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & Publish Windows installer
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder --win --publish ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -76,7 +77,7 @@ jobs:
         run: npm run build:native
 
       - name: Build & Publish Linux packages
-        run: npx electron-builder --linux --publish always
+        run: npx electron-builder --linux --publish ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
