@@ -23,6 +23,7 @@ const {
   resolveAudioSelection,
 } = require('./screen-share-audio');
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
+const { resolveRefreshedSource } = require('./screen-source');
 const { NativeScreenManager, isWaylandSession } = require('./native-screen');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
@@ -2449,11 +2450,7 @@ async function selectNativeScreenSource(targetContents, capabilities = {}, signa
     thumbnailSize: { width: 0, height: 0 },
     fetchWindowIcons: false,
   });
-  const selected = freshSources.find(source => source.id === chosenSource.id) ||
-    freshSources.find(source =>
-      source.name === chosenSource.name &&
-      (!chosenSource.display_id || source.display_id === chosenSource.display_id)
-    );
+  const selected = resolveRefreshedSource(sources, freshSources, result.sourceId);
   if (!selected) return null;
 
   const idMatch = /^(screen|window):([^:]+):/.exec(selected.id);
@@ -2464,8 +2461,7 @@ async function selectNativeScreenSource(targetContents, capabilities = {}, signa
   if (process.platform === 'win32') {
     const displays = screen.getAllDisplays();
     const display = sourceType === 'screen'
-      ? displays.find(item => String(item.id) === String(selected.display_id)) ||
-        displays[Number(sourceHandle)] || displays[0]
+      ? displays.find(item => String(item.id) === String(selected.display_id))
       : null;
     if (sourceType === 'screen' && !display) return null;
     const monitorPoint = display ? screen.dipToScreenPoint({
@@ -2500,8 +2496,8 @@ async function selectNativeScreenSource(targetContents, capabilities = {}, signa
       };
     }
     const displays = screen.getAllDisplays();
-    const display = displays.find(item => String(item.id) === String(selected.display_id)) ||
-      displays[Number(sourceHandle)] || displays[0];
+    const display = displays.find(item => String(item.id) === String(selected.display_id));
+    if (!display) return null;
     const physicalX = item => Math.round(item.bounds.x * (item.scaleFactor || 1));
     const physicalY = item => Math.round(item.bounds.y * (item.scaleFactor || 1));
     const minX = Math.min(...displays.map(physicalX));
@@ -2526,12 +2522,10 @@ function registerScreenShareHandler() {
   // The desktopCapturer source IDs are not stable: between the moment the
   // picker opened and the moment the renderer accepts the stream, Windows
   // can re-enumerate and the original ID may no longer exist (issue #184).
-  // Re-enumerate, then try ID match, then by name + display_id, then any
-  // screen on the same display, then the first screen — only fail if there
-  // is literally nothing to share.
+  // Re-enumerate, but accept only an exact or unambiguous equivalent source.
   async function resolveSelectedSource(originalSources, requestedId) {
-    const direct = originalSources.find(s => s.id === requestedId);
-    if (direct) return direct;
+    const original = originalSources.find(source => source.id === requestedId);
+    if (!original) return null;
 
     let fresh;
     try {
@@ -2545,27 +2539,7 @@ function registerScreenShareHandler() {
       return null;
     }
 
-    const exact = fresh.find(s => s.id === requestedId);
-    if (exact) return exact;
-
-    // Fall back by stable attributes captured at picker time.
-    const original = originalSources.find(s => s.id === requestedId);
-    if (original) {
-      const sameNameAndDisplay = fresh.find(s =>
-        s.name === original.name &&
-        original.display_id && s.display_id === original.display_id
-      );
-      if (sameNameAndDisplay) return sameNameAndDisplay;
-
-      const sameDisplayScreen = original.display_id
-        ? fresh.find(s => s.display_id === original.display_id && s.id.startsWith('screen:'))
-        : null;
-      if (sameDisplayScreen) return sameDisplayScreen;
-    }
-
-    // Last resort — first screen, so the share starts on *something* rather
-    // than throwing a "Screenshare canceled or not supported" at the user.
-    return fresh.find(s => s.id.startsWith('screen:')) || null;
+    return resolveRefreshedSource(originalSources, fresh, requestedId);
   }
 
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
@@ -2588,6 +2562,7 @@ function registerScreenShareHandler() {
     try {
       // Video sources
       let sources;
+      const wayland = isWaylandSession();
       try {
         sources = await desktopCapturer.getSources({
           types: ['window', 'screen'],
@@ -2595,6 +2570,11 @@ function registerScreenShareHandler() {
           fetchWindowIcons: true,
         });
       } catch (err) {
+        if (wayland) {
+          console.warn(`[ScreenShare] Wayland portal source enumeration failed: ${err.message}`);
+          safeCallback({});
+          return;
+        }
         // Some Windows builds intermittently fail WGC thumbnail startup
         // with E_INVALIDARG. Retry without thumbnails so the picker can open.
         console.warn(`[ScreenShare] getSources(thumbnails) failed: ${err.message}; retrying without thumbnails`);
@@ -2619,15 +2599,16 @@ function registerScreenShareHandler() {
       // the capturing, so it is added by hand from the window's own media
       // source id, with a fresh capture of the page as its preview. It goes
       // into the raw list so the attach-time lookup finds it by id as well.
-      const wayland = isWaylandSession();
       if (wayland && sources.length === 0) {
         console.warn('[ScreenShare] the Wayland portal returned no capture source');
         safeCallback({});
         return;
       }
+      let ownSourceId = null;
       try {
         if (!wayland && mainWindow && !mainWindow.isDestroyed()) {
           const ownId = mainWindow.getMediaSourceId();
+          ownSourceId = ownId || null;
           if (ownId && !sources.some(s => s.id === ownId)) {
             let thumbnail = null;
             try {
@@ -2706,7 +2687,13 @@ function registerScreenShareHandler() {
         normalizeVideoEncoderPreference(result.videoEncoderPreference)
       );
 
-      const selected = await resolveSelectedSource(sources, result.sourceId);
+      // desktopCapturer already received the portal-selected source on
+      // Wayland; re-enumerating here would open the system picker again. The
+      // synthetic Haven source is also safe to use directly because its ID
+      // came from mainWindow rather than renderer-controlled data.
+      const selected = wayland || result.sourceId === ownSourceId
+        ? sources.find(source => source.id === result.sourceId) || null
+        : await resolveSelectedSource(sources, result.sourceId);
       if (targetContents.isDestroyed() || targetContents !== getActiveContents()) {
         console.warn('[ScreenShare] active Haven view changed before capture attachment');
         safeCallback({});
