@@ -20,6 +20,9 @@
 // Windows headers — order matters
 #include <initguid.h>
 #include <windows.h>
+#include <mmreg.h>
+#include <ks.h>
+#include <ksmedia.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <audiopolicy.h>
@@ -35,6 +38,8 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <cmath>
+#include <cstdint>
 #include <algorithm>
 #include <chrono>
 #include <unordered_map>
@@ -43,6 +48,191 @@
 #pragma comment(lib, "mmdevapi.lib")
 #pragma comment(lib, "Avrt.lib")
 #pragma comment(lib, "Psapi.lib")
+
+constexpr uint32_t kOutputSampleRate = 48000;
+
+enum class SampleEncoding {
+    Float32,
+    Pcm16,
+    Pcm24,
+    Pcm32,
+};
+
+struct CaptureFormat {
+    SampleEncoding encoding = SampleEncoding::Float32;
+    uint32_t channels = 0;
+    uint32_t sampleRate = 0;
+    uint16_t bytesPerSample = 0;
+    uint16_t blockAlign = 0;
+};
+
+static_assert(sizeof(float) == 4, "WASAPI float32 requires 32-bit float");
+
+static bool TryParseCaptureFormat(const WAVEFORMATEX* wave, CaptureFormat& result) {
+    if (!wave || wave->nChannels == 0 || wave->nSamplesPerSec == 0) return false;
+    const WORD bits = wave->wBitsPerSample;
+    if (bits == 0 || bits % 8 != 0) return false;
+
+    bool isFloat = false;
+    bool isPcm = false;
+    bool isExtensible = false;
+    WORD validBits = bits;
+    if (wave->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+        isFloat = true;
+    } else if (wave->wFormatTag == WAVE_FORMAT_PCM) {
+        isPcm = true;
+    } else if (wave->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        constexpr WORD kExtensibleExtraSize = 22;
+        if (wave->cbSize < kExtensibleExtraSize) return false;
+        isExtensible = true;
+        const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(wave);
+        validBits = extensible->Samples.wValidBitsPerSample;
+        if (IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
+            isFloat = true;
+        } else if (IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
+            isPcm = true;
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    CaptureFormat parsed;
+    parsed.channels = wave->nChannels;
+    parsed.sampleRate = wave->nSamplesPerSec;
+    parsed.blockAlign = wave->nBlockAlign;
+    if (isFloat) {
+        if (bits != 32 || (isExtensible && validBits != 32)) return false;
+        parsed.encoding = SampleEncoding::Float32;
+        parsed.bytesPerSample = 4;
+    } else if (isPcm) {
+        if (isExtensible && (validBits == 0 || validBits > bits)) return false;
+        if (bits == 16) {
+            parsed.encoding = SampleEncoding::Pcm16;
+            parsed.bytesPerSample = 2;
+        } else if (bits == 24) {
+            parsed.encoding = SampleEncoding::Pcm24;
+            parsed.bytesPerSample = 3;
+        } else if (bits == 32) {
+            parsed.encoding = SampleEncoding::Pcm32;
+            parsed.bytesPerSample = 4;
+        } else {
+            return false;
+        }
+    }
+
+    const uint32_t expectedBlockAlign = parsed.channels * parsed.bytesPerSample;
+    if (expectedBlockAlign == 0 || expectedBlockAlign > UINT16_MAX ||
+        wave->nBlockAlign != expectedBlockAlign) {
+        return false;
+    }
+    result = parsed;
+    return true;
+}
+
+static float ReadCaptureSample(const BYTE* sample, SampleEncoding encoding) {
+    if (encoding == SampleEncoding::Float32) {
+        float value = 0.0f;
+        std::memcpy(&value, sample, sizeof(value));
+        return std::isfinite(value) ? value : 0.0f;
+    }
+    if (encoding == SampleEncoding::Pcm16) {
+        int16_t value = 0;
+        std::memcpy(&value, sample, sizeof(value));
+        return static_cast<float>(value) / 32768.0f;
+    }
+    if (encoding == SampleEncoding::Pcm24) {
+        const uint32_t raw = static_cast<uint32_t>(sample[0]) |
+            (static_cast<uint32_t>(sample[1]) << 8) |
+            (static_cast<uint32_t>(sample[2]) << 16);
+        const int32_t value = (raw & 0x00800000u)
+            ? static_cast<int32_t>(raw) - 0x01000000
+            : static_cast<int32_t>(raw);
+        return static_cast<float>(static_cast<double>(value) / 8388608.0);
+    }
+
+    int32_t value = 0;
+    std::memcpy(&value, sample, sizeof(value));
+    return static_cast<float>(static_cast<double>(value) / 2147483648.0);
+}
+
+static void DecodeToMono(const BYTE* data, UINT32 frames,
+                         const CaptureFormat& format,
+                         std::vector<float>& mono) {
+    mono.resize(frames);
+    for (UINT32 frameIndex = 0; frameIndex < frames; ++frameIndex) {
+        const BYTE* frame = data + static_cast<size_t>(frameIndex) * format.blockAlign;
+        double sum = 0.0;
+        for (uint32_t channel = 0; channel < format.channels; ++channel) {
+            sum += ReadCaptureSample(
+                frame + static_cast<size_t>(channel) * format.bytesPerSample,
+                format.encoding);
+        }
+        mono[frameIndex] = static_cast<float>(sum / format.channels);
+    }
+}
+
+// The preferred format lets the Windows engine perform high-quality SRC. This
+// fallback favors low CPU use when an endpoint only accepts its mix format.
+class StreamingLinearResampler48k {
+public:
+    explicit StreamingLinearResampler48k(uint32_t inputRate)
+        : m_inputRate(inputRate) {}
+
+    void Reset() {
+        m_inputFrames = 0;
+        m_sourceIndex = 0;
+        m_phase = 0;
+        m_previousSample = 0.0f;
+        m_hasPrevious = false;
+    }
+
+    void Process(const std::vector<float>& input, std::vector<float>& output) {
+        output.clear();
+        if (input.empty() || m_inputRate == 0) return;
+
+        const uint64_t chunkStart = m_inputFrames;
+        const uint64_t chunkEnd = chunkStart + input.size() - 1;
+        const auto sampleAt = [&](uint64_t index) {
+            if (index < chunkStart) {
+                return m_hasPrevious ? m_previousSample : input.front();
+            }
+            return input[static_cast<size_t>(index - chunkStart)];
+        };
+
+        while (true) {
+            const uint64_t rightIndex = m_sourceIndex + (m_phase == 0 ? 0u : 1u);
+            if (rightIndex > chunkEnd) break;
+
+            const float left = sampleAt(m_sourceIndex);
+            float value = left;
+            if (m_phase != 0) {
+                const float right = sampleAt(m_sourceIndex + 1);
+                const float fraction = static_cast<float>(m_phase) /
+                    static_cast<float>(kOutputSampleRate);
+                value = left + (right - left) * fraction;
+            }
+            output.push_back(value);
+
+            const uint64_t advancedPhase = m_phase + m_inputRate;
+            m_sourceIndex += advancedPhase / kOutputSampleRate;
+            m_phase = advancedPhase % kOutputSampleRate;
+        }
+
+        m_previousSample = input.back();
+        m_hasPrevious = true;
+        m_inputFrames += input.size();
+    }
+
+private:
+    uint32_t m_inputRate;
+    uint64_t m_inputFrames = 0;
+    uint64_t m_sourceIndex = 0;
+    uint64_t m_phase = 0;
+    float m_previousSample = 0.0f;
+    bool m_hasPrevious = false;
+};
 
 // ── Helper: wide → UTF-8 ──────────────────────────────────
 static std::string WideToUtf8(const wchar_t* wide) {
@@ -108,6 +298,7 @@ public:
         CoCreateFreeThreadedMarshaler(static_cast<IUnknown*>(static_cast<IActivateAudioInterfaceCompletionHandler*>(this)), &m_ftm);
     }
     ~ActivateHandler() {
+        if (m_client) m_client->Release();
         if (m_ftm) m_ftm->Release();
         CloseHandle(m_event);
     }
@@ -154,11 +345,17 @@ public:
     }
 
     HRESULT Wait(DWORD ms = 5000) {
-        WaitForSingleObject(m_event, ms);
+        const DWORD waitResult = WaitForSingleObject(m_event, ms);
+        if (waitResult == WAIT_TIMEOUT) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        if (waitResult != WAIT_OBJECT_0) return HRESULT_FROM_WIN32(GetLastError());
         return m_hr;
     }
 
-    IAudioClient* GetClient() { return m_client; }
+    IAudioClient* TakeClient() {
+        IAudioClient* client = m_client;
+        m_client = nullptr;
+        return client;
+    }
 
 private:
     ULONG         m_refCount;
@@ -167,6 +364,43 @@ private:
     IUnknown*     m_ftm;
     HANDLE        m_event;
 };
+
+static HRESULT ActivateProcessLoopbackClient(PROPVARIANT* activationParams,
+                                              IAudioClient** result) {
+    if (!activationParams || !result) return E_POINTER;
+    *result = nullptr;
+
+    auto* handler = new ActivateHandler();
+    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
+    HRESULT hr = ActivateAudioInterfaceAsync(
+        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+        __uuidof(IAudioClient),
+        activationParams,
+        handler,
+        &asyncOp);
+    if (SUCCEEDED(hr)) hr = handler->Wait(5000);
+    if (SUCCEEDED(hr)) {
+        *result = handler->TakeClient();
+        if (!*result) hr = E_FAIL;
+    }
+    if (asyncOp) asyncOp->Release();
+    handler->Release();
+    return hr;
+}
+
+static void ConfigureAudioClient(IAudioClient* client) {
+    IAudioClient2* client2 = nullptr;
+    if (client && SUCCEEDED(client->QueryInterface(
+            __uuidof(IAudioClient2), reinterpret_cast<void**>(&client2)))) {
+        AudioClientProperties props = {};
+        props.cbSize = sizeof(AudioClientProperties);
+        props.bIsOffload = FALSE;
+        props.eCategory = AudioCategory_Other;
+        props.Options = AUDCLNT_STREAMOPTIONS_NONE;
+        client2->SetClientProperties(&props);
+        client2->Release();
+    }
+}
 
 namespace haven {
 
@@ -373,12 +607,18 @@ bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
     });
 
     if (!signaled || m_startState == StartupState::Failed) {
-        if (!signaled) {
-            emitStatus(CaptureStatusKind::Failed,
-                "WASAPI activation timed out (>12s)", 0);
+        const bool timedOut = !signaled;
+        const HRESULT timeoutHr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        if (timedOut) {
+            m_startState = StartupState::Failed;
+            m_startHr = timeoutHr;
         }
         m_running = false;
         startLock.unlock();
+        if (timedOut) {
+            emitStatus(CaptureStatusKind::Failed,
+                "WASAPI activation timed out (>12s)", timeoutHr);
+        }
         if (m_thread.joinable()) m_thread.join();
         return false;
     }
@@ -417,14 +657,18 @@ void WasapiCapture::Cleanup() { StopCapture(); }
 // just the read loop runs here.
 void WasapiCapture::captureLoop() {
     auto failStart = [this](HRESULT hr, const std::string& msg) {
-        emitStatus(CaptureStatusKind::Failed, msg, hr);
+        bool shouldEmit = false;
         {
             std::lock_guard<std::mutex> startLock(m_startMutex);
-            m_startState = StartupState::Failed;
-            m_startHr = hr;
+            if (m_startState == StartupState::Starting) {
+                m_startState = StartupState::Failed;
+                m_startHr = hr;
+                m_running = false;
+                shouldEmit = true;
+            }
         }
         m_startCv.notify_all();
-        m_running = false;
+        if (shouldEmit) emitStatus(CaptureStatusKind::Failed, msg, hr);
     };
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -444,29 +688,8 @@ void WasapiCapture::captureLoop() {
     pv.blob.pBlobData = reinterpret_cast<BYTE*>(&acParams);
 
     // ── Activate the audio interface ───────────────────────
-    auto handler = new ActivateHandler();
-    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-
-    HRESULT hr = ActivateAudioInterfaceAsync(
-        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-        __uuidof(IAudioClient),
-        &pv,
-        handler,
-        &asyncOp
-    );
-
-    if (FAILED(hr)) {
-        failStart(hr,
-            "ActivateAudioInterfaceAsync returned failure (process loopback API may be unavailable)");
-        handler->Release();
-        CoUninitialize();
-        return;
-    }
-
-    hr = handler->Wait(8000);
-    IAudioClient* client = handler->GetClient();
-    if (asyncOp) asyncOp->Release();
-    handler->Release();
+    IAudioClient* client = nullptr;
+    HRESULT hr = ActivateProcessLoopbackClient(&pv, &client);
 
     if (FAILED(hr) || !client) {
         failStart(FAILED(hr) ? hr : E_FAIL,
@@ -478,31 +701,23 @@ void WasapiCapture::captureLoop() {
     }
 
     // ── Opt out of Windows communications ducking ──────────
-    {
-        IAudioClient2* client2 = nullptr;
-        if (SUCCEEDED(client->QueryInterface(__uuidof(IAudioClient2), (void**)&client2))) {
-            AudioClientProperties props = {};
-            props.cbSize    = sizeof(AudioClientProperties);
-            props.bIsOffload = FALSE;
-            props.eCategory = AudioCategory_Other;
-            props.Options   = AUDCLNT_STREAMOPTIONS_NONE;
-            client2->SetClientProperties(&props);
-            client2->Release();
-        }
-    }
+    ConfigureAudioClient(client);
 
     // ── Configure format: 48 kHz, float32, stereo ─────────
     WAVEFORMATEX fmt = {};
     fmt.wFormatTag      = WAVE_FORMAT_IEEE_FLOAT;
     fmt.nChannels       = 2;
-    fmt.nSamplesPerSec  = 48000;
+    fmt.nSamplesPerSec  = kOutputSampleRate;
     fmt.wBitsPerSample  = 32;
     fmt.nBlockAlign     = fmt.nChannels * (fmt.wBitsPerSample / 8);
     fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
 
-    int captureChannels    = 2;
-    bool captureIsFloat    = true;
-    int  captureBitsPerSample = 32;
+    CaptureFormat captureFormat;
+    captureFormat.encoding = SampleEncoding::Float32;
+    captureFormat.channels = 2;
+    captureFormat.sampleRate = kOutputSampleRate;
+    captureFormat.bytesPerSample = 4;
+    captureFormat.blockAlign = 8;
 
     hr = client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
@@ -512,36 +727,55 @@ void WasapiCapture::captureLoop() {
     );
 
     if (FAILED(hr)) {
-        // Fallback to mix format
+        // The exact mix format is guaranteed to be accepted in shared mode.
         WAVEFORMATEX* mixFmt = nullptr;
-        client->GetMixFormat(&mixFmt);
-        if (mixFmt) {
-            captureChannels       = mixFmt->nChannels;
-            captureBitsPerSample  = mixFmt->wBitsPerSample;
-            captureIsFloat        = (mixFmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
-                                    (mixFmt->wFormatTag == 0xFFFE
-                                     && mixFmt->wBitsPerSample == 32);
-            HRESULT hr2 = client->Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                0, 0, mixFmt, nullptr
-            );
-            CoTaskMemFree(mixFmt);
-            if (FAILED(hr2)) {
-                failStart(hr2,
-                    "IAudioClient::Initialize failed for both preferred and mix formats");
-                client->Release();
-                CoUninitialize();
-                return;
-            }
-        } else {
-            failStart(hr,
-                "Initialize failed and GetMixFormat returned no format");
+        const HRESULT mixHr = client->GetMixFormat(&mixFmt);
+        if (FAILED(mixHr) || !mixFmt) {
+            if (mixFmt) CoTaskMemFree(mixFmt);
+            failStart(FAILED(mixHr) ? mixHr : E_UNEXPECTED,
+                "Initialize failed and GetMixFormat failed");
             client->Release();
             CoUninitialize();
             return;
         }
+
+        CaptureFormat fallbackFormat;
+        if (!TryParseCaptureFormat(mixFmt, fallbackFormat)) {
+            CoTaskMemFree(mixFmt);
+            failStart(AUDCLNT_E_UNSUPPORTED_FORMAT,
+                "GetMixFormat returned an unsupported or malformed PCM/IEEE-float format");
+            client->Release();
+            CoUninitialize();
+            return;
+        }
+
+        client->Release();
+        client = nullptr;
+        hr = ActivateProcessLoopbackClient(&pv, &client);
+        if (FAILED(hr) || !client) {
+            CoTaskMemFree(mixFmt);
+            failStart(FAILED(hr) ? hr : E_FAIL,
+                "Process loopback reactivation failed for the mix-format fallback");
+            CoUninitialize();
+            return;
+        }
+        ConfigureAudioClient(client);
+
+        hr = client->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            0, 0, mixFmt, nullptr
+        );
+        CoTaskMemFree(mixFmt);
+        if (FAILED(hr)) {
+            failStart(hr,
+                "IAudioClient::Initialize failed for both preferred and mix formats");
+            client->Release();
+            CoUninitialize();
+            return;
+        }
+        captureFormat = fallbackFormat;
     }
 
     // ── Get capture client and start ──────────────────────
@@ -564,20 +798,35 @@ void WasapiCapture::captureLoop() {
         return;
     }
 
+    bool startupAccepted = false;
     {
         std::lock_guard<std::mutex> startLock(m_startMutex);
-        m_startState = StartupState::Running;
-        m_startHr = S_OK;
+        if (m_running && m_startState == StartupState::Starting) {
+            m_startState = StartupState::Running;
+            m_startHr = S_OK;
+            startupAccepted = true;
+        }
+    }
+    if (!startupAccepted) {
+        client->Stop();
+        capture->Release();
+        client->Release();
+        CoUninitialize();
+        return;
     }
     m_startCv.notify_all();
 
     // Init succeeded — let StartCapture return true.
     {
-        char dbg[256];
+        char dbg[320];
         _snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
-            "[Haven WASAPI] activation succeeded: mode=%s pid=%u channels=%d bits=%d isFloat=%d\n",
+            "[Haven WASAPI] activation succeeded: mode=%s pid=%u rate=%u channels=%u bits=%u encoding=%s\n",
             (m_mode == CaptureMode::ExcludeProcess) ? "EXCLUDE" : "INCLUDE",
-            m_targetPid, captureChannels, captureBitsPerSample, captureIsFloat ? 1 : 0);
+            m_targetPid,
+            captureFormat.sampleRate,
+            captureFormat.channels,
+            captureFormat.bytesPerSample * 8u,
+            captureFormat.encoding == SampleEncoding::Float32 ? "float32" : "pcm");
         OutputDebugStringA(dbg);
     }
     emitStatus(CaptureStatusKind::Started, "WASAPI process loopback active");
@@ -595,6 +844,9 @@ void WasapiCapture::captureLoop() {
     // ── Read loop ─────────────────────────────────────────
     std::vector<float> monoBuffer;
     monoBuffer.reserve(4800);
+    std::vector<float> resampledBuffer;
+    resampledBuffer.reserve(5200);
+    StreamingLinearResampler48k resampler(captureFormat.sampleRate);
 
     DWORD lastPacketTickMs = GetTickCount();
     int   consecutiveErrors = 0;
@@ -632,41 +884,30 @@ void WasapiCapture::captureLoop() {
             }
 
             if (frames > 0) {
-                const float* fdata = reinterpret_cast<const float*>(data);
                 monoBuffer.clear();
 
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) || !data) {
-                    monoBuffer.resize(frames, 0.0f);
-                } else if (captureIsFloat && captureBitsPerSample == 32) {
-                    for (UINT32 f = 0; f < frames; f++) {
-                        float sum = 0.0f;
-                        for (int ch = 0; ch < captureChannels; ch++) {
-                            sum += fdata[f * captureChannels + ch];
-                        }
-                        monoBuffer.push_back(sum / (float)captureChannels);
-                    }
-                } else if (!captureIsFloat && captureBitsPerSample == 16) {
-                    const int16_t* idata = reinterpret_cast<const int16_t*>(data);
-                    for (UINT32 f = 0; f < frames; f++) {
-                        float sum = 0.0f;
-                        for (int ch = 0; ch < captureChannels; ch++) {
-                            sum += idata[f * captureChannels + ch] / 32768.0f;
-                        }
-                        monoBuffer.push_back(sum / (float)captureChannels);
-                    }
+                    monoBuffer.assign(frames, 0.0f);
                 } else {
-                    for (UINT32 f = 0; f < frames; f++) {
-                        float left  = fdata[f * 2];
-                        float right = fdata[f * 2 + 1];
-                        monoBuffer.push_back((left + right) * 0.5f);
-                    }
+                    DecodeToMono(data, frames, captureFormat, monoBuffer);
                 }
 
-                std::lock_guard<std::mutex> lock(m_mutex);
-                if (m_callback) {
-                    m_callback(monoBuffer.data(), monoBuffer.size());
-                    gotPacket = true;
-                    lastPacketTickMs = GetTickCount();
+                const std::vector<float>* outputBuffer = &monoBuffer;
+                if (captureFormat.sampleRate != kOutputSampleRate) {
+                    if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
+                        resampler.Reset();
+                    }
+                    resampler.Process(monoBuffer, resampledBuffer);
+                    outputBuffer = &resampledBuffer;
+                }
+
+                if (!outputBuffer->empty()) {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_callback) {
+                        m_callback(outputBuffer->data(), outputBuffer->size());
+                        gotPacket = true;
+                        lastPacketTickMs = GetTickCount();
+                    }
                 }
             }
 
