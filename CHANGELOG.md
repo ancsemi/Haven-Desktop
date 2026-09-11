@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.4.32
 
 ### Added
 - **Check for Updates in the Help menu and on the tray icon.** The app only ever checked quietly at start-up, so there was no way to ask. The new entry checks on demand and says when you are already on the latest version. (Haven #5627)
