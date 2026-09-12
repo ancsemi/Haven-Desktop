@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.33
+
+### Fixed
+- **Hold-mode push to talk while the Haven window itself is focused.** Several people on Windows saw hold mode go quiet whenever the app had focus and work again the moment it was minimised or behind a game. When the window is focused the page receives the key events itself, so the binding is followed there too, alongside the input hook. Each path only flips the mic when the state has to change, so the two never fight. Please try it and say whether it holds up. (Haven #5603, #38)
+
+---
+
 ## v1.4.32
 
 ### Added

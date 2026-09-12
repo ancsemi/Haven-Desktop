@@ -701,6 +701,81 @@ function _pttSetTalking(shouldTalk) {
 ipcRenderer.on('voice:ptt-down', () => _pttSetTalking(true));
 ipcRenderer.on('voice:ptt-up',   () => _pttSetTalking(false));
 
+// ─── Hold-mode PTT while the Haven window itself is focused ──────────
+// The native input hook in main drives PTT, but on Windows several people
+// see hold mode go quiet while the Haven window is the focused one and work
+// again the moment it is minimised or behind a game (Haven #5603, #38). When
+// the page is focused it gets the key events itself, so the same binding is
+// followed here as well. _pttSetTalking only clicks when the state has to
+// flip, so whichever path fires second is a no-op, and the two never fight.
+// Toggle mode is left to main alone: a second toggle would cancel the first.
+const _PTT_DOM_KEYS = {
+  Space: ' ', Up: 'ArrowUp', Down: 'ArrowDown', Left: 'ArrowLeft', Right: 'ArrowRight',
+  Return: 'Enter', Escape: 'Escape', Tab: 'Tab', Backspace: 'Backspace', Delete: 'Delete',
+  Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+};
+const _PTT_LONE_MODS = {
+  CommandOrControl: ['control', 'meta'], Control: ['control'], Ctrl: ['control'],
+  Meta: ['meta'], Cmd: ['meta'], Super: ['meta'], Alt: ['alt'], Shift: ['shift'],
+};
+let _pttDomBinding = null;
+let _pttDomDown = false;
+function _parsePttAccel(accel) {
+  const mouse = /^Mouse(\d+)$/i.exec(accel || '');
+  if (mouse) return { mouseButton: parseInt(mouse[1], 10) - 1 };
+  const parts = String(accel || '').split('+').map(p => p.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const key = parts.pop();
+  const mods = { ctrl: false, alt: false, shift: false };
+  for (const p of parts) {
+    if (['CommandOrControl', 'CmdOrCtrl', 'Control', 'Ctrl', 'Meta', 'Cmd', 'Command', 'Super'].includes(p)) mods.ctrl = true;
+    else if (p === 'Alt' || p === 'Option') mods.alt = true;
+    else if (p === 'Shift') mods.shift = true;
+    else return null;
+  }
+  const lone = _PTT_LONE_MODS[key];
+  const keys = lone || [String(_PTT_DOM_KEYS[key] || key).toLowerCase()];
+  return { mods, keys, lone: !!lone };
+}
+function _pttDomKeyMatches(e, b, isDown) {
+  if (!b || b.mouseButton != null) return false;
+  if (!b.keys.includes(String(e.key || '').toLowerCase())) return false;
+  // The modifiers only have to be down on the press; by the release they
+  // may already be up, and the release still has to count.
+  if (!isDown || b.lone) return true;
+  return (!b.mods.ctrl || e.ctrlKey || e.metaKey) && (!b.mods.alt || e.altKey) && (!b.mods.shift || e.shiftKey);
+}
+function _refreshPttDomBinding() {
+  return ipcRenderer.invoke('shortcuts:get').then((cfg) => {
+    const hold = !cfg || cfg.pttMode !== 'toggle';
+    _pttDomBinding = (hold && cfg && cfg.ptt) ? _parsePttAccel(cfg.ptt) : null;
+    if (!_pttDomBinding && _pttDomDown) { _pttDomDown = false; _pttSetTalking(false); }
+  }).catch(() => { _pttDomBinding = null; });
+}
+window.addEventListener('keydown', (e) => {
+  if (e.repeat || _pttDomDown || !_pttDomKeyMatches(e, _pttDomBinding, true)) return;
+  _pttDomDown = true;
+  _pttSetTalking(true);
+}, true);
+window.addEventListener('keyup', (e) => {
+  if (!_pttDomDown || !_pttDomKeyMatches(e, _pttDomBinding, false)) return;
+  _pttDomDown = false;
+  _pttSetTalking(false);
+}, true);
+window.addEventListener('mousedown', (e) => {
+  const b = _pttDomBinding;
+  if (!b || b.mouseButton == null || e.button !== b.mouseButton || _pttDomDown) return;
+  _pttDomDown = true;
+  _pttSetTalking(true);
+}, true);
+window.addEventListener('mouseup', (e) => {
+  const b = _pttDomBinding;
+  if (!b || b.mouseButton == null || e.button !== b.mouseButton || !_pttDomDown) return;
+  _pttDomDown = false;
+  _pttSetTalking(false);
+}, true);
+window.addEventListener('DOMContentLoaded', () => { _refreshPttDomBinding(); });
+
 // ─── Server badge state updates from main process ────────
 ipcRenderer.on('server-badge-update', (_event, badgeMap) => {
   window.dispatchEvent(new CustomEvent('haven-server-badges', { detail: badgeMap }));
@@ -1451,7 +1526,9 @@ window.havenDesktop = {
   /** Desktop shortcut configuration */
   shortcuts: {
     getConfig: ()         => ipcRenderer.invoke('shortcuts:get'),
-    setConfig: (updates)  => ipcRenderer.invoke('shortcuts:register', updates),
+    // The in-page hold-mode PTT follows the same binding (Haven #5603).
+    setConfig: (updates)  => ipcRenderer.invoke('shortcuts:register', updates)
+      .then((res) => { _refreshPttDomBinding(); return res; }),
   },
 
   /** Signal the taskbar/dock badge (no native notification needed) */
