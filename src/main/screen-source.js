@@ -42,4 +42,20 @@ function resolveRefreshedSource(originalSources, freshSources, requestedId) {
   return null;
 }
 
-module.exports = { resolveRefreshedSource };
+function getPhysicalDisplayBounds(display, dipToScreenPoint) {
+  const scaleFactor = display.scaleFactor || 1;
+  const width = Math.round(display.bounds.width * scaleFactor);
+  const height = Math.round(display.bounds.height * scaleFactor);
+  const center = dipToScreenPoint({
+    x: Math.round(display.bounds.x + display.bounds.width / 2),
+    y: Math.round(display.bounds.y + display.bounds.height / 2),
+  });
+  return {
+    x: Math.round(center.x - width / 2),
+    y: Math.round(center.y - height / 2),
+    width,
+    height,
+  };
+}
+
+module.exports = { getPhysicalDisplayBounds, resolveRefreshedSource };

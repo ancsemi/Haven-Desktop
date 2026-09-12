@@ -23,7 +23,7 @@ const {
   resolveAudioSelection,
 } = require('./screen-share-audio');
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
-const { resolveRefreshedSource } = require('./screen-source');
+const { getPhysicalDisplayBounds, resolveRefreshedSource } = require('./screen-source');
 const { NativeScreenManager, isWaylandSession } = require('./native-screen');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
@@ -2498,17 +2498,20 @@ async function selectNativeScreenSource(targetContents, capabilities = {}, signa
     const displays = screen.getAllDisplays();
     const display = displays.find(item => String(item.id) === String(selected.display_id));
     if (!display) return null;
-    const physicalX = item => Math.round(item.bounds.x * (item.scaleFactor || 1));
-    const physicalY = item => Math.round(item.bounds.y * (item.scaleFactor || 1));
-    const minX = Math.min(...displays.map(physicalX));
-    const minY = Math.min(...displays.map(physicalY));
+    const physicalDisplays = displays.map(item => ({
+      id: item.id,
+      bounds: getPhysicalDisplayBounds(item, point => screen.dipToScreenPoint(point)),
+    }));
+    const physicalDisplay = physicalDisplays.find(item => String(item.id) === String(display.id));
+    const minX = Math.min(...physicalDisplays.map(item => item.bounds.x));
+    const minY = Math.min(...physicalDisplays.map(item => item.bounds.y));
     return {
       kind: 'linux-x11-screen',
       handle: sourceHandle,
-      x: display ? physicalX(display) - minX : 0,
-      y: display ? physicalY(display) - minY : 0,
-      width: display ? Math.round(display.bounds.width * (display.scaleFactor || 1)) : 0,
-      height: display ? Math.round(display.bounds.height * (display.scaleFactor || 1)) : 0,
+      x: physicalDisplay.bounds.x - minX,
+      y: physicalDisplay.bounds.y - minY,
+      width: physicalDisplay.bounds.width,
+      height: physicalDisplay.bounds.height,
       audio,
       codecPreference,
     };

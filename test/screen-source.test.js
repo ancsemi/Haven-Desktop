@@ -2,7 +2,30 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resolveRefreshedSource } = require('../src/main/screen-source');
+const { getPhysicalDisplayBounds, resolveRefreshedSource } = require('../src/main/screen-source');
+
+test('converts mixed-DPI display origins through physical screen coordinates', () => {
+  const displays = [
+    { id: 1, bounds: { x: 0, y: 0, width: 1536, height: 864 }, scaleFactor: 1.25 },
+    { id: 2, bounds: { x: 1536, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 },
+  ];
+  const dipToScreenPoint = point => point.x < 1536
+    ? { x: Math.round(point.x * 1.25), y: Math.round(point.y * 1.25) }
+    : { x: 1920 + point.x - 1536, y: point.y };
+
+  assert.deepEqual(getPhysicalDisplayBounds(displays[0], dipToScreenPoint), {
+    x: 0,
+    y: 0,
+    width: 1920,
+    height: 1080,
+  });
+  assert.deepEqual(getPhysicalDisplayBounds(displays[1], dipToScreenPoint), {
+    x: 1920,
+    y: 0,
+    width: 1920,
+    height: 1080,
+  });
+});
 
 test('rejects a source that was not offered by the picker', () => {
   const original = [{ id: 'window:1:0', name: 'Editor', display_id: '' }];
