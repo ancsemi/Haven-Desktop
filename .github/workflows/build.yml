@@ -48,7 +48,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & Publish Windows installer
-        run: npx electron-builder --win --publish ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}
+        run: npx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -88,7 +88,7 @@ jobs:
         run: xvfb-run -a npm run smoke:electron -- --no-sandbox
 
       - name: Build & Publish Linux packages
-        run: npx electron-builder --linux --publish ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}
+        run: npx electron-builder --linux --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
