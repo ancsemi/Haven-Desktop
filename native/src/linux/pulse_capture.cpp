@@ -49,27 +49,54 @@ static std::string procName(uint32_t pid) {
     return "Unknown";
 }
 
-static uint32_t procParentPid(uint32_t pid) {
+static bool procParentPid(uint32_t pid, uint32_t* parent) {
     std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
     std::string line;
-    if (!f.is_open() || !std::getline(f, line)) return 0;
+    if (!f.is_open() || !std::getline(f, line)) return false;
 
     // The command is parenthesized and may contain spaces. Fields after the
     // final ')' start with state, then parent PID.
     const size_t commandEnd = line.rfind(')');
-    if (commandEnd == std::string::npos || commandEnd + 2 >= line.size()) return 0;
+    if (commandEnd == std::string::npos || commandEnd + 2 >= line.size()) return false;
     std::istringstream fields(line.substr(commandEnd + 2));
     char state = 0;
-    uint32_t parent = 0;
-    fields >> state >> parent;
-    return parent;
+    return static_cast<bool>(fields >> state >> *parent);
 }
 
-static bool isProcessInTree(uint32_t pid, uint32_t rootPid) {
+static std::string procExecutable(uint32_t pid) {
+    const std::string procPath = "/proc/" + std::to_string(pid) + "/exe";
+    std::vector<char> path(4096);
+    const ssize_t size = readlink(procPath.c_str(), path.data(), path.size() - 1);
+    if (size <= 0) return {};
+    path[static_cast<size_t>(size)] = '\0';
+    return path.data();
+}
+
+static bool isExternalProcess(uint32_t pid, uint32_t rootPid) {
+    const std::string executable = procExecutable(pid);
+    const std::string rootExecutable = procExecutable(rootPid);
+    if (executable.empty() || rootExecutable.empty() || executable == rootExecutable) return false;
+
+    for (int depth = 0; pid != 0 && depth < 64; depth++) {
+        if (pid == rootPid) return false;
+        uint32_t parent = 0;
+        if (!procParentPid(pid, &parent) || parent == pid) return false;
+        if (parent == 0) return true;
+        pid = parent;
+    }
+    return false;
+}
+
+static bool isOwnProcess(uint32_t pid, uint32_t rootPid) {
+    const std::string executable = procExecutable(pid);
+    const std::string rootExecutable = procExecutable(rootPid);
+    if (!executable.empty() && !rootExecutable.empty() && executable == rootExecutable)
+        return true;
+
     for (int depth = 0; pid != 0 && depth < 64; depth++) {
         if (pid == rootPid) return true;
-        const uint32_t parent = procParentPid(pid);
-        if (parent == pid) break;
+        uint32_t parent = 0;
+        if (!procParentPid(pid, &parent) || parent == pid) return false;
         pid = parent;
     }
     return false;
@@ -306,7 +333,7 @@ std::vector<AudioApp> PulseCapture::GetAudioApplications() {
     const uint32_t ourPid = static_cast<uint32_t>(getpid());
     for (auto& si : ed.inputs) {
         if (si.pid == 0) continue;
-        if (isProcessInTree(si.pid, ourPid)) continue;
+        if (isOwnProcess(si.pid, ourPid)) continue;
         if (std::find(seen.begin(), seen.end(), si.pid) != seen.end()) continue;
         seen.push_back(si.pid);
 
@@ -460,7 +487,7 @@ void PulseCapture::captureLoop() {
             for (const auto& input : inputs.inputs) {
                 if (input.ownerModule != PA_INVALID_INDEX || input.pid == 0 ||
                     input.sinkIndex != outputIndex) continue;
-                if (isProcessInTree(input.pid, m_targetPid)) continue;
+                if (!isExternalProcess(input.pid, m_targetPid)) continue;
                 const bool alreadyMoved = std::any_of(
                     movedInputs.begin(), movedInputs.end(),
                     [&](const auto& moved) { return moved.first == input.index; });

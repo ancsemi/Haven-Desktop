@@ -4,6 +4,7 @@ const { EventEmitter } = require('node:events');
 const {
   PipeWireStreamRouter,
   createJsonArrayParser,
+  isExternalProcess,
 } = require('../src/main/pipewire-stream-router');
 
 function createMonitor() {
@@ -40,6 +41,7 @@ function graph({ previousTarget = null } = {}) {
         'application.name': 'Stremio',
         'application.process.id': 2,
         'pipewire.access': 'flatpak',
+        'pipewire.sec.pid': 500,
       } },
     },
     {
@@ -121,6 +123,39 @@ test('stops the PipeWire monitor when its stdout pipe fails', () => {
   assert.match(warnings[0], /read EIO/);
 });
 
+test('classifies only fully inspectable unrelated processes as external', () => {
+  const stats = new Map([
+    ['/proc/101/stat', '101 (Haven audio) S 1 0 0 0'],
+    ['/proc/102/stat', '102 (Haven child) S 100 0 0 0'],
+    ['/proc/200/stat', '200 (Music) S 1 0 0 0'],
+    ['/proc/201/stat', '201 (Unknown executable) S 1 0 0 0'],
+    ['/proc/400/stat', 'malformed'],
+    ['/proc/1/stat', '1 (init) S 0 0 0 0'],
+  ]);
+  const readFileSync = path => {
+    if (!stats.has(path)) throw new Error('missing process');
+    return stats.get(path);
+  };
+  const executables = new Map([
+    ['/proc/100/exe', '/opt/Haven/haven-desktop'],
+    ['/proc/101/exe', '/opt/Haven/haven-desktop'],
+    ['/proc/102/exe', '/usr/bin/utility'],
+    ['/proc/200/exe', '/usr/bin/music'],
+    ['/proc/400/exe', '/usr/bin/broken'],
+  ]);
+  const readlinkSync = path => {
+    if (!executables.has(path)) throw new Error('missing executable');
+    return executables.get(path);
+  };
+
+  assert.equal(isExternalProcess(101, 100, readFileSync, readlinkSync), false);
+  assert.equal(isExternalProcess(102, 100, readFileSync, readlinkSync), false);
+  assert.equal(isExternalProcess(200, 100, readFileSync, readlinkSync), true);
+  assert.equal(isExternalProcess(201, 100, readFileSync, readlinkSync), false);
+  assert.equal(isExternalProcess(300, 100, readFileSync, readlinkSync), false);
+  assert.equal(isExternalProcess(400, 100, readFileSync, readlinkSync), false);
+});
+
 test('routes native Flatpak audio but leaves pipewire-pulse streams alone', () => {
   const monitor = createMonitor();
   const commands = [];
@@ -130,7 +165,7 @@ test('routes native Flatpak audio but leaves pipewire-pulse streams alone', () =
       commands.push([command, args]);
       return { status: 0 };
     },
-    processInTree: () => false,
+    processExternal: () => true,
     logger: { warn() {} },
   });
 
@@ -162,7 +197,7 @@ test('restores a native stream previous PipeWire target', () => {
       commands.push(args);
       return { status: 0 };
     },
-    processInTree: () => false,
+    processExternal: () => true,
     logger: { warn() {} },
   });
 
@@ -176,7 +211,7 @@ test('restores a native stream previous PipeWire target', () => {
   ]);
 });
 
-test('does not route native streams owned by the Haven process tree', () => {
+test('does not route native streams that are not proven external', () => {
   const monitor = createMonitor();
   const commands = [];
   const objects = graph();
@@ -188,7 +223,7 @@ test('does not route native streams owned by the Haven process tree', () => {
       commands.push(args);
       return { status: 0 };
     },
-    processInTree: pid => pid === 101,
+    processExternal: () => false,
     logger: { warn() {} },
   });
 
@@ -210,7 +245,7 @@ test('uses the host security PID to identify an owned Flatpak stream', () => {
       commands.push(args);
       return { status: 0 };
     },
-    processInTree: pid => pid === 500,
+    processExternal: () => false,
     logger: { warn() {} },
   });
 
@@ -232,7 +267,7 @@ test('ignores a Flatpak namespace PID collision when the host PID is external', 
       commands.push(args);
       return { status: 0 };
     },
-    processInTree: pid => pid === 100,
+    processExternal: pid => pid === 500,
     logger: { warn() {} },
   });
 
@@ -244,6 +279,28 @@ test('ignores a Flatpak namespace PID collision when the host PID is external', 
   assert.equal(commands[0][4], '1000');
 });
 
+test('waits for a Flatpak host PID instead of routing by application name', () => {
+  const monitor = createMonitor();
+  const commands = [];
+  const objects = graph();
+  delete objects[2].info.props['pipewire.sec.pid'];
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitor,
+    runCommand: (_command, args) => {
+      commands.push(args);
+      return { status: 0 };
+    },
+    processExternal: () => true,
+    logger: { warn() {} },
+  });
+
+  router.start('HavenCombined_100', 100);
+  monitor.stdout.emit('data', JSON.stringify(objects));
+  router.stop();
+
+  assert.deepEqual(commands, []);
+});
+
 test('retries and reports a failed route restoration', () => {
   const monitor = createMonitor();
   const warnings = [];
@@ -251,7 +308,7 @@ test('retries and reports a failed route restoration', () => {
   const router = new PipeWireStreamRouter({
     spawnProcess: () => monitor,
     runCommand: () => ({ status: calls++ === 0 ? 0 : 1 }),
-    processInTree: () => false,
+    processExternal: () => true,
     logger: { warn(message) { warnings.push(message); } },
   });
 

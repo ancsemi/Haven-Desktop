@@ -53,12 +53,12 @@ function processParentPid(pid, readFileSync = fs.readFileSync) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     const commandEnd = stat.lastIndexOf(')');
-    if (commandEnd < 0) return 0;
+    if (commandEnd < 0) return null;
     const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
     const parent = Number(fields[1]);
-    return Number.isSafeInteger(parent) && parent > 0 ? parent : 0;
+    return Number.isSafeInteger(parent) && parent >= 0 ? parent : null;
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -75,6 +75,37 @@ function isProcessInTree(pid, rootPid, readFileSync = fs.readFileSync) {
   return false;
 }
 
+function processExecutable(pid, readlinkSync = fs.readlinkSync) {
+  try {
+    return readlinkSync(`/proc/${pid}/exe`);
+  } catch {
+    return '';
+  }
+}
+
+function isExternalProcess(
+  pid,
+  rootPid,
+  readFileSync = fs.readFileSync,
+  readlinkSync = fs.readlinkSync
+) {
+  if (!Number.isSafeInteger(pid) || pid <= 0 ||
+      !Number.isSafeInteger(rootPid) || rootPid <= 0) return false;
+
+  const executable = processExecutable(pid, readlinkSync);
+  const rootExecutable = processExecutable(rootPid, readlinkSync);
+  if (!executable || !rootExecutable || executable === rootExecutable) return false;
+
+  for (let depth = 0; pid > 0 && depth < 64; depth++) {
+    if (pid === rootPid) return false;
+    const parent = processParentPid(pid, readFileSync);
+    if (parent === null || parent === pid) return false;
+    if (parent === 0) return true;
+    pid = parent;
+  }
+  return false;
+}
+
 function metadataValue(value, type) {
   if (typeof value === 'string') return value;
   if (type === 'Spa:String:JSON') return JSON.stringify(value);
@@ -85,12 +116,12 @@ class PipeWireStreamRouter {
   constructor({
     spawnProcess = spawn,
     runCommand = spawnSync,
-    processInTree = isProcessInTree,
+    processExternal = isExternalProcess,
     logger = console,
   } = {}) {
     this._spawnProcess = spawnProcess;
     this._runCommand = runCommand;
-    this._processInTree = processInTree;
+    this._processExternal = processExternal;
     this._logger = logger;
     this._monitor = null;
     this._objects = new Map();
@@ -255,8 +286,7 @@ class PipeWireStreamRouter {
       const clientId = Number(node.props['client.id']);
       const client = this._objects.get(clientId);
       const props = { ...(client?.props || {}), ...node.props };
-      if (props['client.api'] === 'pipewire-pulse' || this._isOwnStream(props)) continue;
-      if (!props['application.process.id'] && !props['application.name']) continue;
+      if (props['client.api'] === 'pipewire-pulse' || !this._isExternalStream(props)) continue;
 
       const originalSink = this._findLinkedSink(nodeId);
       const originalSerial = Number(originalSink?.props['object.serial']);
@@ -283,18 +313,20 @@ class PipeWireStreamRouter {
     return null;
   }
 
-  _isOwnStream(props) {
+  _isExternalStream(props) {
     const access = String(props['pipewire.access.effective'] || props['pipewire.access'] || '');
     const securePid = Number(props['pipewire.sec.pid']);
     if (access.includes('flatpak')) {
-      return this._processInTree(securePid, this._rootPid);
+      return Number.isSafeInteger(securePid) && securePid > 0 &&
+        this._processExternal(securePid, this._rootPid);
     }
 
     const processIds = [
       Number(props['application.process.id']),
       securePid,
-    ];
-    return processIds.some(pid => this._processInTree(pid, this._rootPid));
+    ].filter(pid => Number.isSafeInteger(pid) && pid > 0);
+    return processIds.length > 0 &&
+      processIds.every(pid => this._processExternal(pid, this._rootPid));
   }
 
   _restoreRoute(nodeId, route) {
@@ -338,5 +370,6 @@ class PipeWireStreamRouter {
 module.exports = {
   PipeWireStreamRouter,
   createJsonArrayParser,
+  isExternalProcess,
   isProcessInTree,
 };
