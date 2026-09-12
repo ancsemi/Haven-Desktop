@@ -4,7 +4,7 @@
       "target_name": "haven_audio",
       "cflags!":    ["-fno-exceptions"],
       "cflags_cc!": ["-fno-exceptions"],
-      "sources":    ["src/addon.cpp"],
+      "sources":    ["src/addon.cpp", "src/unsupported_capture.cpp"],
       "include_dirs": [
         "../node_modules/node-addon-api"
       ],

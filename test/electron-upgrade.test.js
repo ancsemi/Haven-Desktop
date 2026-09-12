@@ -19,6 +19,7 @@ test('keeps the Electron 42 toolchain requirements consistent', () => {
 test('keeps native include paths safe when the project path contains spaces', () => {
   const binding = fs.readFileSync(path.join(__dirname, '..', 'native', 'binding.gyp'), 'utf8');
   assert.match(binding, /"\.\.\/node_modules\/node-addon-api"/);
+  assert.match(binding, /src\/unsupported_capture\.cpp/);
   assert.doesNotMatch(binding, /require\('node-addon-api'\)\.include/);
 });
 
