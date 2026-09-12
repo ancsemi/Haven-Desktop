@@ -202,7 +202,7 @@ Your server data (messages, uploads, config) is stored separately in the Haven d
 
 ### Prerequisites
 
-- **Node.js** 22.12+
+- **Node.js** 22.23.2+
 - **npm** 10+
 - **C++ Build Tools:**
   - **Windows:** Visual Studio Build Tools 2019+ with "Desktop development with C++"

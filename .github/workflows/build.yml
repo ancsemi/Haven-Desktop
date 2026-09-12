@@ -1,7 +1,6 @@
 name: Build Haven Desktop
 
 on:
-  pull_request:
   push:
     tags:
       - 'v*'          # Trigger on version tags like v1.0.0
@@ -20,13 +19,19 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Run tests
+        run: npm test
+
       - name: Build native audio addon
         run: npm run build:native
+
+      - name: Smoke test Electron runtime
+        run: npm run smoke:electron
 
       # electron-builder 26 uploads the installer and its blockmap in parallel,
       # and when no release exists yet each upload creates one, so a tag ended
@@ -65,16 +70,22 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
 
       - name: Install PulseAudio dev headers
-        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev xvfb
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Run tests
+        run: npm test
+
       - name: Build native audio addon
         run: npm run build:native
+
+      - name: Smoke test Electron runtime
+        run: xvfb-run -a npm run smoke:electron
 
       - name: Build & Publish Linux packages
         run: npx electron-builder --linux --publish ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}

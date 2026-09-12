@@ -21,7 +21,46 @@ if %ERRORLEVEL% neq 0 (
     pause
     exit /b 1
 )
+node -e "const [major, minor, patch] = process.versions.node.split('.').map(Number); process.exit(major > 22 || (major === 22 && (minor > 23 || (minor === 23 && patch >= 2))) ? 0 : 1)" >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    color 0C
+    echo.
+    echo  ERROR: Haven requires Node.js 22.23.2 or newer.
+    echo  Download the current LTS release from: https://nodejs.org
+    echo.
+    pause
+    exit /b 1
+)
 for /f "tokens=*" %%v in ('node -v') do echo        Found Node.js %%v
+
+where npm >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    color 0C
+    echo.
+    echo  ERROR: npm is not installed or not in PATH.
+    echo.
+    pause
+    exit /b 1
+)
+for /f "tokens=1 delims=." %%v in ('npm -v') do set "NPM_MAJOR=%%v"
+if not defined NPM_MAJOR (
+    color 0C
+    echo.
+    echo  ERROR: Could not determine the installed npm version.
+    echo.
+    pause
+    exit /b 1
+)
+if %NPM_MAJOR% LSS 10 (
+    color 0C
+    echo.
+    echo  ERROR: Haven requires npm 10 or newer.
+    echo  Update npm with: npm install -g npm@10
+    echo.
+    pause
+    exit /b 1
+)
+for /f "tokens=*" %%v in ('npm -v') do echo        Found npm %%v
 
 :: ─── Install npm dependencies ──────────────────────────
 echo.
