@@ -177,14 +177,22 @@ function stageWindows(output) {
   copy(scanner, path.join(output, 'libexec', 'gst-plugin-scanner.exe'));
 }
 
+function supportsStaging(platform) {
+  return platform === 'linux' || platform === 'win32';
+}
+
 function main() {
+  if (!supportsStaging(process.platform)) {
+    console.log(`No native screen runtime is required on ${process.platform}`);
+    return;
+  }
+
   const temporaryOutput = `${OUTPUT}.tmp-${process.pid}`;
   fs.rmSync(temporaryOutput, { recursive: true, force: true });
   ensureDirectory(temporaryOutput);
   try {
     if (process.platform === 'linux') stageLinux(temporaryOutput);
-    else if (process.platform === 'win32') stageWindows(temporaryOutput);
-    else throw new Error(`GStreamer staging is unsupported on ${process.platform}`);
+    else stageWindows(temporaryOutput);
 
     fs.rmSync(OUTPUT, { recursive: true, force: true });
     fs.renameSync(temporaryOutput, OUTPUT);
@@ -203,4 +211,5 @@ module.exports = {
   WINDOWS_REQUIRED_PLUGIN_GROUPS,
   selectLinuxEncoderPlugins,
   selectRequiredPlugins,
+  supportsStaging,
 };

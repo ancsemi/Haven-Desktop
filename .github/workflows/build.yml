@@ -24,7 +24,10 @@ jobs:
       - name: Install GStreamer SDK
         shell: pwsh
         run: |
-          choco install gstreamer gstreamer-devel --version=1.26.9 -y
+          choco install gstreamer --version=1.26.9 -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          choco install gstreamer-devel --version=1.26.9 -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer\1.0\msvc_x86_64" | Out-File -FilePath $env:GITHUB_ENV -Append
           "C:\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 

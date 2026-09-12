@@ -8,7 +8,14 @@ const {
   WINDOWS_REQUIRED_PLUGIN_GROUPS,
   selectLinuxEncoderPlugins,
   selectRequiredPlugins,
+  supportsStaging,
 } = require('../scripts/stage-gstreamer');
+
+test('stages the native runtime only on supported desktop platforms', () => {
+  assert.equal(supportsStaging('linux'), true);
+  assert.equal(supportsStaging('win32'), true);
+  assert.equal(supportsStaging('darwin'), false);
+});
 
 test('accepts split videoconvert and videoscale plugins used by Ubuntu 22.04', () => {
   const plugins = [

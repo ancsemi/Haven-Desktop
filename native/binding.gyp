@@ -43,10 +43,11 @@
     },
     {
       "target_name": "haven_screen_share",
-      "type": "executable",
-      "sources": ["src/screen_share.cpp"],
+      "type": "none",
       "conditions": [
         ["OS=='linux'", {
+          "type": "executable",
+          "sources": ["src/screen_share.cpp"],
           "cflags": [
             "<!@(pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-sdp-1.0 gstreamer-webrtc-1.0 gio-2.0 gio-unix-2.0)"
           ],
@@ -56,6 +57,8 @@
           ]
         }],
         ["OS=='win'", {
+          "type": "executable",
+          "sources": ["src/screen_share.cpp"],
           "include_dirs": [
             "<(gstreamer_root)/include/gstreamer-1.0",
             "<(gstreamer_root)/include/glib-2.0",
