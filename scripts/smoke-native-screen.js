@@ -37,7 +37,11 @@ async function run() {
 
   await new Promise((resolve, reject) => {
     let ready = false;
+    let stopped = false;
     let settled = false;
+    let encoder = '';
+    let phase = 'startup';
+    let timeout;
     const finish = error => {
       if (settled) return;
       settled = true;
@@ -50,17 +54,27 @@ async function run() {
         resolve();
       }
     };
-    const timeout = setTimeout(() => {
-      finish(new Error(`Native screen smoke test timed out${stderr ? `: ${stderr.trim()}` : ''}`));
-    }, 60000);
+    const armTimeout = (nextPhase, duration) => {
+      phase = nextPhase;
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        const details = [
+          `phase=${phase}`,
+          encoder ? `encoder=${encoder}` : '',
+          stderr.trim(),
+        ].filter(Boolean).join(', ');
+        finish(new Error(`Native screen smoke test timed out (${details})`));
+      }, duration);
+    };
     const lines = readline.createInterface({ input: child.stdout });
 
     child.once('error', finish);
     child.once('exit', code => {
       if (settled) return;
-      if (code === 0 && ready) finish();
+      if (code === 0 && ready && stopped) finish();
       else finish(new Error(
-        `Native screen helper exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`
+        `Native screen helper exited with code ${code} during ${phase}` +
+        `${encoder ? ` using ${encoder}` : ''}${stderr ? `: ${stderr.trim()}` : ''}`
       ));
     });
     lines.on('line', line => {
@@ -78,14 +92,18 @@ async function run() {
           return;
         }
         ready = true;
+        encoder = fields[1];
+        armTimeout('teardown', 10000);
         send(child, 'STOP', [SESSION_ID]);
       } else if (event === 'STOPPED' && ready) {
-        finish();
+        stopped = true;
+        armTimeout('exit', 5000);
       } else if (event === 'ERROR') {
         finish(new Error(fields[2] || 'Native screen helper reported an error'));
       }
     });
 
+    armTimeout('startup', 60000);
     send(child, 'START', [
       SESSION_ID,
       'test',
@@ -105,7 +123,7 @@ async function run() {
     ]);
   });
 
-  console.log('Native screen smoke test passed: encoded H.264 RTP reached the readiness sink.');
+  console.log('Native screen smoke test passed: encoded H.264 RTP and clean shutdown verified.');
 }
 
 run().catch(error => {
