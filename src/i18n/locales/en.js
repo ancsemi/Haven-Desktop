@@ -105,7 +105,7 @@ module.exports = {
   'connection.goBackWelcome': 'Go Back to Welcome',
   'connection.keepWaiting': 'Keep Waiting',
   'connection.problemTitle': 'Connection Problem',
-  'connection.problemMessage': "Haven couldn't load the server at {url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue. You will be returned automatically in 30 seconds.",
+  'connection.problemMessage': "Haven couldn't load the server at {url}.\n\nThe server may be down, the address may be wrong, or the network dropped.",
   'connection.notHaven': "That server doesn't look like Haven. You were returned to your server.",
   'connection.failed': "Couldn't connect to that server",
 

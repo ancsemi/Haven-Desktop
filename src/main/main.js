@@ -873,8 +873,8 @@ function resetToWelcome(clearPrefs = false) {
     store.set('userPrefs.serverUrl', null);
     store.set('userPrefs.mode', null);
   }
-  mainWindow?.close();
   createWelcomeWindow();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
   createTray();
 }
 
@@ -893,7 +893,16 @@ app.on('before-quit', () => {
 // Window Factories
 // ═══════════════════════════════════════════════════════════
 
+function hideWelcome() {
+  if (welcomeWindow && !welcomeWindow.isDestroyed()) welcomeWindow.hide();
+}
+
 function createWelcomeWindow() {
+  if (welcomeWindow && !welcomeWindow.isDestroyed()) {
+    welcomeWindow.show();
+    welcomeWindow.focus();
+    return;
+  }
   welcomeWindow = new BrowserWindow({
     width: 720, height: 560,
     minWidth: 620, minHeight: 480,
@@ -1019,10 +1028,46 @@ function createAppWindow(serverUrl) {
 
   if (!mainWindow.isVisible() && !START_HIDDEN) {
     mainWindow.show();
-    if (welcomeWindow) welcomeWindow.close();
-  } else if (START_HIDDEN && welcomeWindow) {
-    welcomeWindow.close();
   }
+  hideWelcome();
+}
+
+function otherServerUrl(failedUrl) {
+  const failed = failedUrl ? normalizeServerUrl(failedUrl) : '';
+  if (primaryServerUrl && primaryServerUrl !== failed) return primaryServerUrl;
+  const pref = store.get('userPrefs.serverUrl');
+  if (pref) {
+    const normalized = normalizeServerUrl(pref);
+    if (normalized && normalized !== failed) return normalized;
+  }
+  const history = store.get('serverHistory') || [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const candidate = history[i]?.url && normalizeServerUrl(history[i].url);
+    if (candidate && candidate !== failed) return candidate;
+  }
+  return '';
+}
+
+function showConnectionError(failedUrl) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const view = serverViews.get(failedUrl);
+  if (view) {
+    try { mainWindow.removeBrowserView(view); } catch {}
+    try { view.webContents.destroy(); } catch {}
+    serverViews.delete(failedUrl);
+    serverBadgeState.delete(failedUrl);
+    knownServerUrlsByView.delete(failedUrl);
+  }
+  for (const [, other] of serverViews) {
+    try { mainWindow.removeBrowserView(other); } catch {}
+  }
+  const back = otherServerUrl(failedUrl);
+  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'connection-error.html'), {
+    query: { url: failedUrl || '', primary: back || '' },
+  }).catch((e) => {
+    console.warn('[Haven] Could not load connection-error page:', e?.message || e);
+  });
+  if (!mainWindow.isVisible()) mainWindow.show();
 }
 
 // ── Multi-Server View Management ────────────────────────────
@@ -1336,10 +1381,10 @@ function ensureServerView(serverUrl, { background = false } = {}) {
               wc.executeJavaScript(`if (typeof app !== 'undefined' && typeof app._showToast === 'function') { app._showToast(${toastMessage}, 'error'); }`).catch(() => {});
             }
           } else {
-            resetToWelcome();
+            showConnectionError(url);
           }
         } else {
-          resetToWelcome(true);
+          showConnectionError(url);
         }
       }
     });
@@ -1359,17 +1404,17 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           return;
         }
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
-        const { response, timedOut } = await showDialogWithTimeout(mainWindow, {
-          type: 'warning',
-          buttons: [isSecondary ? t('connection.goBackServer') : t('connection.goBackWelcome'), t('connection.keepWaiting')],
-          defaultId: 0,
-          title: t('connection.problemTitle'),
-          message: t('connection.problemMessage', { url }),
-        });
-        if (timedOut) console.warn('[main] "Connection Problem" dialog timed out, returning home');
-        const wantsOut = response !== 1; // 0 / -1 / undefined / Esc
-        if (wantsOut) {
-          if (isSecondary) {
+        if (isSecondary) {
+          const { response, timedOut } = await showDialogWithTimeout(mainWindow, {
+            type: 'warning',
+            buttons: [t('connection.goBackServer'), t('connection.keepWaiting')],
+            defaultId: 0,
+            title: t('connection.problemTitle'),
+            message: t('connection.problemMessage', { url }),
+          });
+          if (timedOut) console.warn('[main] "Connection Problem" dialog timed out, returning home');
+          const wantsOut = response !== 1; // 0 / -1 / undefined / Esc
+          if (wantsOut) {
             mainWindow?.removeBrowserView(view);
             try { view.webContents.destroy(); } catch {}
             serverViews.delete(url);
@@ -1377,9 +1422,9 @@ function ensureServerView(serverUrl, { background = false } = {}) {
             knownServerUrlsByView.delete(url);
             recomputeTaskbarBadge();
             switchToServer(primaryServerUrl);
-          } else {
-            resetToWelcome();
           }
+        } else {
+          showConnectionError(url);
         }
       }).catch(() => {});
     }, 15000);
@@ -1452,11 +1497,11 @@ function ensureServerView(serverUrl, { background = false } = {}) {
             }
           }
         } else {
-          resetToWelcome();
+          showConnectionError(url);
         }
         return;
       }
-      resetToWelcome();
+      showConnectionError(url);
     });
 
     // Reset retry counter once a load succeeds, so a future failure starts

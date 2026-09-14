@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="connection.problemTitle">Connection Problem</title>
+  <link rel="stylesheet" href="welcome.css">
+  <style>
+    html, body { height: 100%; }
+    .error-page {
+      display: flex;
+      min-height: 100%;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 32px;
+      text-align: center;
+      gap: 14px;
+    }
+    .error-page .hex-logo { font-size: 48px; line-height: 1; }
+    .error-page h1 { font-size: 22px; font-weight: 700; }
+    .error-page p {
+      max-width: 420px;
+      color: var(--text-dim, #888);
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .error-page code {
+      display: inline-block;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--surface2, #1a1a34);
+      border: 1px solid var(--border, #2a2a50);
+      color: var(--text, #e0e0e0);
+      font-size: 13px;
+    }
+    .error-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="error-page" id="haven-connection-error">
+    <div class="hex-logo" aria-hidden="true">⬡</div>
+    <h1 data-i18n="connection.problemTitle">Connection Problem</h1>
+    <p id="error-message"></p>
+    <code id="error-url"></code>
+    <div class="error-actions">
+      <button class="btn primary" type="button" id="btn-retry" data-i18n="welcome.tryAgain">Try Again</button>
+      <button class="btn secondary" type="button" id="btn-back-server" hidden data-i18n="connection.goBackServer">Go Back to My Server</button>
+      <button class="btn secondary" type="button" id="btn-welcome" data-i18n="connection.goBackWelcome">Go Back to Welcome</button>
+    </div>
+  </div>
+</body>
+</html>
