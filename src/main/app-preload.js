@@ -681,25 +681,43 @@ ipcRenderer.on('voice:ptt-toggle',    () => document.getElementById('voice-mute-
 // release. We unmute on press and re-mute on release iff that state
 // transition is needed — the mute button is a toggle, so we only click
 // it when its current visual state doesn't match the desired one.
-function _pttSetTalking(shouldTalk) {
-  const btn = document.getElementById('voice-mute-btn');
-  if (!btn) return;
-  // The mute button reflects mute state via aria-pressed / .muted /
-  // its inner icon (varies by build). Use aria-pressed first, fall
-  // back to a `.muted` class probe.
-  const pressed = btn.getAttribute('aria-pressed');
-  let isMuted;
-  if (pressed === 'true' || pressed === 'false') {
-    isMuted = pressed === 'true';
-  } else {
-    isMuted = btn.classList.contains('muted') || btn.classList.contains('is-muted');
+// The mic state is read from the app itself when it is there (window.app,
+// the object Haven's client exposes), and only from the mute button's class
+// when it is not. Each press and release is logged with the state it saw and
+// what it did, so a report from someone whose hold mode misbehaves can show
+// exactly where it stops: View, Toggle Developer Tools, then Console
+// (Haven #5603, #38).
+function _pttState() {
+  const app = window.app || window._havenApp || null;
+  const voice = app && app.voice;
+  if (voice && typeof voice.isMuted === 'boolean') {
+    return { app, isMuted: voice.isMuted, inVoice: !!voice.inVoice, source: 'app' };
   }
-  // shouldTalk → want unmuted. Click only when state needs to flip.
-  const needFlip = shouldTalk ? isMuted : !isMuted;
-  if (needFlip) btn.click();
+  const btn = document.getElementById('voice-mute-btn') || document.getElementById('voice-mute-btn-header');
+  if (!btn) return null;
+  const pressed = btn.getAttribute('aria-pressed');
+  const isMuted = (pressed === 'true' || pressed === 'false')
+    ? pressed === 'true'
+    : (btn.classList.contains('muted') || btn.classList.contains('is-muted'));
+  return { app, isMuted, inVoice: null, source: 'button', btn };
 }
-ipcRenderer.on('voice:ptt-down', () => _pttSetTalking(true));
-ipcRenderer.on('voice:ptt-up',   () => _pttSetTalking(false));
+function _pttSetTalking(shouldTalk, via = 'key') {
+  const s = _pttState();
+  const edge = shouldTalk ? 'down' : 'up';
+  if (!s) { console.log(`[PTT] ${via} ${edge}: no voice state on the page yet, ignored`); return; }
+  // shouldTalk → want unmuted. Flip only when the state has to change, so
+  // the input hook and the page's own key handler never fight.
+  const needFlip = shouldTalk ? s.isMuted : !s.isMuted;
+  console.log(`[PTT] ${via} ${edge}: muted=${s.isMuted} inVoice=${s.inVoice} via ${s.source}, ${needFlip ? 'toggling' : 'no change'}`);
+  if (!needFlip) return;
+  if (s.app && typeof s.app._toggleMute === 'function') {
+    try { s.app._toggleMute(); return; } catch (err) { console.warn('[PTT] _toggleMute threw:', err); }
+  }
+  const btn = s.btn || document.getElementById('voice-mute-btn');
+  if (btn) btn.click();
+}
+ipcRenderer.on('voice:ptt-down', () => _pttSetTalking(true, 'hook'));
+ipcRenderer.on('voice:ptt-up',   () => _pttSetTalking(false, 'hook'));
 
 // ─── Hold-mode PTT while the Haven window itself is focused ──────────
 // The native input hook in main drives PTT, but on Windows several people
