@@ -1557,6 +1557,11 @@ window.havenDesktop = {
    *  Same gesture-bypass rationale as clipboardWriteImage. */
   clipboardWriteText: (text) => ipcRenderer.invoke('clipboard:write-text', text),
 
+  /** Native save dialog for images. WebView/Chromium often ignores <a download>
+   *  on http(s) media. Haven passes base64 bytes + a filename. */
+  saveImage: ({ bytes, filename } = {}) =>
+    ipcRenderer.invoke('dialog:save-image', { payload: bytes || '', filename }),
+
   /** Access the Desktop-level server history (persists across all servers) */
   getServerHistory: () => ipcRenderer.invoke('server-history:get'),
   addServerHistory: (url, name) => ipcRenderer.invoke('server-history:add', url, name),

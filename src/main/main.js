@@ -2786,6 +2786,31 @@ function registerIPC() {
     }
   });
 
+  // WebView download= is ignored for many http(s) image URLs. Haven calls
+  // havenDesktop.saveImage with base64 bytes so we can show a real save dialog.
+  ipcMain.handle('dialog:save-image', async (e, { payload, filename } = {}) => {
+    try {
+      if (!payload || typeof payload !== 'string') return { ok: false, reason: 'no-payload' };
+      const raw = payload.includes(',') ? payload.slice(payload.lastIndexOf(',') + 1) : payload;
+      const buf = Buffer.from(String(raw).replace(/\s+/g, ''), 'base64');
+      if (!buf.length) return { ok: false, reason: 'empty-image' };
+      const leaf = String(filename || 'haven-image.png').replace(/\\/g, '/').split('/').pop() || 'haven-image.png';
+      const name = leaf.replace(/[^A-Za-z0-9._-]/g, '') || 'haven-image.png';
+      const wc = e && e.sender;
+      const win = (wc && !wc.isDestroyed() && BrowserWindow.fromWebContents(wc)) || mainWindow;
+      const picked = await dialog.showSaveDialog(win && !win.isDestroyed() ? win : undefined, {
+        title: 'Save image',
+        defaultPath: name,
+        filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
+      });
+      if (picked.canceled || !picked.filePath) return { ok: false, cancelled: true };
+      fs.writeFileSync(picked.filePath, buf);
+      return { ok: true, path: picked.filePath };
+    } catch (err) {
+      return { ok: false, reason: String(err && err.message || err) };
+    }
+  });
+
   // ── Desktop App Preferences ───────────────────────────
   ipcMain.handle('desktop:get-prefs', () => ({
     startOnLogin:     !!store.get('startOnLogin'),
