@@ -2,21 +2,26 @@
 
 ## v1.4.33
 
+### Added
+- **Right-click menu on pictures.** Save Image, Copy Image and Open Image in Browser on any picture, including one opened in its own window, which had no menu at all before. (Haven #5663)
+- **Save Image uses a native save dialog.** Right-click → Save Image on a photo asks where to put the file. Chromium's `<a download>` does nothing for a lot of proxied http(s) images; the page hands us the bytes instead. Thanks to @Amnibro.
+- **An unreachable server shows a Haven page with a way out.** A refused localhost (or any dead host) used to leave Chromium's error document, or dump you at Welcome and destroy that window so the next hop had nothing to show. The main window now loads a Try Again / Go Back to Welcome / Go Back to My Server page, and Welcome stays hidden so those buttons can bring it back. Thanks to @Amnibro.
+
 ### Fixed
 - **Hold-mode push to talk while the Haven window itself is focused.** Several people on Windows saw hold mode go quiet whenever the app had focus and work again the moment it was minimised or behind a game. When the window is focused the page receives the key events itself, so the binding is followed there too, alongside the input hook. Each path only flips the mic when the state has to change, so the two never fight. Please try it and say whether it holds up. (Haven #5603, #38)
+- **Push to talk reads the mic state from the app itself** rather than guessing it from the button, and logs every press and release to the console (View, Toggle Developer Tools) with the state it saw, so a report can show exactly where it stops. (Haven #5603, #38)
+- **The memory watchdog could reload the page mid-call.** Its "is the user in voice" check looked for a global the web app never set, so the answer was always no. It reads the right one now.
+- **Closing the system's screen share prompt on Linux no longer takes the app with it.** Cancelling the desktop portal rejected the source lookup, and nothing caught it. It counts as a cancel now. Try and confirm. (#50)
+- **Closing the app window left it running unseen.** The welcome window is kept hidden behind the app since the unreachable-server page, and a hidden window still counts as open, so closing the app window no longer quit. It does again.
 
 ---
 
 ## v1.4.32
 
 ### Added
-- **Save Image uses a native save dialog.** Right-click → Save Image on a
-  photo asks where to put the file. Chromium's `<a download>` does nothing
-  for a lot of proxied http(s) images; the page hands us the bytes instead.
 - **Check for Updates in the Help menu and on the tray icon.** The app only ever checked quietly at start-up, so there was no way to ask. The new entry checks on demand and says when you are already on the latest version. (Haven #5627)
 
 ### Fixed
-- **An unreachable server shows a Haven page with a way out.** A refused localhost (or any dead host) used to leave Chromium's error document, or dump you at Welcome and destroy that window so the next hop had nothing to show. The main window now loads a Try Again / Go Back to Welcome / Go Back to My Server page, and Welcome stays hidden so those buttons can bring it back.
 - **Push to talk in toggle mode did nothing on a mouse button or a bare modifier key.** Those bindings go through the input hook, and the hook sent an event name the app never listened for, so the press was dropped. It sends the same toggle event the shortcut API path uses. (Haven #5603, #38)
 - **Hiding the menu bar no longer leaves a bare strip along the bottom of the window.** The server view kept the height it had with the bar showing, so the app shifted up and a slice of empty window showed under it. It is re-fitted when the setting changes. (Haven #5626)
 - **The screen share picker sometimes had no scroll bar for application windows.** The list was `flex: 1` beside siblings that never shrink inside a `max-height` box, so a tall audio-app row could squeeze it to nothing. The box has a definite height now, the list keeps a minimum height, the audio row scrolls on its own past 30vh, and the scrollbar is visible. Its Cancel button no longer inherits the server picker's full-width rule. Reported by Dispencer2.

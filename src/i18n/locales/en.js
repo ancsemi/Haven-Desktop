@@ -78,6 +78,9 @@ module.exports = {
 
   'context.addToDictionary': 'Add to Dictionary',
   'context.copyLink': 'Copy Link',
+  'context.saveImage': 'Save Image…',
+  'context.copyImage': 'Copy Image',
+  'context.openImageExternal': 'Open Image in Browser',
   'menu.edit': 'Edit',
   'menu.undo': 'Undo',
   'menu.redo': 'Redo',

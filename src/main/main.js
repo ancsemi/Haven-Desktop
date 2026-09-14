@@ -1005,6 +1005,13 @@ function createAppWindow(serverUrl) {
     // Badge is cleared by the web app when unreads reach zero, not on raw focus.
     // Clearing on focus caused the overlay to vanish even while unreads remained.
     mainWindow.on('closed', () => {
+      // The welcome window is kept hidden behind the app so the connection
+      // error page can bring it back. Once the app window is gone with
+      // nothing else showing, closing the window has to close the app, or
+      // it would live on unseen behind the hidden welcome window.
+      if (!app.isQuitting && welcomeWindow && !welcomeWindow.isDestroyed() && !welcomeWindow.isVisible()) {
+        setTimeout(() => { if (!app.isQuitting) app.quit(); }, 0);
+      }
       serverViews.clear();
       serverBadgeState.clear();
       knownServerUrlsByView.clear();
@@ -1278,7 +1285,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // Electron doesn't surface suggestions automatically; we build a small
     // Menu from params.dictionarySuggestions and params.misspelledWord so
     // users can apply a correction just like they would in a browser.
-    view.webContents.on('context-menu', (_e, params) => {
+    const attachContextMenu = (wc, win) => wc.on('context-menu', (_e, params) => {
       const items = [];
 
       // ── Spellcheck suggestions (when right-clicking a misspelled word) ──
@@ -1288,7 +1295,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           for (const suggestion of suggestions.slice(0, 6)) {
             items.push({
               label: suggestion,
-              click: () => { try { view.webContents.replaceMisspelling(suggestion); } catch {} },
+              click: () => { try { wc.replaceMisspelling(suggestion); } catch {} },
             });
           }
           items.push({ type: 'separator' });
@@ -1296,7 +1303,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         items.push({
           label: t('context.addToDictionary'),
           click: () => {
-            try { view.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {}
+            try { wc.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {}
           },
         });
         items.push({ type: 'separator' });
@@ -1308,6 +1315,18 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           label: t('context.copyLink'),
           click: () => { try { require('electron').clipboard.writeText(params.linkURL); } catch {} },
         });
+        items.push({ type: 'separator' });
+      }
+
+      // ── Picture actions (Haven #5663) ──
+      // A picture opened in its own window had no menu at all, so there was
+      // no way to save or copy it from there.
+      if (params.mediaType === 'image' && params.srcURL) {
+        items.push({ label: t('context.saveImage'), click: () => { try { wc.downloadURL(params.srcURL); } catch {} } });
+        items.push({ label: t('context.copyImage'), click: () => { try { wc.copyImageAt(params.x, params.y); } catch {} } });
+        if (/^https?:\/\//i.test(params.srcURL)) {
+          items.push({ label: t('context.openImageExternal'), click: () => { try { shell.openExternal(params.srcURL); } catch {} } });
+        }
         items.push({ type: 'separator' });
       }
 
@@ -1329,7 +1348,13 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       while (items.length && items[items.length - 1].type === 'separator') items.pop();
 
       if (!items.length) return;
-      try { Menu.buildFromTemplate(items).popup({ window: mainWindow }); } catch {}
+      try { Menu.buildFromTemplate(items).popup({ window: win }); } catch {}
+    });
+    attachContextMenu(view.webContents, mainWindow);
+    // A same-origin popup, such as a picture opened in its own window, gets
+    // the same menu (Haven #5663).
+    view.webContents.on('did-create-window', (child) => {
+      try { attachContextMenu(child.webContents, child); } catch {}
     });
 
     // ── Page load timeout — if no content after 15 s, offer to go back ──
@@ -1696,8 +1721,11 @@ function ensureServerView(serverUrl, { background = false } = {}) {
             // without warning.  Let the soft DOM trim handle it instead.
             let inVoice = false;
             try {
+              // Haven's client exposes itself as window.app; the older
+              // _havenApp name never existed, so this guard always said "not
+              // in voice" and a reload could land mid-call.
               inVoice = await view.webContents.executeJavaScript(
-                'window._havenApp && (window._havenApp.voice?.inVoice || window._havenApp.voice?.isScreenSharing) ? true : false'
+                '(function(){var a=window.app||window._havenApp;return !!(a&&a.voice&&(a.voice.inVoice||a.voice.isScreenSharing));})()'
               ).catch(() => false);
             } catch { inVoice = false; }
             if (inVoice) {
@@ -2254,11 +2282,20 @@ function registerScreenShareHandler() {
         // Some Windows builds intermittently fail WGC thumbnail startup
         // with E_INVALIDARG. Retry without thumbnails so the picker can open.
         console.warn(`[ScreenShare] getSources(thumbnails) failed: ${err.message}; retrying without thumbnails`);
-        sources = await desktopCapturer.getSources({
-          types: ['window', 'screen'],
-          thumbnailSize: { width: 0, height: 0 },
-          fetchWindowIcons: false,
-        });
+        try {
+          sources = await desktopCapturer.getSources({
+            types: ['window', 'screen'],
+            thumbnailSize: { width: 0, height: 0 },
+            fetchWindowIcons: false,
+          });
+        } catch (err2) {
+          // On Linux the system's own share prompt (the desktop portal) runs
+          // first, and closing it rejects here. That is a cancel, not an
+          // error, and must never take the app down with it (#50).
+          console.warn(`[ScreenShare] getSources failed again: ${err2.message}; treating as cancelled`);
+          safeCallback({});
+          return;
+        }
       }
 
       // Haven's own window is worth listing too, if only to debug a stream
