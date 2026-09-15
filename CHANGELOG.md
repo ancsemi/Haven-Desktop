@@ -8,6 +8,9 @@
 - **An unreachable server shows a Haven page with a way out.** A refused localhost (or any dead host) used to leave Chromium's error document, or dump you at Welcome and destroy that window so the next hop had nothing to show. The main window now loads a Try Again / Go Back to Welcome / Go Back to My Server page, and Welcome stays hidden so those buttons can bring it back. Thanks to @Amnibro.
 - **Known servers are one click away when a server is down.** The Join a Server page lists every server this app has connected to, each with a remove button, and the unreachable-server page lists your other servers, so a home server that is down for maintenance no longer means retyping an address. (Haven #5666)
 
+### Changed
+- **Electron 42.** Up from 33, on a Node 22 toolchain, and every pull request now builds on Windows, Linux and macOS before it lands. Building from source needs Node 22.23.2 or newer; Setup.bat checks. Thanks to @bernardokcosta.
+
 ### Fixed
 - **Hold-mode push to talk while the Haven window itself is focused.** Several people on Windows saw hold mode go quiet whenever the app had focus and work again the moment it was minimised or behind a game. When the window is focused the page receives the key events itself, so the binding is followed there too, alongside the input hook. Each path only flips the mic when the state has to change, so the two never fight. Please try it and say whether it holds up. (Haven #5603, #38)
 - **Push to talk reads the mic state from the app itself** rather than guessing it from the button, and logs every press and release to the console (View, Toggle Developer Tools) with the state it saw, so a report can show exactly where it stops. (Haven #5603, #38)
