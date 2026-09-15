@@ -4,9 +4,9 @@
       "target_name": "haven_audio",
       "cflags!":    ["-fno-exceptions"],
       "cflags_cc!": ["-fno-exceptions"],
-      "sources":    ["src/addon.cpp"],
+      "sources":    ["src/addon.cpp", "src/unsupported_capture.cpp"],
       "include_dirs": [
-        "<!@(node -p \"require('node-addon-api').include\")"
+        "../node_modules/node-addon-api"
       ],
       "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"],
       "conditions": [
