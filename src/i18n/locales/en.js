@@ -106,6 +106,7 @@ module.exports = {
 
   'connection.goBackServer': 'Go Back to My Server',
   'connection.goBackWelcome': 'Go Back to Welcome',
+  'connection.otherServers': 'Your other servers',
   'connection.keepWaiting': 'Keep Waiting',
   'connection.problemTitle': 'Connection Problem',
   'connection.problemMessage': "Haven couldn't load the server at {url}.\n\nThe server may be down, the address may be wrong, or the network dropped.",

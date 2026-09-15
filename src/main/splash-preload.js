@@ -54,6 +54,40 @@ function bindConnectionError() {
       ipcRenderer.send('nav:switch-server', primary);
     });
   }
+
+  // Every other server this app knows, so a home server that is down does
+  // not mean retyping an address to reach a friend's (Haven #5666). The
+  // failed one and the Go Back button's server are left out.
+  const others = document.getElementById('error-others');
+  const list = document.getElementById('error-others-list');
+  if (others && list) {
+    ipcRenderer.invoke('server-history:get').then((history) => {
+      const entries = (history || [])
+        .filter(h => h && h.url && h.url !== url && h.url !== primary)
+        .sort((a, b) => (b.lastConnected || 0) - (a.lastConnected || 0));
+      if (!entries.length) return;
+      list.replaceChildren();
+      for (const entry of entries) {
+        let name;
+        try { name = (entry.name && entry.name !== entry.url) ? entry.name : new URL(entry.url).hostname; }
+        catch { name = entry.url; }
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        const nameEl = document.createElement('span');
+        nameEl.className = 'name';
+        nameEl.textContent = name;
+        const urlEl = document.createElement('span');
+        urlEl.className = 'url';
+        urlEl.textContent = entry.url;
+        btn.append(nameEl, urlEl);
+        btn.addEventListener('click', () => {
+          ipcRenderer.send('nav:switch-server', entry.url);
+        });
+        list.appendChild(btn);
+      }
+      others.hidden = false;
+    }).catch(() => {});
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

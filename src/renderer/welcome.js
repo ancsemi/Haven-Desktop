@@ -78,7 +78,7 @@
   // ═══════ Page 1 — Choose Mode ═══════════════════════════
 
   $('#card-host').onclick = () => { showPage('#page-host'); detectServer(); };
-  $('#card-join').onclick = () => { showPage('#page-join'); $('#server-url').focus(); };
+  $('#card-join').onclick = () => { showPage('#page-join'); $('#server-url').focus(); loadRecentServers(); };
 
   // ═══════ Page 2a — Host Flow ════════════════════════════
 
@@ -185,6 +185,61 @@
   const joinError  = $('#join-error');
 
   $('#join-back').onclick = () => showPage('#page-choose');
+
+  // Servers this app has connected to before, so a known address is one
+  // click away instead of something to retype after a server was down for a
+  // while (Haven #5666). Same list the in-app Switch Server picker shows.
+  async function loadRecentServers() {
+    const box  = $('#join-recent');
+    const list = $('#join-recent-list');
+    let history = [];
+    try { history = await window.haven.servers.history(); } catch { history = []; }
+    history = (history || []).filter(h => h && h.url);
+    if (!history.length) { box.style.display = 'none'; return; }
+    history.sort((a, b) => (b.lastConnected || 0) - (a.lastConnected || 0));
+    list.replaceChildren();
+    for (const entry of history) {
+      let name;
+      try { name = (entry.name && entry.name !== entry.url) ? entry.name : new URL(entry.url).hostname; }
+      catch { name = entry.url; }
+
+      const item = document.createElement('div');
+      item.className = 'recent-item';
+
+      const info = document.createElement('button');
+      info.type = 'button';
+      info.className = 'recent-info';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'recent-name';
+      nameEl.textContent = name;
+      const urlEl = document.createElement('span');
+      urlEl.className = 'recent-url';
+      urlEl.textContent = entry.url;
+      info.append(nameEl, urlEl);
+      info.addEventListener('click', () => {
+        urlInput.value = entry.url;
+        connectBtn.disabled = false;
+        joinError.style.display = 'none';
+        connectBtn.click();
+      });
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'recent-remove';
+      remove.textContent = '×';
+      remove.dataset.i18nTitle = 'serverPicker.removeHistory';
+      remove.title = t('serverPicker.removeHistory');
+      remove.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try { await window.haven.servers.remove(entry.url); } catch {}
+        loadRecentServers();
+      });
+
+      item.append(info, remove);
+      list.appendChild(item);
+    }
+    box.style.display = 'flex';
+  }
 
   urlInput.addEventListener('input', () => {
     connectBtn.disabled = !urlInput.value.trim();

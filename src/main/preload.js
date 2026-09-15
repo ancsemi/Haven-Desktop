@@ -71,6 +71,14 @@ window.haven = {
     close:    () => ipcRenderer.send('window:close'),
   },
 
+  // ── Known servers (Haven #5666) ────────────────────────
+  // The same history the in-app Switch Server picker shows, so the welcome
+  // page can offer a click instead of retyping an address.
+  servers: {
+    history: ()    => ipcRenderer.invoke('server-history:get'),
+    remove:  (url) => ipcRenderer.invoke('server-history:remove', url),
+  },
+
   // ── Navigation ─────────────────────────────────────────
   nav: {
     openApp: (serverUrl) => ipcRenderer.send('nav:open-app', serverUrl),

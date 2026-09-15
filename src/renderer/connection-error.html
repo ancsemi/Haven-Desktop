@@ -44,6 +44,47 @@
       justify-content: center;
       margin-top: 10px;
     }
+    /* Every other server this app knows (Haven #5666). */
+    [hidden] { display: none !important; }
+    .error-others {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      width: 100%;
+      max-width: 420px;
+      margin-top: 18px;
+      text-align: left;
+    }
+    .error-others-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--text-dim, #888);
+    }
+    .error-others-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
+    .error-others-list button {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      text-align: left;
+      background: var(--surface, #14142a);
+      border: 1px solid var(--border, #2a2a50);
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: var(--text, #e0e0e0);
+      cursor: pointer;
+      font: inherit;
+    }
+    .error-others-list button:hover { border-color: var(--accent, #6b4fdb); background: var(--surface2, #1a1a34); }
+    .error-others-list .name { font-size: 14px; font-weight: 600; }
+    .error-others-list .url {
+      font-size: 12px;
+      color: var(--text-dim, #888);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -56,6 +97,10 @@
       <button class="btn primary" type="button" id="btn-retry" data-i18n="welcome.tryAgain">Try Again</button>
       <button class="btn secondary" type="button" id="btn-back-server" hidden data-i18n="connection.goBackServer">Go Back to My Server</button>
       <button class="btn secondary" type="button" id="btn-welcome" data-i18n="connection.goBackWelcome">Go Back to Welcome</button>
+    </div>
+    <div class="error-others" id="error-others" hidden>
+      <p class="error-others-label" data-i18n="connection.otherServers">Your other servers</p>
+      <div class="error-others-list" id="error-others-list"></div>
     </div>
   </div>
 </body>

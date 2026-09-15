@@ -106,6 +106,7 @@ module.exports = {
 
   'connection.goBackServer': 'Voltar ao meu servidor',
   'connection.goBackWelcome': 'Voltar às boas-vindas',
+  'connection.otherServers': 'Seus outros servidores',
   'connection.keepWaiting': 'Continuar aguardando',
   'connection.problemTitle': 'Problema de conexão',
   'connection.problemMessage': 'O Haven não conseguiu carregar o servidor em {url}.\n\nO servidor pode estar fora do ar, o endereço pode estar incorreto ou a rede caiu.',
