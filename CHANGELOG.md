@@ -7,6 +7,12 @@
 - **Save Image uses a native save dialog.** Right-click → Save Image on a photo asks where to put the file. Chromium's `<a download>` does nothing for a lot of proxied http(s) images; the page hands us the bytes instead. Thanks to @Amnibro.
 - **An unreachable server shows a Haven page with a way out.** A refused localhost (or any dead host) used to leave Chromium's error document, or dump you at Welcome and destroy that window so the next hop had nothing to show. The main window now loads a Try Again / Go Back to Welcome / Go Back to My Server page, and Welcome stays hidden so those buttons can bring it back. Thanks to @Amnibro.
 
+### Added
+- **The native window follows the page palette.** Matrix, Braid, Compact and
+  the other themes update the Electron chrome background from `--bg-primary`
+  and `--accent`, so a layout overlay no longer leaves a leftover strip of
+  the previous color.
+
 ### Fixed
 - **Hold-mode push to talk while the Haven window itself is focused.** Several people on Windows saw hold mode go quiet whenever the app had focus and work again the moment it was minimised or behind a game. When the window is focused the page receives the key events itself, so the binding is followed there too, alongside the input hook. Each path only flips the mic when the state has to change, so the two never fight. Please try it and say whether it holds up. (Haven #5603, #38)
 - **Push to talk reads the mic state from the app itself** rather than guessing it from the button, and logs every press and release to the console (View, Toggle Developer Tools) with the state it saw, so a report can show exactly where it stops. (Haven #5603, #38)
