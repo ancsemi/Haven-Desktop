@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const path = require('node:path');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
@@ -531,7 +532,7 @@ test('preserves an unsupported probe reason when the helper exits nonzero', asyn
 
 test('uses the staged project GStreamer runtime during development', () => {
   const projectRoot = '/workspace/haven';
-  const runtime = `${projectRoot}/native/runtime/gstreamer`;
+  const runtime = path.join(projectRoot, 'native', 'runtime', 'gstreamer');
   const manager = new NativeScreenManager({
     platform: 'win32',
     projectRoot,
@@ -541,9 +542,9 @@ test('uses the staged project GStreamer runtime during development', () => {
   });
 
   const env = manager._helperEnv();
-  assert.equal(env.PATH, `${runtime}/bin${require('node:path').delimiter}system-path`);
-  assert.equal(env.GST_PLUGIN_PATH_1_0, `${runtime}/plugins`);
-  assert.equal(env.GST_PLUGIN_SCANNER_1_0, `${runtime}/libexec/gst-plugin-scanner.exe`);
+  assert.equal(env.PATH, `${path.join(runtime, 'bin')}${path.delimiter}system-path`);
+  assert.equal(env.GST_PLUGIN_PATH_1_0, path.join(runtime, 'plugins'));
+  assert.equal(env.GST_PLUGIN_SCANNER_1_0, path.join(runtime, 'libexec', 'gst-plugin-scanner.exe'));
 });
 
 test('does not cache transient helper probe failures', async () => {
