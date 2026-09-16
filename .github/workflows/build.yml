@@ -28,8 +28,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           choco install gstreamer-devel --version=1.26.9 -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer\1.0\msvc_x86_64" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "C:\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          $gstreamerRoot = Join-Path $env:ProgramFiles "gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$gstreamerRoot\include\gstreamer-1.0\gst\gst.h")) { throw "GStreamer development headers not found" }
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gstreamerRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$gstreamerRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install dependencies
         run: npm ci
