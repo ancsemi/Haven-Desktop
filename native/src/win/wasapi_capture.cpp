@@ -238,8 +238,10 @@ private:
 static std::string WideToUtf8(const wchar_t* wide) {
     if (!wide || !*wide) return "";
     int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
-    std::string s(len - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide, -1, &s[0], len, nullptr, nullptr);
+    if (len <= 1) return "";
+    std::string s(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide, -1, s.data(), len, nullptr, nullptr);
+    s.resize(len - 1);
     return s;
 }
 
@@ -261,6 +263,27 @@ static std::string ProcessNameFromPid(DWORD pid) {
     }
     CloseHandle(h);
     return "Unknown";
+}
+
+static std::string ProcessIdentityFromHandle(HANDLE process) {
+    if (!process) return "";
+    FILETIME created = {}, exited = {}, kernel = {}, user = {};
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return "";
+    std::vector<wchar_t> path(32768);
+    DWORD size = static_cast<DWORD>(path.size());
+    if (!QueryFullProcessImageNameW(process, 0, path.data(), &size)) return "";
+    ULARGE_INTEGER createdValue = {};
+    createdValue.LowPart = created.dwLowDateTime;
+    createdValue.HighPart = created.dwHighDateTime;
+    return WideToUtf8(path.data()) + ":" + std::to_string(createdValue.QuadPart);
+}
+
+static std::string ProcessIdentityFromPid(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return "";
+    const std::string identity = ProcessIdentityFromHandle(process);
+    CloseHandle(process);
+    return identity;
 }
 
 static std::unordered_map<DWORD, DWORD> SnapshotProcessParents() {
@@ -507,10 +530,11 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
             AudioApp app;
             app.pid    = pid;
             app.name   = ProcessNameFromPid(pid);
+            app.identity = ProcessIdentityFromPid(pid);
             app.active = (state == AudioSessionStateActive);
             // Skip sessions for processes we can't even name — usually short-lived
             // helpers that already exited.
-            if (app.name == "Unknown") {
+            if (app.name == "Unknown" || app.identity.empty()) {
                 ctrl2->Release(); ctrl->Release(); continue;
             }
             result.push_back(app);
@@ -563,7 +587,8 @@ void WasapiCapture::emitStatus(CaptureStatusKind kind, const std::string& msg, i
 // gets an accurate true/false return based on actual init success.
 // The background thread only runs the read loop after init succeeds.
 bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
-                                 AudioDataCb dataCb, CaptureStatusCb statusCb) {
+                                  const std::string& expectedIdentity,
+                                  AudioDataCb dataCb, CaptureStatusCb statusCb) {
     StopCapture();
 
     {
@@ -580,17 +605,24 @@ bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
         m_startHr = E_PENDING;
     }
 
-    // Pre-flight: verify PID is valid and accessible.
-    {
-        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!h) {
-            DWORD err = GetLastError();
-            emitStatus(CaptureStatusKind::Failed,
-                "OpenProcess failed for target PID — process may have exited or be protected",
-                err);
-            return false;
-        }
-        CloseHandle(h);
+    // Keep the process object alive until activation completes. Windows cannot
+    // recycle its PID while this handle is open, closing the picker-to-start race.
+    HANDLE targetProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!targetProcess) {
+        DWORD err = GetLastError();
+        emitStatus(CaptureStatusKind::Failed,
+            "OpenProcess failed for target PID — process may have exited or be protected",
+            err);
+        return false;
+    }
+    const std::string targetIdentity = ProcessIdentityFromHandle(targetProcess);
+    if (mode == CaptureMode::IncludeProcess &&
+        (targetIdentity.empty() ||
+         (!expectedIdentity.empty() && targetIdentity != expectedIdentity))) {
+        CloseHandle(targetProcess);
+        emitStatus(CaptureStatusKind::Failed,
+            "Selected audio process changed before capture started");
+        return false;
     }
 
     emitStatus(CaptureStatusKind::Starting,
@@ -620,9 +652,11 @@ bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
                 "WASAPI activation timed out (>12s)", timeoutHr);
         }
         if (m_thread.joinable()) m_thread.join();
+        CloseHandle(targetProcess);
         return false;
     }
 
+    CloseHandle(targetProcess);
     return true;
 }
 

@@ -10,6 +10,7 @@ const {
 const path  = require('path');
 const fs    = require('fs');
 const os    = require('os');
+const { pathToFileURL } = require('url');
 const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
@@ -25,6 +26,7 @@ const {
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { getPhysicalDisplayBounds, resolveRefreshedSource } = require('./screen-source');
 const { NativeScreenManager, isWaylandSession } = require('./native-screen');
+const { isTrustedMainFrame } = require('./ipc-security');
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
@@ -258,6 +260,7 @@ const audioCaptureController = createAudioCaptureController(() => {
   try { audioCapture?.stopCapture(); } catch {}
 });
 let screenShareRequestInProgress = false;
+let cancelActiveScreenPicker = null;
 let hardwareVideoEncodingAvailable = false;
 let hardwareVideoEncodingStatus = 'unavailable';
 app.on('gpu-info-update', () => {
@@ -440,6 +443,7 @@ app.whenReady().then(async () => {
       audioCaptureController.start(captureId, selection.owner);
       const started = audioCapture.startCapture(selection.pid, {
         mode: selection.mode,
+        identity: selection.identity,
         onData,
         onStatus: status => {
           if (selection.mode === 'exclude' && process.platform === 'linux') {
@@ -1940,6 +1944,16 @@ function getServerUrlForContents(contents) {
   return null;
 }
 
+function getTrustedServerUrlForFrame(contents, frame, { active = false } = {}) {
+  for (const [url, view] of serverViews) {
+    if (view.webContents !== contents) continue;
+    if (!isTrustedMainFrame(contents, frame, url)) return null;
+    if (active && url !== activeServerUrl) return null;
+    return url;
+  }
+  return null;
+}
+
 function isLanguageSenderAllowed(contents) {
   if (welcomeWindow?.webContents === contents) return true;
   const serverUrl = getServerUrlForContents(contents);
@@ -2283,16 +2297,16 @@ function rebuildTrayMenu() {
 // ═══════════════════════════════════════════════════════════
 //
 // When the Haven web app calls navigator.mediaDevices.getDisplayMedia(),
-// Electron's handler fires.  We send the available sources + audio apps
-// to the renderer, show a custom picker, and start native per-app audio
-// capture for the selected application.
+// Electron's handler fires. A sandboxed local window shows the available
+// sources and audio apps, then native per-app audio starts for the selection.
 // ───────────────────────────────────────────────────────────
 
 function getScreenAudioPickerData() {
   let audioApps = [];
   try {
     audioApps = audioCapture.getAudioApplications().filter(candidate =>
-      Number.isSafeInteger(candidate?.pid) && candidate.pid > 0 && candidate.pid !== process.pid
+      Number.isSafeInteger(candidate?.pid) && candidate.pid > 0 && candidate.pid !== process.pid &&
+      typeof candidate.identity === 'string' && candidate.identity.length > 0
     );
   } catch (err) {
     console.warn('[ScreenShare] audio app enumeration failed:', err.message);
@@ -2309,44 +2323,164 @@ function getScreenAudioPickerData() {
   };
 }
 
+function getScreenPickerCopy() {
+  const keys = [
+    'title', 'subtitle', 'nativeSubtitle', 'portalSubtitle', 'screens', 'windows',
+    'audio', 'noAudio', 'systemAudio', 'applicationAudio', 'noApplications',
+    'systemUnavailable', 'applicationUnavailable', 'videoEncoder', 'hardwareH264',
+    'automaticEncoder', 'unavailable', 'hardwareEncodingAvailable',
+    'nativeEncodingAvailable', 'hardwareEncodingUnavailable', 'h265Available',
+    'h265Unavailable', 'silent', 'silentDescription', 'noPreview', 'cancel',
+    'share', 'continue',
+  ];
+  return Object.fromEntries(keys.map(key => [key, t(`screenPicker.${key}`)]));
+}
+
 function requestScreenPicker(targetContents, pickerData, { requestFrame = null, signal = null } = {}) {
+  cancelActiveScreenPicker?.();
+
   return new Promise(resolve => {
     let settled = false;
     let timeoutId;
     const requestId = pickerData.requestId;
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    const pickerFile = path.join(__dirname, '..', 'renderer', 'screen-picker.html');
+    const pickerUrl = pathToFileURL(pickerFile).href;
+    const pickerWindow = new BrowserWindow({
+      width: 960,
+      height: 760,
+      minWidth: 680,
+      minHeight: 560,
+      show: false,
+      autoHideMenuBar: true,
+      backgroundColor: '#090b12',
+      title: t('screenPicker.title'),
+      icon: ICON_PATH,
+      ...(parent ? { parent, modal: true } : {}),
+      webPreferences: {
+        preload: path.join(__dirname, 'screen-picker-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        devTools: IS_DEV,
+      },
+    });
+    const pickerContents = pickerWindow.webContents;
+
     const finish = value => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
+      if (cancelActiveScreenPicker === ownerGone) cancelActiveScreenPicker = null;
       signal?.removeEventListener('abort', ownerGone);
-      ipcMain.removeListener('screen:picker-result', handler);
+      ipcMain.removeListener('screen-picker:result', handler);
       targetContents.removeListener('destroyed', ownerGone);
       targetContents.removeListener('render-process-gone', ownerGone);
+      targetContents.removeListener('did-start-navigation', ownerNavigated);
+      pickerWindow.removeListener('closed', ownerGone);
+      if (!pickerWindow.isDestroyed()) pickerWindow.destroy();
       resolve(value);
     };
+    const ownerGone = () => finish({ cancelled: true, requestId });
+    const ownerNavigated = (_event, _url, isInPlace, isMainFrame) => {
+      if (!isInPlace && isMainFrame !== false) ownerGone();
+    };
     const handler = (event, result = {}) => {
-      if (event.sender.id !== targetContents.id || result.requestId !== requestId) return;
+      if (event.sender !== pickerContents || event.senderFrame !== pickerContents.mainFrame) return;
+      if (result?.requestId !== requestId) return;
+      if (requestFrame && (requestFrame.isDestroyed() || requestFrame !== targetContents.mainFrame)) {
+        ownerGone();
+        return;
+      }
       finish(result);
     };
-    const ownerGone = () => finish({ cancelled: true, requestId });
+
+    cancelActiveScreenPicker = ownerGone;
     timeoutId = setTimeout(ownerGone, 60000);
-    ipcMain.on('screen:picker-result', handler);
+    ipcMain.on('screen-picker:result', handler);
     targetContents.once('destroyed', ownerGone);
     targetContents.once('render-process-gone', ownerGone);
+    targetContents.on('did-start-navigation', ownerNavigated);
     signal?.addEventListener('abort', ownerGone, { once: true });
-    if (targetContents.isDestroyed() || signal?.aborted) return ownerGone();
+    pickerWindow.on('closed', ownerGone);
+    pickerContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    pickerContents.on('will-navigate', (event, url) => {
+      if (url !== pickerUrl) event.preventDefault();
+    });
+    pickerContents.once('did-finish-load', () => {
+      if (settled) return;
+      pickerContents.send('screen-picker:data', {
+        ...pickerData,
+        copy: getScreenPickerCopy(),
+        locale: currentLocale,
+        direction: getLocaleMetadata(currentLocale).direction,
+      });
+    });
+    pickerWindow.once('ready-to-show', () => {
+      if (!settled) pickerWindow.show();
+    });
 
-    let sentToFrame = false;
-    if (requestFrame && !requestFrame.isDestroyed()) {
-      try {
-        requestFrame.send('screen:show-picker', pickerData);
-        sentToFrame = true;
-      } catch (err) {
-        console.warn(`[ScreenShare] request.frame send failed: ${err.message}`);
-      }
+    if (targetContents.isDestroyed() || requestFrame?.isDestroyed() || signal?.aborted) {
+      ownerGone();
+      return;
     }
-    if (!sentToFrame || requestFrame?.host?.id !== targetContents.id) {
-      safeSend(targetContents, 'screen:show-picker', pickerData);
+    pickerWindow.loadFile(pickerFile).catch(err => {
+      console.warn(`[ScreenShare] trusted picker failed to load: ${err.message}`);
+      ownerGone();
+    });
+  });
+}
+
+function prepareStandardScreenShare(targetContents, requestFrame, data) {
+  return new Promise(resolve => {
+    let settled = false;
+    let timeoutId;
+    const finish = (value, cancelRenderer = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      ipcMain.removeListener('screen:prepare-share-result', handler);
+      targetContents.removeListener('destroyed', ownerGone);
+      targetContents.removeListener('render-process-gone', ownerGone);
+      targetContents.removeListener('did-start-navigation', ownerNavigated);
+      if (cancelRenderer) {
+        try {
+          if (!requestFrame?.isDestroyed()) {
+            requestFrame.send('screen:prepare-share-cancel', { requestId: data.requestId });
+          }
+        } catch {}
+      }
+      resolve(value);
+    };
+    const ownerGone = () => finish({ cancelled: true, audioReady: false }, true);
+    const ownerNavigated = (_event, _url, isInPlace, isMainFrame) => {
+      if (!isInPlace && isMainFrame !== false) ownerGone();
+    };
+    const handler = (event, result = {}) => {
+      if (event.sender !== targetContents || event.senderFrame !== requestFrame) return;
+      if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame, { active: true })) {
+        ownerGone();
+        return;
+      }
+      if (result?.requestId !== data.requestId) return;
+      finish({ cancelled: false, audioReady: result.audioReady === true });
+    };
+
+    timeoutId = setTimeout(ownerGone, 12000);
+    ipcMain.on('screen:prepare-share-result', handler);
+    targetContents.once('destroyed', ownerGone);
+    targetContents.once('render-process-gone', ownerGone);
+    targetContents.on('did-start-navigation', ownerNavigated);
+    if (targetContents.isDestroyed() || requestFrame?.isDestroyed() ||
+        requestFrame !== targetContents.mainFrame) {
+      ownerGone();
+      return;
+    }
+    try {
+      requestFrame.send('screen:prepare-share', data);
+    } catch (err) {
+      console.warn(`[ScreenShare] renderer preparation failed: ${err.message}`);
+      ownerGone();
     }
   });
 }
@@ -2433,7 +2567,11 @@ async function selectNativeScreenSource(targetContents, capabilities = {}, signa
   const selectedAudio = resolveAudioSelection(result.audioAppPid, audioApps, audioCapabilities);
   let audio = null;
   if (selectedAudio.app) {
-    audio = { mode: 'include', pid: selectedAudio.app.pid };
+    audio = {
+      mode: 'include',
+      pid: selectedAudio.app.pid,
+      identity: selectedAudio.app.identity,
+    };
   } else if (selectedAudio.type === 'system') {
     audio = { mode: 'exclude', pid: process.pid };
   }
@@ -2556,6 +2694,14 @@ function registerScreenShareHandler() {
       callback(payload);
     };
 
+    const requestFrame = request?.frame;
+    const targetContents = requestFrame?.host;
+    if (!getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+      console.warn('[ScreenShare] rejected display capture from an untrusted frame');
+      safeCallback({});
+      return;
+    }
+
     if (screenShareRequestInProgress) {
       safeCallback({});
       return;
@@ -2629,7 +2775,8 @@ function registerScreenShareHandler() {
       let audioApps = [];
       try {
         audioApps = audioCapture.getAudioApplications().filter(app =>
-          Number.isSafeInteger(app?.pid) && app.pid > 0 && app.pid !== process.pid
+          Number.isSafeInteger(app?.pid) && app.pid > 0 && app.pid !== process.pid &&
+          typeof app.identity === 'string' && app.identity.length > 0
         );
       }
       catch (err) { console.warn('[ScreenShare] audio app enumeration failed:', err.message); }
@@ -2652,15 +2799,6 @@ function registerScreenShareHandler() {
       }));
       console.log(`[ScreenShare] source enumeration complete: ${sourceData.length} source(s)`);
 
-      const requestFrame = request?.frame;
-      const targetContents = requestFrame?.host || getActiveContents();
-      if (!targetContents) { safeCallback({}); return; }
-      if (targetContents !== getActiveContents()) {
-        console.warn('[ScreenShare] rejected display capture outside the active Haven view');
-        safeCallback({});
-        return;
-      }
-
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const videoEncoder = {
         preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
@@ -2679,9 +2817,9 @@ function registerScreenShareHandler() {
 
       const result = await requestScreenPicker(targetContents, pickerData, { requestFrame });
 
-      if (result.cancelled) { safeCallback({}); return; }
-      if (targetContents.isDestroyed() || targetContents !== getActiveContents()) {
-        console.warn('[ScreenShare] active Haven view changed while the picker was open');
+      if (!result || result.cancelled) { safeCallback({}); return; }
+      if (!getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+        console.warn('[ScreenShare] requesting frame changed while the picker was open');
         safeCallback({});
         return;
       }
@@ -2697,8 +2835,8 @@ function registerScreenShareHandler() {
       const selected = wayland || result.sourceId === ownSourceId
         ? sources.find(source => source.id === result.sourceId) || null
         : await resolveSelectedSource(sources, result.sourceId);
-      if (targetContents.isDestroyed() || targetContents !== getActiveContents()) {
-        console.warn('[ScreenShare] active Haven view changed before capture attachment');
+      if (!getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+        console.warn('[ScreenShare] requesting frame changed before capture attachment');
         safeCallback({});
         return;
       }
@@ -2714,17 +2852,36 @@ function registerScreenShareHandler() {
 
       // Only PIDs included in this picker's enumeration may be captured.
       // Unknown, stale, or forged values resolve to no audio.
-      const audioSelection = resolveAudioSelection(
+      let audioSelection = resolveAudioSelection(
         result.audioAppPid,
         audioApps,
         audioCapabilities
       );
-      const selectedAudioApp = audioSelection.app;
+      let selectedAudioApp = audioSelection.app;
       if (typeof result.audioAppPid === 'number' && !selectedAudioApp) {
         console.warn(`[ScreenShare] rejected unlisted audio PID ${result.audioAppPid}`);
       }
 
-      const startNative = (mode, pid, detail = null, detailKey = null, detailValues = null) => {
+      const preparedAudioPid = selectedAudioApp?.pid ||
+        (audioSelection.type === 'system' ? 'system' : 'none');
+      const preparation = await prepareStandardScreenShare(targetContents, requestFrame, {
+        requestId,
+        audioAppPid: preparedAudioPid,
+      });
+      if (preparation.cancelled ||
+          !getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+        safeCallback({});
+        return;
+      }
+      if (preparedAudioPid !== 'none' && !preparation.audioReady) {
+        console.warn('[ScreenShare] renderer audio pipeline was unavailable; continuing without audio');
+        audioSelection = { type: 'none', app: null };
+        selectedAudioApp = null;
+      }
+
+      const startNative = (
+        mode, pid, identity = '', detail = null, detailKey = null, detailValues = null
+      ) => {
         const reasonRef = { status: null };
         let ok = false;
         if (audioCaptureController.hasActive()) {
@@ -2732,73 +2889,74 @@ function registerScreenShareHandler() {
             message: t('audio.error.captureBusy'),
             messageKey: 'audio.error.captureBusy',
           };
-          return { ok: false, reason: reasonRef.status.message, status: reasonRef.status };
-        }
-        audioCaptureController.start(requestId, targetContents);
-        try {
-          console.log(`[ScreenShare] starting native capture: mode=${mode} pid=${pid}`);
-          ok = audioCapture.startCapture(pid, {
-            mode,
-            onData: (pcmData, capturedAt) => {
-              try {
-                if (!pcmData || !pcmData.buffer) return;
-                const ab = pcmData.buffer.slice(
-                  pcmData.byteOffset,
-                  pcmData.byteOffset + pcmData.byteLength
-                );
-                if (!audioCaptureController.isActive(requestId)) return;
-                safeSend(targetContents, 'audio:capture-data', {
-                  captureId: requestId,
-                  capturedAt,
-                  data: ab,
-                });
-              } catch (cbErr) {
-                console.warn('[ScreenShare] audio callback error:', cbErr.message);
-              }
-            },
-            onStatus: (s) => {
-              if (!audioCaptureController.isActive(requestId)) return;
-              safeSend(targetContents, 'audio:capture-status', { ...s, captureId: requestId });
-              const isSystemMode = mode === 'exclude' || mode === 'system';
-              if (s.kind === 'started') {
-                if (mode === 'exclude' && process.platform === 'linux') {
-                  pipeWireStreamRouter?.start(`HavenCombined_${process.pid}`, process.pid);
+        } else {
+          audioCaptureController.start(requestId, targetContents);
+          try {
+            console.log(`[ScreenShare] starting native capture: mode=${mode} pid=${pid}`);
+            ok = audioCapture.startCapture(pid, {
+              mode,
+              identity,
+              onData: (pcmData, capturedAt) => {
+                try {
+                  if (!pcmData || !pcmData.buffer) return;
+                  const ab = pcmData.buffer.slice(
+                    pcmData.byteOffset,
+                    pcmData.byteOffset + pcmData.byteLength
+                  );
+                  if (!audioCaptureController.isActive(requestId)) return;
+                  safeSend(targetContents, 'audio:capture-data', {
+                    captureId: requestId,
+                    capturedAt,
+                    data: ab,
+                  });
+                } catch (cbErr) {
+                  console.warn('[ScreenShare] audio callback error:', cbErr.message);
                 }
-                safeSend(targetContents, 'audio:share-mode', {
-                  captureId: requestId,
-                  requested: isSystemMode ? 'system' : 'app',
-                  applied: isSystemMode ? 'system-clean' : 'app',
-                  detail,
-                  detailKey,
-                  detailValues,
-                });
-              } else if (s.kind === 'failed') {
-                pipeWireStreamRouter?.stop();
-                reasonRef.status = s;
-                audioCaptureController.clear(requestId);
-                safeSend(targetContents, 'audio:share-mode', {
-                  captureId: requestId,
-                  requested: isSystemMode ? 'system' : 'app',
-                  applied: 'none',
-                  detail: s.message || null,
-                  detailKey: s.messageKey || null,
-                  detailValues: s.messageValues || null,
-                });
-                setImmediate(() => {
-                  if (!audioCaptureController.hasActive()) {
-                    try { audioCapture.stopCapture(); } catch {}
+              },
+              onStatus: (s) => {
+                if (!audioCaptureController.isActive(requestId)) return;
+                safeSend(targetContents, 'audio:capture-status', { ...s, captureId: requestId });
+                const isSystemMode = mode === 'exclude' || mode === 'system';
+                if (s.kind === 'started') {
+                  if (mode === 'exclude' && process.platform === 'linux') {
+                    pipeWireStreamRouter?.start(`HavenCombined_${process.pid}`, process.pid);
                   }
-                });
-              }
-            },
-          });
-        } catch (err) {
-          console.error(`[ScreenShare] native capture (${mode}) threw:`, err.message);
-          reasonRef.status = {
-            message: err.message,
-            messageKey: err.messageKey,
-            messageValues: err.messageValues,
-          };
+                  safeSend(targetContents, 'audio:share-mode', {
+                    captureId: requestId,
+                    requested: isSystemMode ? 'system' : 'app',
+                    applied: isSystemMode ? 'system-clean' : 'app',
+                    detail,
+                    detailKey,
+                    detailValues,
+                  });
+                } else if (s.kind === 'failed') {
+                  pipeWireStreamRouter?.stop();
+                  reasonRef.status = s;
+                  audioCaptureController.clear(requestId);
+                  safeSend(targetContents, 'audio:share-mode', {
+                    captureId: requestId,
+                    requested: isSystemMode ? 'system' : 'app',
+                    applied: 'none',
+                    detail: s.message || null,
+                    detailKey: s.messageKey || null,
+                    detailValues: s.messageValues || null,
+                  });
+                  setImmediate(() => {
+                    if (!audioCaptureController.hasActive()) {
+                      try { audioCapture.stopCapture(); } catch {}
+                    }
+                  });
+                }
+              },
+            });
+          } catch (err) {
+            console.error(`[ScreenShare] native capture (${mode}) threw:`, err.message);
+            reasonRef.status = {
+              message: err.message,
+              messageKey: err.messageKey,
+              messageValues: err.messageValues,
+            };
+          }
         }
         if (!ok) {
           const reasonKey = reasonRef.status?.messageKey
@@ -2845,8 +3003,6 @@ function registerScreenShareHandler() {
         appliedDetailReason = capture.status?.messageKey ? null : capture.reason || null;
       };
 
-      audioCaptureController.stop();
-
       if (selectedAudioApp) {
         requestedMode = 'app';
         const appName = selectedAudioApp.name || t('audio.process', { pid: selectedAudioApp.pid });
@@ -2854,7 +3010,8 @@ function registerScreenShareHandler() {
           || (!selectedAudioApp.name ? 'audio.process' : null);
         const appNameValues = !selectedAudioApp.name ? { pid: selectedAudioApp.pid } : null;
         const capture = startNative(
-          'include', selectedAudioApp.pid, appName, appNameKey, appNameValues
+          'include', selectedAudioApp.pid, selectedAudioApp.identity,
+          appName, appNameKey, appNameValues
         );
         if (capture.ok) {
           useNativeAudio = true;
@@ -2869,7 +3026,7 @@ function registerScreenShareHandler() {
         }
       } else if (audioSelection.type === 'system') {
         requestedMode = 'system';
-        const capture = startNative('exclude', process.pid);
+        const capture = startNative('exclude', process.pid, '');
         if (capture.ok) {
           useNativeAudio = true;
           appliedMode = 'system-clean';
@@ -3007,28 +3164,44 @@ function registerIPC() {
   }));
 
   // ── Native Screen Share ───────────────────────────────
-  const isServerView = sender => Array.from(serverViews.values())
-    .some(view => view.webContents === sender);
   ipcMain.handle('native-screen:get-capabilities', event => {
-    if (!isServerView(event.sender)) return { supported: false, reason: 'untrusted-view' };
+    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
+      return { supported: false, reason: 'untrusted-frame' };
+    }
     return nativeScreen.getCapabilities();
   });
   ipcMain.handle('native-screen:start', (event, options) => {
-    if (!isServerView(event.sender)) return { started: false, reason: 'untrusted-view' };
-    if (event.sender !== getActiveContents()) {
-      return { started: false, reason: 'inactive-view' };
+    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame, { active: true })) {
+      return { started: false, reason: 'untrusted-frame' };
     }
     return nativeScreen.start(event.sender, options);
   });
   ipcMain.handle('native-screen:stop', (event, data) => {
+    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) return false;
     return nativeScreen.stop(event.sender, false, data?.sessionId || null);
   });
-  ipcMain.handle('native-screen:add-peer', (event, data) => nativeScreen.addPeer(event.sender, data));
-  ipcMain.handle('native-screen:remove-peer', (event, data) => nativeScreen.removePeer(event.sender, data));
+  ipcMain.handle('native-screen:add-peer', (event, data) => {
+    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
+      throw new Error('Untrusted native screen frame');
+    }
+    return nativeScreen.addPeer(event.sender, data);
+  });
+  ipcMain.handle('native-screen:remove-peer', (event, data) => {
+    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
+      throw new Error('Untrusted native screen frame');
+    }
+    return nativeScreen.removePeer(event.sender, data);
+  });
   ipcMain.handle('native-screen:set-remote-description', (event, data) => {
+    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
+      throw new Error('Untrusted native screen frame');
+    }
     return nativeScreen.setRemoteDescription(event.sender, data);
   });
   ipcMain.handle('native-screen:add-ice-candidate', (event, data) => {
+    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
+      throw new Error('Untrusted native screen frame');
+    }
     return nativeScreen.addIceCandidate(event.sender, data);
   });
 

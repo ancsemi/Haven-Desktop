@@ -33,9 +33,14 @@
 
 namespace {
 
-constexpr int kProtocolVersion = 3;
+constexpr int kProtocolVersion = 5;
 constexpr size_t kMaxActivePeers = 32;
 constexpr guint64 kMaxPeerGenerations = 256;
+constexpr size_t kMaxProtocolLineSize = 128 * 1024;
+constexpr size_t kMaxPendingCommands = 256;
+constexpr size_t kMaxSdpSize = 49152;
+constexpr size_t kMaxIceCandidateSize = 2048;
+constexpr size_t kMaxIceMetadataSize = 256;
 
 struct App;
 
@@ -51,6 +56,7 @@ struct Peer {
   GstPad* audioTeePad = nullptr;
   guint64 generation = 0;
   std::atomic<bool> active{true};
+  std::atomic<bool> iceGatheringComplete{false};
 };
 
 struct TurnServer {
@@ -97,6 +103,8 @@ struct App {
   bool starting = false;
   bool cancelStartup = false;
   std::atomic<bool> terminalQueued{false};
+  std::atomic<size_t> pendingCommands{0};
+  std::atomic<bool> protocolFailureQueued{false};
   guint64 nextPeerGeneration = 1;
 #ifndef G_OS_WIN32
   GDBusConnection* portalBus = nullptr;
@@ -286,6 +294,7 @@ std::vector<std::string> split(const std::string& value, char delimiter) {
 
 std::vector<std::string> decode_command_fields(const std::string& line) {
   auto fields = split(line, '\t');
+  if (fields.size() > 32) return {};
   for (size_t i = 1; i < fields.size(); ++i) fields[i] = base64_decode(fields[i]);
   return fields;
 }
@@ -293,16 +302,32 @@ std::vector<std::string> decode_command_fields(const std::string& line) {
 void emit_event(App* app, const std::string& event,
                 const std::vector<std::string>& fields) {
   std::lock_guard<std::mutex> lock(app->outputMutex);
-  std::cout << event;
-  for (const auto& field : fields) std::cout << '\t' << base64_encode(field);
-  std::cout << std::endl;
+  std::ostringstream output;
+  output << event;
+  for (const auto& field : fields) output << '\t' << base64_encode(field);
+  output << '\n';
+  const std::string line = output.str();
+  if (line.size() > kMaxProtocolLineSize) {
+    std::cerr << "[NativeScreen] dropped oversized protocol event " << event << std::endl;
+    return;
+  }
+  std::cout << line << std::flush;
 }
 
 void emit_error(App* app, const std::string& peerId,
-                const std::string& message, bool fatal) {
+                 const std::string& message, bool fatal) {
   if (app->sessionId.empty()) return;
   emit_event(app, "ERROR", {
-      app->sessionId, peerId, message, fatal ? "1" : "0",
+      app->sessionId, peerId, message.substr(0, 4096), fatal ? "1" : "0",
+  });
+}
+
+void emit_command_result(App* app, const std::string& requestId,
+                         const std::string& command, bool success,
+                         const std::string& message = "") {
+  emit_event(app, "COMMAND_RESULT", {
+      app->sessionId, requestId, command, success ? "1" : "0",
+      message.substr(0, 4096),
   });
 }
 
@@ -367,6 +392,10 @@ std::vector<TurnServer> parse_turn_servers(const std::string& encoded) {
     TurnServer server{
         base64_decode(fields[0]), base64_decode(fields[1]), base64_decode(fields[2]),
     };
+    if (server.url.size() > 2048 || server.username.size() > 256 ||
+        server.credential.size() > 1024) {
+      continue;
+    }
     if (!server.url.empty()) servers.push_back(std::move(server));
     if (servers.size() >= 16) break;
   }
@@ -812,8 +841,8 @@ bool build_pipeline_description(App* app, CaptureConfig config,
              << " ! queue max-size-time=100000000 leaky=downstream"
              << " ! audioconvert ! audioresample ! opusenc bitrate=128000"
              << " ! rtpopuspay pt=97"
-             << " ! application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000,encoding-params=1"
-             << " ! tee name=audiortptee audiortptee. ! queue ! fakesink sync=false";
+             << " ! application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000"
+             << " ! tee name=audiortptee audiortptee. ! queue ! fakesink sync=false async=false";
   }
   *description = pipeline.str();
   return true;
@@ -897,9 +926,13 @@ gboolean dispatch_offer(gpointer userData) {
     gst_promise_unref(localPromise);
 
     gchar* sdp = gst_sdp_message_as_text(pending->offer->sdp);
-    if (sdp) emit_event(pending->app, "OFFER", {
-        pending->app->sessionId, pending->peerId, sdp,
-    });
+    if (sdp && std::char_traits<char>::length(sdp) <= kMaxSdpSize) {
+      emit_event(pending->app, "OFFER", {
+          pending->app->sessionId, pending->peerId, sdp,
+      });
+    } else if (sdp) {
+      emit_error(pending->app, pending->peerId, "Generated WebRTC offer is too large", false);
+    }
     g_free(sdp);
   }
   gst_webrtc_session_description_free(pending->offer);
@@ -971,12 +1004,32 @@ gboolean dispatch_ice(gpointer userData) {
 }
 
 void on_ice_candidate(GstElement*, guint mlineIndex, gchar* candidate,
-                       gpointer userData) {
+                        gpointer userData) {
   Peer* peer = static_cast<Peer*>(userData);
-  if (!peer->active.load()) return;
+  if (!peer->active.load() || !candidate) return;
+  if (candidate && std::char_traits<char>::length(candidate) > kMaxIceCandidateSize) {
+    emit_error(peer->app, peer->id, "Generated ICE candidate is too large", false);
+    return;
+  }
   auto* pending = new PendingIce{
       peer->app, peer->id, peer->generation, mlineIndex,
-      candidate ? candidate : "", !candidate,
+      candidate, false,
+  };
+  g_main_context_invoke(nullptr, dispatch_ice, pending);
+}
+
+void on_ice_gathering_state_changed(GObject* object, GParamSpec*, gpointer userData) {
+  Peer* peer = static_cast<Peer*>(userData);
+  if (!peer->active.load()) return;
+  GstWebRTCICEGatheringState state = GST_WEBRTC_ICE_GATHERING_STATE_NEW;
+  g_object_get(object, "ice-gathering-state", &state, nullptr);
+  if (state != GST_WEBRTC_ICE_GATHERING_STATE_COMPLETE) {
+    peer->iceGatheringComplete = false;
+    return;
+  }
+  if (peer->iceGatheringComplete.exchange(true)) return;
+  auto* pending = new PendingIce{
+      peer->app, peer->id, peer->generation, 0, "", true,
   };
   g_main_context_invoke(nullptr, dispatch_ice, pending);
 }
@@ -1021,7 +1074,7 @@ bool add_peer(App* app, const std::string& peerId, std::string* error) {
   auto peer = std::make_unique<Peer>();
   peer->app = app;
   peer->id = peerId;
-  peer->generation = app->nextPeerGeneration++;
+  peer->generation = app->nextPeerGeneration;
   peer->videoQueue = gst_element_factory_make("queue", nullptr);
   peer->videoCapsFilter = gst_element_factory_make("capsfilter", nullptr);
   if (app->config.hasAudio) {
@@ -1059,7 +1112,7 @@ bool add_peer(App* app, const std::string& peerId, std::string* error) {
                  "leaky", 2,
                  nullptr);
     GstCaps* audioCaps = gst_caps_from_string(
-        "application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000,encoding-params=1");
+        "application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000");
     g_object_set(peer->audioCapsFilter, "caps", audioCaps, nullptr);
     gst_caps_unref(audioCaps);
   }
@@ -1067,7 +1120,9 @@ bool add_peer(App* app, const std::string& peerId, std::string* error) {
   g_signal_connect(peer->webrtc, "on-negotiation-needed",
                    G_CALLBACK(on_negotiation_needed), peer.get());
   g_signal_connect(peer->webrtc, "on-ice-candidate",
-                   G_CALLBACK(on_ice_candidate), peer.get());
+                    G_CALLBACK(on_ice_candidate), peer.get());
+  g_signal_connect(peer->webrtc, "notify::ice-gathering-state",
+                    G_CALLBACK(on_ice_gathering_state_changed), peer.get());
 
   gst_bin_add_many(GST_BIN(app->pipeline), peer->videoQueue, peer->videoCapsFilter,
                    peer->webrtc, nullptr);
@@ -1167,6 +1222,7 @@ bool add_peer(App* app, const std::string& peerId, std::string* error) {
   }
 
   app->peers.emplace(peerId, std::move(peer));
+  app->nextPeerGeneration++;
   return true;
 }
 
@@ -1371,7 +1427,7 @@ bool start_pipeline_with_encoder(App* app, const CaptureConfig& config,
   }
   if (state == GST_STATE_CHANGE_ASYNC) {
     const GstStateChangeReturn settled = gst_element_get_state(
-        app->pipeline, nullptr, nullptr, 3 * GST_SECOND);
+        app->pipeline, nullptr, nullptr, 10 * GST_SECOND);
     if (settled != GST_STATE_CHANGE_SUCCESS &&
         settled != GST_STATE_CHANGE_NO_PREROLL) {
       *error = "GStreamer capture pipeline did not reach PLAYING";
@@ -1469,10 +1525,67 @@ bool start_pipeline(App* app, const CaptureConfig& config, std::string* error) {
   return false;
 }
 
+struct RemoteDescriptionRequest {
+  App* app;
+  std::string peerId;
+  std::string requestId;
+  guint64 generation;
+  bool success = true;
+  std::string message;
+};
+
+gboolean dispatch_remote_description_result(gpointer userData) {
+  auto* request = static_cast<RemoteDescriptionRequest*>(userData);
+  const auto found = request->app->peers.find(request->peerId);
+  if (found == request->app->peers.end() ||
+      found->second->generation != request->generation ||
+      !found->second->active.load()) {
+    request->success = false;
+    request->message = "Native screen peer changed before the answer was applied";
+  }
+
+  emit_command_result(request->app, request->requestId,
+                      "REMOTE_DESCRIPTION", request->success, request->message);
+  return G_SOURCE_REMOVE;
+}
+
+void destroy_remote_description_request(gpointer userData) {
+  delete static_cast<RemoteDescriptionRequest*>(userData);
+}
+
+void on_remote_description_set(GstPromise* promise, gpointer userData) {
+  auto* request = static_cast<RemoteDescriptionRequest*>(userData);
+
+  const GstStructure* reply = gst_promise_get_reply(promise);
+  const GValue* errorValue = reply ? gst_structure_get_value(reply, "error") : nullptr;
+  if (errorValue && G_VALUE_HOLDS(errorValue, G_TYPE_ERROR)) {
+    const GError* error = static_cast<const GError*>(g_value_get_boxed(errorValue));
+    request->success = false;
+    request->message = error && error->message
+        ? error->message
+        : "GStreamer rejected the WebRTC answer";
+  }
+  gst_promise_unref(promise);
+  g_main_context_invoke_full(nullptr, G_PRIORITY_DEFAULT,
+                             dispatch_remote_description_result, request,
+                             destroy_remote_description_request);
+}
+
 void apply_remote_description(App* app, const std::vector<std::string>& fields) {
-  if (fields.size() != 5 || fields[1] != app->sessionId || fields[3] != "answer") return;
+  if (fields.size() != 6 || fields[1] != app->sessionId || fields[3] != "answer") return;
+  const std::string& requestId = fields[5];
+  if (!valid_session_id(requestId)) return;
   auto found = app->peers.find(fields[2]);
-  if (found == app->peers.end() || !found->second->webrtc) return;
+  if (found == app->peers.end() || !found->second->webrtc) {
+    emit_command_result(app, requestId, "REMOTE_DESCRIPTION", false,
+                        "Native screen peer is unavailable");
+    return;
+  }
+  if (fields[4].size() > kMaxSdpSize) {
+    emit_command_result(app, requestId, "REMOTE_DESCRIPTION", false,
+                        "WebRTC answer exceeds the protocol limit");
+    return;
+  }
 
   GstSDPMessage* sdp = nullptr;
   if (gst_sdp_message_new(&sdp) != GST_SDP_OK ||
@@ -1480,27 +1593,99 @@ void apply_remote_description(App* app, const std::vector<std::string>& fields) 
           reinterpret_cast<const guint8*>(fields[4].data()), fields[4].size(), sdp) != GST_SDP_OK) {
     if (sdp) gst_sdp_message_free(sdp);
     emit_error(app, fields[2], "Could not parse WebRTC answer", false);
+    emit_command_result(app, requestId, "REMOTE_DESCRIPTION", false,
+                        "Could not parse WebRTC answer");
     return;
   }
   GstWebRTCSessionDescription* answer = gst_webrtc_session_description_new(
       GST_WEBRTC_SDP_TYPE_ANSWER, sdp);
-  GstPromise* promise = gst_promise_new();
+  auto* request = new RemoteDescriptionRequest{
+      app, fields[2], requestId, found->second->generation, true, "",
+  };
+  GstPromise* promise = gst_promise_new_with_change_func(
+      on_remote_description_set, request, nullptr);
   g_signal_emit_by_name(found->second->webrtc, "set-remote-description",
                         answer, promise);
-  gst_promise_interrupt(promise);
-  gst_promise_unref(promise);
   gst_webrtc_session_description_free(answer);
 }
 
 void apply_ice_candidate(App* app, const std::vector<std::string>& fields) {
-  if (fields.size() != 8 || fields[1] != app->sessionId) return;
+  if (fields.size() != 9 || fields[1] != app->sessionId) return;
+  const std::string& requestId = fields[8];
+  if (!valid_session_id(requestId)) return;
   auto found = app->peers.find(fields[2]);
-  if (found == app->peers.end() || !found->second->webrtc) return;
+  if (found == app->peers.end() || !found->second->webrtc) {
+    emit_command_result(app, requestId, "ICE", false,
+                        "Native screen peer is unavailable");
+    return;
+  }
+  const bool end = fields[7] == "1";
+  if ((!end && fields[7] != "0") || fields[3].size() > kMaxIceCandidateSize ||
+      fields[4].size() > kMaxIceMetadataSize ||
+      fields[6].size() > kMaxIceMetadataSize) {
+    emit_command_result(app, requestId, "ICE", false,
+                        "Invalid native screen ICE candidate");
+    return;
+  }
   int mlineIndex = 0;
-  if (!fields[5].empty() && !parse_int(fields[5], 0, 128, &mlineIndex)) return;
-  const gchar* candidate = fields[7] == "1" ? nullptr : fields[3].c_str();
+  if ((!end && fields[5].empty()) ||
+      (!fields[5].empty() && !parse_int(fields[5], 0, 128, &mlineIndex))) {
+    emit_command_result(app, requestId, "ICE", false,
+                        "ICE candidate is missing a valid media-line index");
+    return;
+  }
+  const gchar* candidate = end ? nullptr : fields[3].c_str();
+  const guint fullSignal = g_signal_lookup(
+      "add-ice-candidate-full", G_OBJECT_TYPE(found->second->webrtc));
+  if (fullSignal) {
+    auto* request = new RemoteDescriptionRequest{
+        app, fields[2], requestId, found->second->generation, true, "",
+    };
+    GstPromise* promise = gst_promise_new_with_change_func(
+        [](GstPromise* promise, gpointer userData) {
+          auto* request = static_cast<RemoteDescriptionRequest*>(userData);
+          const GstStructure* reply = gst_promise_get_reply(promise);
+          const GValue* errorValue = reply
+              ? gst_structure_get_value(reply, "error")
+              : nullptr;
+          if (errorValue && G_VALUE_HOLDS(errorValue, G_TYPE_ERROR)) {
+            const GError* error = static_cast<const GError*>(g_value_get_boxed(errorValue));
+            request->success = false;
+            request->message = error && error->message
+                ? error->message
+                : "GStreamer rejected the ICE candidate";
+          }
+          gst_promise_unref(promise);
+          g_main_context_invoke_full(
+              nullptr, G_PRIORITY_DEFAULT,
+              [](gpointer data) -> gboolean {
+                auto* request = static_cast<RemoteDescriptionRequest*>(data);
+                const auto found = request->app->peers.find(request->peerId);
+                if (found == request->app->peers.end() ||
+                    found->second->generation != request->generation ||
+                    !found->second->active.load()) {
+                  request->success = false;
+                  request->message = "Native screen peer changed before ICE was applied";
+                }
+                emit_command_result(request->app, request->requestId,
+                                    "ICE", request->success, request->message);
+                return G_SOURCE_REMOVE;
+              },
+              request,
+              destroy_remote_description_request);
+        },
+        request,
+        nullptr);
+    g_signal_emit_by_name(found->second->webrtc, "add-ice-candidate-full",
+                          static_cast<guint>(mlineIndex), candidate, promise);
+    return;
+  }
+
+  // GStreamer before 1.24 has no completion promise. In that compatibility
+  // mode this result means the candidate was accepted by webrtcbin's action.
   g_signal_emit_by_name(found->second->webrtc, "add-ice-candidate",
                         static_cast<guint>(mlineIndex), candidate);
+  emit_command_result(app, requestId, "ICE", true);
 }
 
 void handle_start(App* app, const std::vector<std::string>& fields) {
@@ -1517,6 +1702,11 @@ void handle_start(App* app, const std::vector<std::string>& fields) {
   CaptureConfig config;
   config.sourceKind = fields[2];
   config.sourceHandle = fields[3];
+  if (config.sourceKind.size() > 64 || config.sourceHandle.size() > 1024 ||
+      fields[12].size() > 2048 || fields[13].size() > 64 * 1024) {
+    emit_error(app, "", "Oversized START field", true);
+    return;
+  }
   if (!parse_int(fields[4], -100000, 100000, &config.x) ||
       !parse_int(fields[5], -100000, 100000, &config.y) ||
       !parse_int(fields[6], 0, 16384, &config.sourceWidth) ||
@@ -1571,10 +1761,13 @@ void handle_command(App* app, const std::string& line) {
   const std::string& command = fields[0];
   if (command == "START") {
     handle_start(app, fields);
-  } else if (command == "ADD_PEER" && fields.size() == 3 &&
-             fields[1] == app->sessionId) {
+  } else if (command == "ADD_PEER" && fields.size() == 4 &&
+              fields[1] == app->sessionId) {
+    const std::string& requestId = fields[3];
+    if (!valid_session_id(requestId)) return;
     std::string error;
-    if (!add_peer(app, fields[2], &error)) emit_error(app, fields[2], error, false);
+    const bool added = add_peer(app, fields[2], &error);
+    emit_command_result(app, requestId, "ADD_PEER", added, error);
   } else if (command == "REMOVE_PEER" && fields.size() == 3 &&
              fields[1] == app->sessionId) {
     remove_peer(app, fields[2]);
@@ -1606,7 +1799,24 @@ struct PendingCommand {
 gboolean dispatch_command(gpointer data) {
   std::unique_ptr<PendingCommand> pending(static_cast<PendingCommand*>(data));
   handle_command(pending->app, pending->line);
+  pending->app->pendingCommands.fetch_sub(1);
   return G_SOURCE_REMOVE;
+}
+
+gboolean dispatch_protocol_failure(gpointer data) {
+  App* app = static_cast<App*>(data);
+  emit_error(app, "", "Native screen protocol input limit exceeded", true);
+  if (!app->stopping.exchange(true)) {
+    stop_pipeline(app);
+    g_main_loop_quit(app->loop);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+void queue_protocol_failure(App* app) {
+  if (!app->protocolFailureQueued.exchange(true)) {
+    g_main_context_invoke(nullptr, dispatch_protocol_failure, app);
+  }
 }
 
 gboolean dispatch_eof(gpointer data) {
@@ -1621,10 +1831,40 @@ gboolean dispatch_eof(gpointer data) {
 
 void read_commands(App* app) {
   std::string line;
-  while (std::getline(std::cin, line)) {
-    auto* pending = new PendingCommand{app, std::move(line)};
+  line.reserve(4096);
+  bool oversized = false;
+  const auto queueLine = [&](std::string value) {
+    if (!value.empty() && value.back() == '\r') value.pop_back();
+    if (app->pendingCommands.fetch_add(1) >= kMaxPendingCommands) {
+      app->pendingCommands.fetch_sub(1);
+      queue_protocol_failure(app);
+      return false;
+    }
+    auto* pending = new PendingCommand{app, std::move(value)};
     g_main_context_invoke(nullptr, dispatch_command, pending);
+    return true;
+  };
+
+  char character;
+  while (std::cin.get(character)) {
+    if (character == '\n') {
+      if (oversized) {
+        queue_protocol_failure(app);
+        return;
+      }
+      if (!queueLine(std::move(line))) return;
+      line.clear();
+      line.reserve(4096);
+      continue;
+    }
+    if (line.size() >= kMaxProtocolLineSize - 1) {
+      oversized = true;
+      continue;
+    }
+    line.push_back(character);
   }
+  if (oversized) queue_protocol_failure(app);
+  else if (!line.empty() && !queueLine(std::move(line))) return;
   g_main_context_invoke(nullptr, dispatch_eof, app);
 }
 

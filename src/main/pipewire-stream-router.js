@@ -186,6 +186,7 @@ class PipeWireStreamRouter {
 
     const failedRoutes = [];
     for (const [nodeId, route] of this._routes) {
+      if (route.externallyChanged) continue;
       if (!this._restoreRoute(nodeId, route) && !this._restoreRoute(nodeId, route)) {
         failedRoutes.push(nodeId);
       }
@@ -246,7 +247,14 @@ class PipeWireStreamRouter {
     for (const entry of update.metadata || []) {
       const subject = Number(entry.subject);
       if (!Number.isSafeInteger(subject) || entry.key !== 'target.object') continue;
-      if (this._routes.has(subject) || this._routing.has(subject)) continue;
+      const route = this._routes.get(subject);
+      if (route) {
+        if (Number(entry.value) !== route.combinedSerial) {
+          route.externallyChanged = true;
+        }
+        continue;
+      }
+      if (this._routing.has(subject)) continue;
       if (entry.value === null || entry.value === undefined) {
         this._metadataTargets.delete(subject);
       } else {
@@ -300,7 +308,12 @@ class PipeWireStreamRouter {
         '-n', 'default', String(nodeId), 'target.object', String(combinedSerial), 'Spa:Id',
       ]);
       this._routing.delete(nodeId);
-      if (moved) this._routes.set(nodeId, { originalSerial, previousTarget });
+      if (moved) this._routes.set(nodeId, {
+        originalSerial,
+        previousTarget,
+        combinedSerial,
+        externallyChanged: false,
+      });
     }
   }
 

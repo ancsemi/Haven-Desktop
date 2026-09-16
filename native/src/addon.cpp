@@ -3,7 +3,7 @@
 //
 // Exports:
 //   isSupported()                → boolean
-//   getAudioApplications()      → Array<{pid, name, icon}>
+//   getAudioApplications()      → Array<{pid, name, identity, icon}>
 //   startCapture(pid, callback) → undefined
 //   stopCapture()               → undefined
 //   cleanup()                   → undefined
@@ -39,6 +39,7 @@ static Napi::Value GetAudioApplications(const Napi::CallbackInfo& info) {
         Napi::Object obj = Napi::Object::New(env);
         obj.Set("pid",    Napi::Number::New(env, apps[i].pid));
         obj.Set("name",   Napi::String::New(env, apps[i].name));
+        obj.Set("identity", Napi::String::New(env, apps[i].identity));
         obj.Set("icon",   Napi::String::New(env, apps[i].icon));
         obj.Set("active", Napi::Boolean::New(env, apps[i].active));
         arr[i] = obj;
@@ -62,16 +63,17 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
 
     // Accept either:
     //   startCapture(pid, dataCb)                         (legacy, INCLUDE)
-    //   startCapture(pid, mode, dataCb [, statusCb])      (new)
+    //   startCapture(pid, mode, identity, dataCb [, statusCb])
     // mode is a string: "include", "exclude", or "system"
     if (info.Length() < 2 || !info[0].IsNumber()) {
-        Napi::TypeError::New(env, "startCapture(pid, [mode], dataCb, [statusCb])")
+        Napi::TypeError::New(env, "startCapture(pid, [mode, identity], dataCb, [statusCb])")
             .ThrowAsJavaScriptException();
         return env.Undefined();
     }
 
     uint32_t pid = info[0].As<Napi::Number>().Uint32Value();
     haven::CaptureMode mode = haven::CaptureMode::IncludeProcess;
+    std::string expectedIdentity;
     Napi::Function jsCb;
     Napi::Function jsStatusCb;
     bool haveStatusCb = false;
@@ -80,14 +82,15 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
         std::string m = info[1].As<Napi::String>().Utf8Value();
         if (m == "exclude") mode = haven::CaptureMode::ExcludeProcess;
         if (m == "system") mode = haven::CaptureMode::SystemLoopback;
-        if (info.Length() < 3 || !info[2].IsFunction()) {
-            Napi::TypeError::New(env, "startCapture(pid, mode, dataCb, [statusCb])")
+        if (info.Length() < 4 || !info[2].IsString() || !info[3].IsFunction()) {
+            Napi::TypeError::New(env, "startCapture(pid, mode, identity, dataCb, [statusCb])")
                 .ThrowAsJavaScriptException();
             return env.Undefined();
         }
-        jsCb = info[2].As<Napi::Function>();
-        if (info.Length() >= 4 && info[3].IsFunction()) {
-            jsStatusCb = info[3].As<Napi::Function>();
+        expectedIdentity = info[2].As<Napi::String>().Utf8Value();
+        jsCb = info[3].As<Napi::Function>();
+        if (info.Length() >= 5 && info[4].IsFunction()) {
+            jsStatusCb = info[4].As<Napi::Function>();
             haveStatusCb = true;
         }
     } else if (info[1].IsFunction()) {
@@ -160,7 +163,7 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
         };
     }
 
-    bool ok = Cap()->StartCapture(pid, mode, nativeCb, nativeStatusCb);
+    bool ok = Cap()->StartCapture(pid, mode, expectedIdentity, nativeCb, nativeStatusCb);
     if (!ok) {
         if (g_tsfn)        { g_tsfn.Release();        g_tsfn = {}; }
         if (g_statusTsfn)  { g_statusTsfn.Release();  g_statusTsfn = {}; }

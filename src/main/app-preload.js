@@ -947,6 +947,8 @@ let _displayMediaPending = false;
 let _audioBufferQueue    = [];
 let _audioBufferedSamples = 0;
 let _audioPacketsReceived = 0;
+let _audioPreparationQueue = Promise.resolve();
+const _cancelledAudioPreparations = new Set();
 // ─── Global voice shortcut triggers ──────────────────────
 ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
 ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
@@ -1152,20 +1154,54 @@ ipcRenderer.on('audio:capture-data', (_event, payload) => {
   _audioPacketsReceived++;
 });
 
-// ─── Listen for screen-picker request from main process ──
-ipcRenderer.on('screen:show-picker', (_event, data) => {
-  showScreenPicker(
-    data?.sources || [],
-    data?.audioApps || [],
-    data?.audioCapabilities || {},
-    data?.requestId || null,
-    data?.videoEncoder || {},
-    {
-      videoOnly: !!data?.videoOnly,
-      nativeMode: !!data?.nativeMode,
-      portalOnly: !!data?.portalOnly,
+// The trusted picker runs in its own local BrowserWindow. Only after that
+// window records consent does main ask this preload to prepare the audio track.
+ipcRenderer.on('screen:prepare-share-cancel', (_event, data = {}) => {
+  const requestId = typeof data.requestId === 'string' ? data.requestId : null;
+  if (!requestId) return;
+  _cancelledAudioPreparations.add(requestId);
+  if (_activeAudioCaptureId === requestId) teardownAudioPipeline(requestId);
+});
+
+ipcRenderer.on('screen:prepare-share', (_event, data = {}) => {
+  const requestId = typeof data.requestId === 'string' ? data.requestId : null;
+  if (!requestId) return;
+  _cancelledAudioPreparations.delete(requestId);
+
+  const prepare = async () => {
+    if (_cancelledAudioPreparations.delete(requestId)) return;
+
+    teardownAudioPipeline(_activeAudioCaptureId);
+    _activeShareId = requestId;
+    _pendingShareId = requestId;
+    _lastNativeStatus = null;
+
+    const audioAppPid = data.audioAppPid;
+    const wantsNativePipeline =
+      (Number.isSafeInteger(audioAppPid) && audioAppPid > 0) || audioAppPid === 'system';
+    let audioReady = true;
+    if (wantsNativePipeline) {
+      _activeAudioCaptureId = requestId;
+      _capturedAudioPid = audioAppPid;
+      try {
+        audioReady = await buildAudioPipeline(() =>
+          _cancelledAudioPreparations.has(requestId) || _activeAudioCaptureId !== requestId
+        );
+      } catch (err) {
+        console.warn('[Haven Desktop] Local audio pipeline failed to build:', err.message);
+        audioReady = false;
+      }
     }
-  );
+
+    if (_cancelledAudioPreparations.delete(requestId)) {
+      teardownAudioPipeline(requestId);
+      return;
+    }
+    if (!audioReady) teardownAudioPipeline(requestId);
+    ipcRenderer.send('screen:prepare-share-result', { requestId, audioReady });
+  };
+
+  _audioPreparationQueue = _audioPreparationQueue.then(prepare, prepare);
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -1579,7 +1615,8 @@ function showScreenPicker(sources, audioApps, audioCapabilities, requestId, vide
 // the system-loopback track on the screen-share MediaStream.
 // ═══════════════════════════════════════════════════════════
 
-async function buildAudioPipeline() {
+async function buildAudioPipeline(isCancelled = () => false) {
+  if (isCancelled()) return false;
   // Reset arrival counters so the getDisplayMedia override's readiness
   // check reflects ONLY this capture session, never a stale prior one.
   _audioPacketsReceived = 0;
@@ -1593,6 +1630,7 @@ async function buildAudioPipeline() {
     _audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     // Explicitly resume — BrowserView contexts may start suspended
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
+    if (isCancelled()) return false;
 
     // Inline AudioWorklet processor (blob URL avoids CSP / file issues)
     const workletSrc = `
@@ -1627,6 +1665,7 @@ async function buildAudioPipeline() {
     const url  = URL.createObjectURL(blob);
     await _audioCtx.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
+    if (isCancelled()) return false;
 
     _audioWorkletNode = new AudioWorkletNode(_audioCtx, 'app-audio-processor', {
       numberOfInputs: 0,
@@ -1670,12 +1709,14 @@ async function buildAudioPipeline() {
     _audioWorkletNode = null;
     if (_audioCtx) { _audioCtx.close().catch(() => {}); _audioCtx = null; }
     _audioDestination = null;
+    if (isCancelled()) return false;
   }
 
   // ── Fallback: ScriptProcessorNode (works in all Electron versions) ──
   try {
     _audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
+    if (isCancelled()) return false;
 
     const bufSize = 1024;
     // Use 1 input channel (not 0).  A "generator" ScriptProcessor with

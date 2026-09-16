@@ -52,7 +52,7 @@ jobs:
           $env:GST_PLUGIN_SCANNER_1_0 = "$PWD\native\runtime\gstreamer\libexec\gst-plugin-scanner.exe"
           $probeOutput = .\native\build\Release\haven_screen_share.exe --probe | Out-String
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==3||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" $probeOutput.Trim()
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==5||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" $probeOutput.Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run smoke:native-screen
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -123,7 +123,7 @@ jobs:
           export GST_PLUGIN_SYSTEM_PATH_1_0="$PWD/native/runtime/gstreamer/plugins"
           export GST_PLUGIN_SCANNER_1_0="$PWD/native/runtime/gstreamer/libexec/gst-plugin-scanner"
           probe_output=$(native/build/Release/haven_screen_share --probe)
-          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==3||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" "$probe_output"
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==5||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" "$probe_output"
           npm run smoke:native-screen
           HAVEN_NATIVE_FORCE_SOFTWARE=1 npm run smoke:native-screen
 

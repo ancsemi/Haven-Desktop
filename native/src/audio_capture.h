@@ -14,6 +14,7 @@ namespace haven {
 struct AudioApp {
     uint32_t    pid;
     std::string name;
+    std::string identity; // platform process identity, stable across PID reuse
     std::string icon;   // base64 data-URL, or empty
     bool        active = true; // false = the session exists but is currently silent
 };
@@ -63,12 +64,13 @@ public:
     // in terms of this for backwards compatibility.
     virtual bool StartCapture(uint32_t        pid,
                               CaptureMode     mode,
+                              const std::string& expectedIdentity,
                               AudioDataCb     dataCb,
                               CaptureStatusCb statusCb) = 0;
 
     // Backwards-compatible shim — IncludeProcess, no status callback.
     bool StartCapture(uint32_t pid, AudioDataCb cb) {
-        return StartCapture(pid, CaptureMode::IncludeProcess, std::move(cb), nullptr);
+        return StartCapture(pid, CaptureMode::IncludeProcess, "", std::move(cb), nullptr);
     }
 
     virtual void                  StopCapture()                = 0;

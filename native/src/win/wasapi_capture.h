@@ -32,6 +32,7 @@ public:
     std::vector<AudioApp> GetAudioApplications()       override;
     bool                  StartCapture(uint32_t pid,
                                        CaptureMode mode,
+                                       const std::string& expectedIdentity,
                                        AudioDataCb dataCb,
                                        CaptureStatusCb statusCb) override;
     void                  StopCapture()                override;

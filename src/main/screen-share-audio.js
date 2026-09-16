@@ -77,6 +77,7 @@ function createAudioCaptureController(stopCapture) {
     active = null;
     current.owner.removeListener('destroyed', current.cleanup);
     current.owner.removeListener('render-process-gone', current.cleanup);
+    current.owner.removeListener('did-start-navigation', current.navigationCleanup);
     return current;
   };
 
@@ -94,9 +95,13 @@ function createAudioCaptureController(stopCapture) {
       stop();
       const ownerId = owner.id;
       const cleanup = () => stop(captureId, ownerId);
-      active = { id: captureId, ownerId, owner, cleanup };
+      const navigationCleanup = (_event, _url, isInPlace, isMainFrame) => {
+        if (!isInPlace && isMainFrame !== false) cleanup();
+      };
+      active = { id: captureId, ownerId, owner, cleanup, navigationCleanup };
       owner.once('destroyed', cleanup);
       owner.once('render-process-gone', cleanup);
+      owner.on('did-start-navigation', navigationCleanup);
     },
     stop,
     clear(captureId) {

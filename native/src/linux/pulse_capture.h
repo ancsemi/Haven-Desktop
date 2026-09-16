@@ -34,6 +34,7 @@ public:
     std::vector<AudioApp> GetAudioApplications()       override;
     bool                  StartCapture(uint32_t pid,
                                        CaptureMode mode,
+                                       const std::string& expectedIdentity,
                                        AudioDataCb dataCb,
                                        CaptureStatusCb statusCb) override;
     void                  StopCapture()                override;
@@ -48,6 +49,7 @@ private:
     AudioDataCb       m_callback;
     CaptureStatusCb   m_statusCallback;
     uint32_t          m_targetPid = 0;
+    std::string       m_targetIdentity;
     CaptureMode       m_mode = CaptureMode::IncludeProcess;
     std::mutex        m_mutex;
     uint32_t          m_nullSinkModule = UINT32_MAX; // PulseAudio module index

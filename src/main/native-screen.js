@@ -5,10 +5,19 @@ const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 5;
 const MAX_ACTIVE_PEERS = 32;
 const MAX_PEER_GENERATIONS = 256;
 const MAX_SDP_SIZE = 49152;
+const MAX_PROTOCOL_LINE_SIZE = 128 * 1024;
+const MAX_COMMAND_QUEUE_SIZE = 256;
+const MAX_COMMAND_QUEUE_BYTES = 512 * 1024;
+const MAX_PENDING_COMMANDS = 256;
+const MAX_PENDING_PEER_OPERATIONS = 256;
+const COMMAND_ACK_TIMEOUT_MS = 5000;
+const MAX_ICE_CANDIDATE_SIZE = 2048;
+const MAX_ICE_METADATA_SIZE = 256;
+const MAX_TURN_FIELD_SIZE = 64 * 1024;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 const NEGOTIATION_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 const SOURCE_KINDS = new Set([
@@ -28,15 +37,23 @@ function decodeField(value) {
   return Buffer.from(String(value || ''), 'base64').toString('utf8');
 }
 
+function boundedProtocolString(value, maximumBytes) {
+  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maximumBytes
+    ? value
+    : '';
+}
+
 function firstIceServer(iceServers, prefix) {
   for (const server of Array.isArray(iceServers) ? iceServers : []) {
     const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
-    const url = urls.find(candidate => typeof candidate === 'string' && candidate.startsWith(prefix));
+    const url = urls.find(candidate => typeof candidate === 'string' &&
+      candidate.slice(0, prefix.length).toLowerCase() === prefix &&
+      Buffer.byteLength(candidate, 'utf8') <= 2048);
     if (url) {
       return {
-        url,
-        username: typeof server.username === 'string' ? server.username : '',
-        credential: typeof server.credential === 'string' ? server.credential : '',
+        url: prefix + url.slice(prefix.length),
+        username: boundedProtocolString(server.username, 256),
+        credential: boundedProtocolString(server.credential, 1024),
       };
     }
   }
@@ -48,11 +65,12 @@ function turnIceServers(iceServers) {
   for (const server of Array.isArray(iceServers) ? iceServers : []) {
     const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
     for (const url of urls) {
-      if (typeof url !== 'string' || !/^turns?:/.test(url)) continue;
+      if (typeof url !== 'string' || !/^turns?:/i.test(url) ||
+          Buffer.byteLength(url, 'utf8') > 2048) continue;
       result.push({
-        url,
-        username: typeof server.username === 'string' ? server.username : '',
-        credential: typeof server.credential === 'string' ? server.credential : '',
+        url: url.replace(/^turns?:/i, scheme => scheme.toLowerCase()),
+        username: boundedProtocolString(server.username, 256),
+        credential: boundedProtocolString(server.credential, 1024),
       });
       if (result.length >= 16) return result;
     }
@@ -61,14 +79,36 @@ function turnIceServers(iceServers) {
 }
 
 function encodeTurnServers(servers) {
-  return servers.map(server => [server.url, server.username, server.credential]
-    .map(encodeField).join(',')).join(';');
+  const records = [];
+  let bytes = 0;
+  for (const server of servers) {
+    const record = [server.url, server.username, server.credential]
+      .map(encodeField).join(',');
+    const recordBytes = Buffer.byteLength(record, 'utf8') + (records.length ? 1 : 0);
+    if (bytes + recordBytes > MAX_TURN_FIELD_SIZE) continue;
+    records.push(record);
+    bytes += recordBytes;
+  }
+  return records.join(';');
 }
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const number = Number(value);
   const normalized = Number.isFinite(number) ? Math.round(number) : fallback;
   return Math.max(minimum, Math.min(maximum, normalized));
+}
+
+function mediaLinesByMid(sdp) {
+  const result = new Map();
+  let mediaLineIndex = -1;
+  for (const line of String(sdp || '').split(/\r?\n/)) {
+    if (line.startsWith('m=')) {
+      mediaLineIndex++;
+    } else if (mediaLineIndex >= 0 && line.startsWith('a=mid:')) {
+      result.set(line.slice(6), mediaLineIndex);
+    }
+  }
+  return result;
 }
 
 function isWaylandSession(platform = process.platform, env = process.env) {
@@ -109,6 +149,7 @@ class NativeScreenManager {
     this._startAudioCapture = options.startAudioCapture || null;
     this._stopAudioCapture = options.stopAudioCapture || null;
     this._audioStartupTimeoutMs = options.audioStartupTimeoutMs ?? 12000;
+    this._commandAckTimeoutMs = options.commandAckTimeoutMs ?? COMMAND_ACK_TIMEOUT_MS;
     this._session = null;
     this._starting = false;
     this._pendingStart = null;
@@ -279,6 +320,9 @@ class NativeScreenManager {
 
   async _start(owner, options, controller) {
     const { signal } = controller;
+    const startRequestId = SESSION_ID_PATTERN.test(String(options.startRequestId || ''))
+      ? String(options.startRequestId)
+      : crypto.randomBytes(15).toString('base64url');
     if (typeof this._selectSource !== 'function') {
       return { started: false, reason: 'source-selector-unavailable' };
     }
@@ -326,8 +370,12 @@ class NativeScreenManager {
       ? requestedAudio.mode
       : 'none';
     const audioPid = Number(requestedAudio?.pid);
+    const audioIdentity = typeof requestedAudio?.identity === 'string'
+      ? requestedAudio.identity
+      : '';
     const hasAudio = capabilities.audio?.supported === true && audioMode !== 'none' &&
       Number.isSafeInteger(audioPid) && audioPid > 0 &&
+      (audioMode !== 'include' || audioIdentity.length > 0) &&
       typeof this._startAudioCapture === 'function';
 
     const helperPath = this._findHelperPath();
@@ -346,11 +394,19 @@ class NativeScreenManager {
     }
     const session = {
       id: sessionId,
+      startRequestId,
       owner,
       child,
       peers: new Set(),
       peerAdds: 0,
+      peerOperation: Promise.resolve(),
+      pendingPeerOperations: 0,
       peerNegotiations: new Map(),
+      peerMediaLines: new Map(),
+      pendingCommands: new Map(),
+      commandQueue: [],
+      commandQueueBytes: 0,
+      commandBackpressured: false,
       stdoutBuffer: '',
       stopping: false,
       readyResolve: null,
@@ -440,7 +496,13 @@ class NativeScreenManager {
           if (status?.kind === 'started') settleAudioReady(resolveAudioReady);
         };
         const audioStarted = await Promise.resolve(this._startAudioCapture(
-          { mode: audioMode, pid: audioPid, sessionId: session.id, owner },
+          {
+            mode: audioMode,
+            pid: audioPid,
+            identity: audioIdentity,
+            sessionId: session.id,
+            owner,
+          },
           samples => this._writeAudio(session, samples),
           status => session.onAudioStatus?.(status)
         ));
@@ -466,6 +528,7 @@ class NativeScreenManager {
       return {
         started: true,
         sessionId,
+        startRequestId,
         codec,
         hasAudio,
         encoder: session.encoder,
@@ -502,6 +565,7 @@ class NativeScreenManager {
     if (session.stopPromise) return session.stopPromise;
 
     session.stopping = true;
+    this._rejectPendingCommands(session, new Error('Native screen session stopped'));
     session.readyReject?.(new Error('Native screen startup cancelled'));
     session.readyResolve = null;
     session.readyReject = null;
@@ -534,26 +598,33 @@ class NativeScreenManager {
   async addPeer(owner, data = {}) {
     const session = this._requireSession(owner, data);
     const peerId = this._validPeerId(data.peerId);
-    if (session.peers.has(peerId)) return true;
-    if (session.peers.size >= MAX_ACTIVE_PEERS) {
-      throw new Error('Native screen peer limit reached');
-    }
-    if (session.peerAdds >= MAX_PEER_GENERATIONS) {
-      throw new Error('Native screen peer generation limit reached');
-    }
-    session.peerAdds++;
-    session.peers.add(peerId);
-    this._send(session, 'ADD_PEER', [session.id, peerId]);
-    return true;
+    return this._queuePeerOperation(session, async () => {
+      this._requireSession(owner, data);
+      if (session.peers.has(peerId)) return true;
+      if (session.peers.size >= MAX_ACTIVE_PEERS) {
+        throw new Error('Native screen peer limit reached');
+      }
+      if (session.peerAdds >= MAX_PEER_GENERATIONS) {
+        throw new Error('Native screen peer generation limit reached');
+      }
+      return this._sendAcknowledged(session, 'ADD_PEER', [session.id, peerId], () => {
+        session.peerAdds++;
+        session.peers.add(peerId);
+      });
+    });
   }
 
   async removePeer(owner, data = {}) {
     const session = this._requireSession(owner, data);
     const peerId = this._validPeerId(data.peerId);
-    session.peers.delete(peerId);
-    session.peerNegotiations.delete(peerId);
-    this._send(session, 'REMOVE_PEER', [session.id, peerId]);
-    return true;
+    return this._queuePeerOperation(session, async () => {
+      this._requireSession(owner, data);
+      this._send(session, 'REMOVE_PEER', [session.id, peerId]);
+      session.peers.delete(peerId);
+      session.peerNegotiations.delete(peerId);
+      session.peerMediaLines.delete(peerId);
+      return true;
+    });
   }
 
   async setRemoteDescription(owner, data = {}) {
@@ -565,8 +636,10 @@ class NativeScreenManager {
         Buffer.byteLength(description.sdp, 'utf8') > MAX_SDP_SIZE) {
       throw new Error('Invalid native screen answer');
     }
-    this._send(session, 'REMOTE_DESCRIPTION', [session.id, peerId, 'answer', description.sdp]);
-    return true;
+    const mediaLines = mediaLinesByMid(description.sdp);
+    return this._sendAcknowledged(session, 'REMOTE_DESCRIPTION', [
+      session.id, peerId, 'answer', description.sdp,
+    ], () => session.peerMediaLines.set(peerId, mediaLines));
   }
 
   async addIceCandidate(owner, data = {}) {
@@ -574,30 +647,49 @@ class NativeScreenManager {
     const peerId = this._validPeerId(data.peerId);
     this._requireNegotiation(session, peerId, data.negotiationId);
     const candidate = data.candidate;
-    if (candidate == null) {
-      this._send(session, 'ICE', [session.id, peerId, '', '', '', '', '1']);
-      return true;
+    if (candidate == null ||
+        (typeof candidate === 'object' && candidate.candidate === '')) {
+      return this._sendAcknowledged(session, 'ICE', [
+        session.id, peerId, '', '', '', '', '1',
+      ]);
     }
+    const hasMediaLineIndex = Number.isInteger(candidate?.sdpMLineIndex) &&
+      candidate.sdpMLineIndex >= 0 && candidate.sdpMLineIndex <= 128;
+    const hasMid = typeof candidate?.sdpMid === 'string' && candidate.sdpMid.length > 0 &&
+      Buffer.byteLength(candidate.sdpMid, 'utf8') <= MAX_ICE_METADATA_SIZE;
     if (typeof candidate !== 'object' || typeof candidate.candidate !== 'string' ||
-        candidate.candidate.length > 2048) {
+        Buffer.byteLength(candidate.candidate, 'utf8') > MAX_ICE_CANDIDATE_SIZE ||
+        (!hasMediaLineIndex && !hasMid) ||
+        (candidate.sdpMid != null &&
+          (typeof candidate.sdpMid !== 'string' ||
+           Buffer.byteLength(candidate.sdpMid, 'utf8') > MAX_ICE_METADATA_SIZE)) ||
+        (candidate.usernameFragment != null &&
+          (typeof candidate.usernameFragment !== 'string' ||
+           Buffer.byteLength(candidate.usernameFragment, 'utf8') > MAX_ICE_METADATA_SIZE))) {
       throw new Error('Invalid native screen ICE candidate');
     }
-    this._send(session, 'ICE', [
+    const mediaLineIndex = hasMediaLineIndex
+      ? candidate.sdpMLineIndex
+      : session.peerMediaLines.get(peerId)?.get(candidate.sdpMid);
+    if (!Number.isInteger(mediaLineIndex) || mediaLineIndex < 0 || mediaLineIndex > 128) {
+      throw new Error('Unknown native screen ICE media section');
+    }
+    return this._sendAcknowledged(session, 'ICE', [
       session.id,
       peerId,
       candidate.candidate,
       candidate.sdpMid || '',
-      Number.isInteger(candidate.sdpMLineIndex) ? candidate.sdpMLineIndex : '',
+      mediaLineIndex,
       candidate.usernameFragment || '',
       '0',
     ]);
-    return true;
   }
 
   cleanup() {
     this._pendingStart?.controller.abort();
     if (!this._session) return;
     const session = this._session;
+    this._rejectPendingCommands(session, new Error('Native screen owner was destroyed'));
     this._stopAudio(session);
     session.readyReject?.(new Error('Native screen owner was destroyed'));
     session.readyResolve = null;
@@ -651,18 +743,42 @@ class NativeScreenManager {
   _wireProcess(session) {
     session.child.stdout.setEncoding('utf8');
     session.child.stderr.setEncoding('utf8');
+    session.child.stdin.on('drain', () => {
+      if (this._session !== session) return;
+      session.commandBackpressured = false;
+      this._flushCommandQueue(session);
+    });
     session.child.stdout.on('data', chunk => {
+      if (this._session !== session) return;
       session.stdoutBuffer += chunk;
       let newline;
       while ((newline = session.stdoutBuffer.indexOf('\n')) !== -1) {
         const line = session.stdoutBuffer.slice(0, newline).replace(/\r$/, '');
         session.stdoutBuffer = session.stdoutBuffer.slice(newline + 1);
+        if (Buffer.byteLength(line, 'utf8') > MAX_PROTOCOL_LINE_SIZE) {
+          this._handleProcessEnd(
+            session,
+            null,
+            null,
+            new Error('Native screen helper exceeded the protocol line limit')
+          );
+          return;
+        }
         if (line) this._handleLine(session, line);
+        if (this._session !== session) return;
+      }
+      if (Buffer.byteLength(session.stdoutBuffer, 'utf8') > MAX_PROTOCOL_LINE_SIZE) {
+        this._handleProcessEnd(
+          session,
+          null,
+          null,
+          new Error('Native screen helper exceeded the protocol line limit')
+        );
       }
     });
     session.child.stderr.on('data', chunk => {
       const message = String(chunk || '').trim();
-      if (message) console.warn('[NativeScreen helper]', message);
+      if (message) console.warn('[NativeScreen helper]', message.slice(0, 4096));
     });
     const handleStreamError = err => this._handleProcessEnd(session, null, null, err);
     for (const stream of [
@@ -708,6 +824,26 @@ class NativeScreenManager {
     const values = fields.map(decodeField);
     if (values[0] !== session.id) return;
 
+    if (event === 'COMMAND_RESULT') {
+      if (values.length !== 5) return;
+      const [, requestId, command, success, message] = values;
+      const pending = session.pendingCommands.get(requestId);
+      if (!pending || pending.command !== command) return;
+      session.pendingCommands.delete(requestId);
+      clearTimeout(pending.timer);
+      if (success === '1') {
+        try {
+          pending.onSuccess?.();
+          pending.resolve(true);
+        } catch (err) {
+          pending.reject(err);
+        }
+      } else {
+        pending.reject(new Error(message || `Native helper rejected ${command}`));
+      }
+      return;
+    }
+
     if (event === 'READY') {
       session.encoder = /^[A-Za-z0-9_-]{1,64}$/.test(values[1] || '')
         ? values[1]
@@ -727,6 +863,7 @@ class NativeScreenManager {
       if (!session.peers.has(peerId)) return;
       const negotiationId = crypto.randomBytes(15).toString('base64url');
       session.peerNegotiations.set(peerId, negotiationId);
+      session.peerMediaLines.delete(peerId);
       this._emitSignal(session, {
         type: 'offer',
         sessionId: session.id,
@@ -757,8 +894,11 @@ class NativeScreenManager {
     if (event === 'ERROR') {
       const [, peerId, message, fatal] = values;
       const failedDuringStartup = fatal === '1' && !!session.readyReject;
+      const fatalError = fatal === '1'
+        ? new Error(message || 'Native screen helper failed')
+        : null;
       if (failedDuringStartup) {
-        session.readyReject(new Error(message || 'Native screen helper failed to start'));
+        session.readyReject(fatalError);
         session.readyResolve = null;
         session.readyReject = null;
       }
@@ -770,6 +910,7 @@ class NativeScreenManager {
         fatal: fatal === '1',
       });
       if (fatal === '1' && !failedDuringStartup && this._session === session) {
+        this._rejectPendingCommands(session, fatalError);
         this._stopAudio(session);
         session.stoppedResolve?.();
         this._detachOwner(session);
@@ -780,9 +921,11 @@ class NativeScreenManager {
   }
 
   _handleProcessEnd(session, code, signal, error = null) {
+    const endError = error || new Error(`native helper exited (${code ?? signal ?? 'unknown'})`);
+    this._rejectPendingCommands(session, endError);
     if (this._session !== session) return;
     this._stopAudio(session);
-    session.readyReject?.(error || new Error(`native helper exited (${code ?? signal ?? 'unknown'})`));
+    session.readyReject?.(endError);
     session.readyResolve = null;
     session.readyReject = null;
     session.stoppedResolve?.();
@@ -802,9 +945,91 @@ class NativeScreenManager {
     }
   }
 
+  _sendAcknowledged(session, command, fields, onSuccess = null) {
+    if (session.pendingCommands.size >= MAX_PENDING_COMMANDS) {
+      return Promise.reject(new Error('Native screen command limit reached'));
+    }
+    const requestId = crypto.randomBytes(12).toString('base64url');
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!session.pendingCommands.has(requestId)) return;
+        this._handleProcessEnd(
+          session,
+          null,
+          null,
+          new Error(`Native helper did not acknowledge ${command}`)
+        );
+      }, this._commandAckTimeoutMs);
+      session.pendingCommands.set(requestId, { command, resolve, reject, timer, onSuccess });
+      try {
+        this._send(session, command, [...fields, requestId]);
+      } catch (err) {
+        clearTimeout(timer);
+        session.pendingCommands.delete(requestId);
+        reject(err);
+      }
+    });
+  }
+
+  _queuePeerOperation(session, operation) {
+    if (session.pendingPeerOperations >= MAX_PENDING_PEER_OPERATIONS) {
+      return Promise.reject(new Error('Native screen peer operation limit reached'));
+    }
+    session.pendingPeerOperations++;
+    const queued = session.peerOperation.then(() => {
+      if (this._session !== session || session.stopping) {
+        throw new Error('Native screen session stopped');
+      }
+      return operation();
+    });
+    const tracked = queued.finally(() => { session.pendingPeerOperations--; });
+    session.peerOperation = tracked.catch(() => {});
+    return tracked;
+  }
+
+  _rejectPendingCommands(session, error) {
+    for (const pending of session.pendingCommands.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    session.pendingCommands.clear();
+    session.commandQueue.length = 0;
+    session.commandQueueBytes = 0;
+  }
+
+  _flushCommandQueue(session) {
+    try {
+      while (this._session === session && !session.commandBackpressured &&
+             session.commandQueue.length > 0) {
+        const queued = session.commandQueue.shift();
+        session.commandQueueBytes -= queued.bytes;
+        if (!session.child.stdin.writable) {
+          throw new Error('Native screen helper is not writable');
+        }
+        session.commandBackpressured = !session.child.stdin.write(queued.line);
+      }
+    } catch (err) {
+      this._handleProcessEnd(session, null, null, err);
+    }
+  }
+
   _send(session, command, fields) {
     if (!session.child.stdin.writable) throw new Error('Native screen helper is not writable');
-    session.child.stdin.write([command, ...fields.map(encodeField)].join('\t') + '\n');
+    const line = [command, ...fields.map(encodeField)].join('\t') + '\n';
+    const bytes = Buffer.byteLength(line, 'utf8');
+    if (bytes > MAX_PROTOCOL_LINE_SIZE) {
+      throw new Error('Native screen command exceeds the protocol line limit');
+    }
+    if (session.commandBackpressured || session.commandQueue.length > 0) {
+      if (session.commandQueue.length >= MAX_COMMAND_QUEUE_SIZE ||
+          session.commandQueueBytes + bytes > MAX_COMMAND_QUEUE_BYTES) {
+        throw new Error('Native screen command queue limit reached');
+      }
+      session.commandQueue.push({ line, bytes });
+      session.commandQueueBytes += bytes;
+      return;
+    }
+    session.commandBackpressured = !session.child.stdin.write(line);
   }
 
   _writeAudio(session, samples) {
@@ -830,11 +1055,13 @@ class NativeScreenManager {
 
   _handleAudioStatus(session, status) {
     if (this._session !== session || session.stopping || !status || status.kind !== 'failed') return;
+    const error = new Error(status.message || 'Native screen audio capture failed');
+    this._rejectPendingCommands(session, error);
     this._emitSignal(session, {
       type: 'error',
       sessionId: session.id,
       peerId: null,
-      message: status.message || 'Native screen audio capture failed',
+      message: error.message,
       fatal: true,
     });
     this._stopAudio(session);
@@ -863,7 +1090,12 @@ class NativeScreenManager {
 
   _emitSignal(session, signal) {
     if (!session.owner || session.owner.isDestroyed?.()) return;
-    try { session.owner.send('native-screen:signal', signal); } catch {}
+    try {
+      session.owner.send('native-screen:signal', {
+        ...signal,
+        startRequestId: session.startRequestId,
+      });
+    } catch {}
   }
 
   _assertOwner(owner, session, force = false) {

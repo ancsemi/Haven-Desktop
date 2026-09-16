@@ -21,7 +21,7 @@ function createOwner() {
   return owner;
 }
 
-function createFakeHelper() {
+function createFakeHelper({ acknowledgeCommands = true, acknowledgePeerAdds = true } = {}) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
@@ -52,6 +52,17 @@ function createFakeHelper() {
         ].join('\t') + '\n');
       } else if (command === 'STOP') {
         child.stdout.write(`STOPPED\t${encodeField(values[0])}\n`);
+      } else if ((command === 'ADD_PEER' && acknowledgePeerAdds) ||
+                 (acknowledgeCommands &&
+                  (command === 'REMOTE_DESCRIPTION' || command === 'ICE'))) {
+        child.stdout.write([
+          'COMMAND_RESULT',
+          encodeField(values[0]),
+          encodeField(values.at(-1)),
+          encodeField(command),
+          encodeField('1'),
+          encodeField(''),
+        ].join('\t') + '\n');
       }
     }
   });
@@ -61,7 +72,7 @@ function createFakeHelper() {
 function createManager(overrides = {}) {
   const helper = overrides.helper || createFakeHelper();
   const capabilities = {
-    protocolVersion: 3,
+    protocolVersion: 5,
     supported: true,
     captureBackends: ['x11'],
     codecs: [{ name: 'H264', encoder: 'vah264enc', hardware: true }],
@@ -100,6 +111,7 @@ test('starts the helper and forwards native offers to the owning renderer', asyn
   const { manager, helper } = createManager();
 
   const result = await manager.start(owner, {
+    startRequestId: 'native-start-1234',
     resolution: 1080,
     frameRate: 60,
     bitrate: 8_000_000,
@@ -120,6 +132,7 @@ test('starts the helper and forwards native offers to the owning renderer', asyn
   assert.equal(result.started, true);
   assert.equal(result.encoder, 'vah264enc');
   assert.equal(result.hardware, true);
+  assert.equal(result.startRequestId, 'native-start-1234');
   assert.match(result.sessionId, /^[A-Za-z0-9_-]{8,64}$/);
   assert.equal(helper.commands[0].command, 'START');
   assert.equal(helper.commands[0].values[0], result.sessionId);
@@ -152,6 +165,7 @@ test('starts the helper and forwards native offers to the owning renderer', asyn
     payload: {
       type: 'offer',
       sessionId: result.sessionId,
+      startRequestId: 'native-start-1234',
       negotiationId: owner.signals[0].payload.negotiationId,
       peerId: 7,
       description: { type: 'offer', sdp: 'v=0\r\n' },
@@ -159,6 +173,34 @@ test('starts the helper and forwards native offers to the owning renderer', asyn
   }]);
   await manager.stop(owner);
   assert.equal(helper.killed, true);
+});
+
+test('bounds TURN configuration and normalizes ICE URL schemes', async () => {
+  const owner = createOwner();
+  const { manager, helper } = createManager();
+  const maximumUrl = `TURN:${'a'.repeat(2043)}`;
+  const iceServers = [{ urls: 'STUN:stun.example.test:3478' }];
+  for (let index = 0; index < 15; index++) {
+    iceServers.push({
+      urls: maximumUrl,
+      username: 'u'.repeat(256),
+      credential: 'c'.repeat(1024),
+    });
+  }
+  iceServers.push({ urls: 'TURN:turn.example.test:3478' });
+
+  const result = await manager.start(owner, { iceServers });
+
+  assert.equal(result.started, true);
+  assert.equal(helper.commands[0].values[11], 'stun:stun.example.test:3478');
+  const encodedTurn = helper.commands[0].values[12];
+  assert.ok(Buffer.byteLength(encodedTurn, 'utf8') <= 64 * 1024);
+  const records = encodedTurn.split(';');
+  assert.equal(records.length, 15);
+  assert.equal(decodeField(records[0].split(',')[0]), maximumUrl.toLowerCase());
+  assert.equal(decodeField(records.at(-1).split(',')[0]), 'turn:turn.example.test:3478');
+  assert.ok(records.every(record => record.split(',').length === 3));
+  await manager.stop(owner);
 });
 
 test('pipes isolated mono PCM to an audio-enabled helper session', async () => {
@@ -171,7 +213,7 @@ test('pipes isolated mono PCM to an audio-enabled helper session', async () => {
     selectSource: async () => ({
       kind: 'linux-x11-screen',
       handle: '0',
-      audio: { mode: 'include', pid: 42 },
+      audio: { mode: 'include', pid: 42, identity: 'process-42' },
       codecPreference: 'H264',
     }),
     startAudioCapture: (selection, onData, onStatus) => {
@@ -191,6 +233,7 @@ test('pipes isolated mono PCM to an audio-enabled helper session', async () => {
   assert.equal(result.hasAudio, true);
   assert.equal(audioSelection.sessionId, result.sessionId);
   assert.equal(audioSelection.owner, owner);
+  assert.equal(audioSelection.identity, 'process-42');
   assert.equal(helper.commands[0].values[14], '1');
 
   pushAudio(new Float32Array([0.25, -0.5, 0.75]));
@@ -212,7 +255,7 @@ test('tears down native audio when the helper reports a fatal runtime error', as
     selectSource: async () => ({
       kind: 'linux-x11-screen',
       handle: '0',
-      audio: { mode: 'include', pid: 42 },
+      audio: { mode: 'include', pid: 42, identity: 'process-42' },
     }),
     startAudioCapture: (_selection, _onData, onStatus) => {
       onStatus({ kind: 'started' });
@@ -246,7 +289,7 @@ test('tears down the session when native audio fails after startup', async () =>
     selectSource: async () => ({
       kind: 'linux-x11-screen',
       handle: '0',
-      audio: { mode: 'include', pid: 42 },
+      audio: { mode: 'include', pid: 42, identity: 'process-42' },
     }),
     startAudioCapture: (_selection, _onData, onStatus) => {
       reportAudioStatus = onStatus;
@@ -265,6 +308,7 @@ test('tears down the session when native audio fails after startup', async () =>
   assert.deepEqual(owner.signals.at(-1).payload, {
     type: 'error',
     sessionId: result.sessionId,
+    startRequestId: result.startRequestId,
     peerId: null,
     message: 'capture device disappeared',
     fatal: true,
@@ -279,7 +323,7 @@ test('does not report startup success when audio fails synchronously', async () 
     selectSource: async () => ({
       kind: 'linux-x11-screen',
       handle: '0',
-      audio: { mode: 'include', pid: 42 },
+      audio: { mode: 'include', pid: 42, identity: 'process-42' },
     }),
     startAudioCapture: (_selection, _onData, onStatus) => {
       onStatus({ kind: 'failed', message: 'capture initialization failed' });
@@ -307,7 +351,7 @@ test('does not announce a session when native audio never becomes ready', async 
     selectSource: async () => ({
       kind: 'linux-x11-screen',
       handle: '0',
-      audio: { mode: 'include', pid: 42 },
+      audio: { mode: 'include', pid: 42, identity: 'process-42' },
     }),
     startAudioCapture: () => true,
     stopAudioCapture: () => { stopAudioCalls++; },
@@ -330,7 +374,7 @@ test('stopping a pending audio handshake rejects it immediately', async () => {
     selectSource: async () => ({
       kind: 'linux-x11-screen',
       handle: '0',
-      audio: { mode: 'include', pid: 42 },
+      audio: { mode: 'include', pid: 42, identity: 'process-42' },
     }),
     startAudioCapture: () => true,
   });
@@ -409,7 +453,7 @@ test('uses the PipeWire portal backend on Wayland', async () => {
     spawnSync: () => ({
       status: 0,
       stdout: JSON.stringify({
-        protocolVersion: 3,
+        protocolVersion: 5,
         supported: true,
         captureBackends: ['x11', 'pipewire-portal'],
         codecs: [{ name: 'H264', encoder: 'vah264enc', hardware: true }],
@@ -442,10 +486,11 @@ test('rejects startup immediately when the helper reports a fatal error', async 
   });
   const owner = createOwner();
   const { manager } = createManager({ helper });
-  const result = await manager.start(owner, {});
+  const result = await manager.start(owner, { startRequestId: 'native-start-failure' });
   assert.equal(result.started, false);
   assert.equal(result.reason, 'native-helper-start-failed');
   assert.equal(result.detail, 'portal failed');
+  assert.equal(owner.signals.at(-1).payload.startRequestId, 'native-start-failure');
 });
 
 test('rejects incompatible helper protocols even when the helper says supported', async () => {
@@ -473,7 +518,7 @@ test('preserves an unsupported probe reason when the helper exits nonzero', asyn
     spawnSync: () => ({
       status: 2,
       stdout: JSON.stringify({
-        protocolVersion: 3,
+        protocolVersion: 5,
         supported: false,
         captureBackends: ['x11'],
         reason: 'gstreamer-plugins-unavailable',
@@ -510,7 +555,7 @@ test('does not cache transient helper probe failures', async () => {
       return {
         status: 0,
         stdout: JSON.stringify({
-          protocolVersion: 3,
+          protocolVersion: 5,
           supported: true,
           captureBackends: ['x11'],
           codecs: [{ name: 'H264', encoder: 'vah264enc', hardware: true }],
@@ -531,7 +576,7 @@ test('does not open the picker if its owner becomes inactive during capability p
   let ownerActive = true;
   const owner = createOwner();
   const capabilities = {
-    protocolVersion: 3,
+    protocolVersion: 5,
     supported: true,
     captureBackends: ['x11'],
     codecs: [{ name: 'H264', encoder: 'vah264enc', hardware: true }],
@@ -616,6 +661,149 @@ test('limits active peers created by an untrusted renderer', async () => {
     /peer limit/
   );
   await manager.stop(owner);
+});
+
+test('limits queued peer operations while a helper acknowledgement is pending', async () => {
+  const owner = createOwner();
+  const helper = createFakeHelper({ acknowledgePeerAdds: false });
+  const { manager } = createManager({ helper, commandAckTimeoutMs: 60000 });
+  const result = await manager.start(owner, {});
+  const queued = [];
+
+  for (let peerId = 1; peerId <= 256; peerId++) {
+    queued.push(manager.addPeer(owner, { sessionId: result.sessionId, peerId }));
+  }
+  await assert.rejects(
+    manager.addPeer(owner, { sessionId: result.sessionId, peerId: 257 }),
+    /peer operation limit/
+  );
+
+  manager.cleanup();
+  const results = await Promise.allSettled(queued);
+  assert.ok(results.every(item => item.status === 'rejected'));
+});
+
+test('commits a peer only after the helper acknowledges it', async () => {
+  const owner = createOwner();
+  const helper = createFakeHelper({ acknowledgePeerAdds: false });
+  const { manager } = createManager({ helper });
+  const result = await manager.start(owner, {});
+
+  let settled = false;
+  const adding = manager.addPeer(owner, {
+    sessionId: result.sessionId,
+    peerId: 7,
+  }).then(value => {
+    settled = true;
+    return value;
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(settled, false);
+  assert.equal(manager._session.peers.has('7'), false);
+  assert.equal(manager._session.peerAdds, 0);
+  const command = helper.commands.at(-1);
+  helper.stdout.write([
+    'COMMAND_RESULT',
+    encodeField(result.sessionId),
+    encodeField(command.values.at(-1)),
+    encodeField('ADD_PEER'),
+    encodeField('1'),
+    encodeField(''),
+  ].join('\t') + '\n');
+
+  assert.equal(await adding, true);
+  assert.equal(manager._session.peers.has('7'), true);
+  assert.equal(manager._session.peerAdds, 1);
+  await manager.stop(owner);
+});
+
+test('does not mutate peer state when the helper rejects an add', async () => {
+  const owner = createOwner();
+  const helper = createFakeHelper({ acknowledgePeerAdds: false });
+  const { manager } = createManager({ helper });
+  const result = await manager.start(owner, {});
+
+  const adding = manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 });
+  await new Promise(resolve => setImmediate(resolve));
+  const command = helper.commands.at(-1);
+  helper.stdout.write([
+    'COMMAND_RESULT',
+    encodeField(result.sessionId),
+    encodeField(command.values.at(-1)),
+    encodeField('ADD_PEER'),
+    encodeField('0'),
+    encodeField('peer rejected'),
+  ].join('\t') + '\n');
+
+  await assert.rejects(adding, /peer rejected/);
+  assert.equal(manager._session.peers.has('7'), false);
+  assert.equal(manager._session.peerAdds, 0);
+  await manager.stop(owner);
+});
+
+test('does not mutate peers when add or remove cannot be sent', async () => {
+  const owner = createOwner();
+  const { manager, helper } = createManager();
+  const result = await manager.start(owner, {});
+  await manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 });
+  manager._session.peerNegotiations.set('7', 'negotiation-1234');
+  const write = helper.stdin.write.bind(helper.stdin);
+  helper.stdin.write = () => { throw new Error('write failed'); };
+
+  await assert.rejects(
+    manager.removePeer(owner, { sessionId: result.sessionId, peerId: 7 }),
+    /write failed/
+  );
+  assert.equal(manager._session.peers.has('7'), true);
+  assert.equal(manager._session.peerNegotiations.get('7'), 'negotiation-1234');
+
+  manager._session.peers.delete('7');
+  manager._session.peerNegotiations.delete('7');
+  await assert.rejects(
+    manager.addPeer(owner, { sessionId: result.sessionId, peerId: 8 }),
+    /write failed/
+  );
+  assert.equal(manager._session.peers.has('8'), false);
+  assert.equal(manager._session.peerAdds, 1);
+  helper.stdin.write = write;
+  await manager.stop(owner);
+});
+
+test('terminates a session when an acknowledged command times out', async () => {
+  const owner = createOwner();
+  const helper = createFakeHelper({ acknowledgePeerAdds: false });
+  const { manager } = createManager({ helper, commandAckTimeoutMs: 10 });
+  const result = await manager.start(owner, {});
+
+  await assert.rejects(
+    manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 }),
+    /did not acknowledge ADD_PEER/
+  );
+  assert.equal(helper.killed, true);
+  assert.equal(manager._session, null);
+  assert.equal(owner.signals.at(-1).payload.fatal, true);
+});
+
+test('rejects an acknowledged command when the helper reports a fatal error', async () => {
+  const owner = createOwner();
+  const helper = createFakeHelper({ acknowledgePeerAdds: false });
+  const { manager } = createManager({ helper, commandAckTimeoutMs: 60000 });
+  const result = await manager.start(owner, {});
+  const adding = manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 });
+  await new Promise(resolve => setImmediate(resolve));
+
+  helper.stdout.write([
+    'ERROR',
+    encodeField(result.sessionId),
+    encodeField(''),
+    encodeField('pipeline failed'),
+    encodeField('1'),
+  ].join('\t') + '\n');
+
+  await assert.rejects(adding, /pipeline failed/);
+  assert.equal(helper.killed, true);
+  assert.equal(manager._session, null);
 });
 
 test('limits peer churn retained for asynchronous native callbacks', async () => {
@@ -768,6 +956,31 @@ test('rejects answers and ICE from a replaced peer negotiation', async () => {
   await manager.stop(owner);
 });
 
+test('preserves concrete ICE candidates and gathering completion separately', async () => {
+  const owner = createOwner();
+  const { manager, helper } = createManager();
+  const result = await manager.start(owner, {});
+  await manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 });
+  helper.stdout.write([
+    'OFFER', encodeField(result.sessionId), encodeField('7'), encodeField('v=0\r\n'),
+  ].join('\t') + '\n');
+  await new Promise(resolve => setImmediate(resolve));
+
+  helper.stdout.write([
+    'ICE', encodeField(result.sessionId), encodeField('7'), encodeField('candidate:1'),
+    encodeField('video'), encodeField('0'), encodeField('ufrag'), encodeField('0'),
+  ].join('\t') + '\n');
+  helper.stdout.write([
+    'ICE', encodeField(result.sessionId), encodeField('7'), encodeField(''),
+    encodeField(''), encodeField('0'), encodeField(''), encodeField('1'),
+  ].join('\t') + '\n');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(owner.signals.at(-2).payload.candidate.candidate, 'candidate:1');
+  assert.equal(owner.signals.at(-1).payload.candidate, null);
+  await manager.stop(owner);
+});
+
 test('accepts gathered browser answers above the old SDP limit', async () => {
   const owner = createOwner();
   const { manager, helper } = createManager();
@@ -788,8 +1001,136 @@ test('accepts gathered browser answers above the old SDP limit', async () => {
   });
 
   assert.equal(helper.commands.at(-1).command, 'REMOTE_DESCRIPTION');
-  assert.equal(helper.commands.at(-1).values.at(-1), gatheredSdp);
+  assert.equal(helper.commands.at(-1).values.at(-2), gatheredSdp);
   await manager.stop(owner);
+});
+
+test('waits for the helper to acknowledge remote signaling commands', async () => {
+  const owner = createOwner();
+  const helper = createFakeHelper({ acknowledgeCommands: false });
+  const { manager } = createManager({ helper });
+  const result = await manager.start(owner, {});
+  await manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 });
+  helper.stdout.write([
+    'OFFER', encodeField(result.sessionId), encodeField('7'), encodeField('v=0\r\n'),
+  ].join('\t') + '\n');
+  await new Promise(resolve => setImmediate(resolve));
+  const negotiationId = owner.signals.at(-1).payload.negotiationId;
+
+  let settled = false;
+  const applying = manager.setRemoteDescription(owner, {
+    sessionId: result.sessionId,
+    negotiationId,
+    peerId: 7,
+    description: { type: 'answer', sdp: 'v=0\r\n' },
+  }).then(value => {
+    settled = true;
+    return value;
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  const command = helper.commands.at(-1);
+  helper.stdout.write([
+    'COMMAND_RESULT',
+    encodeField(result.sessionId),
+    encodeField(command.values.at(-1)),
+    encodeField(command.command),
+    encodeField('1'),
+    encodeField(''),
+  ].join('\t') + '\n');
+  assert.equal(await applying, true);
+  await manager.stop(owner);
+});
+
+test('surfaces a helper rejection of a remote description', async () => {
+  const owner = createOwner();
+  const helper = createFakeHelper({ acknowledgeCommands: false });
+  const { manager } = createManager({ helper });
+  const result = await manager.start(owner, {});
+  await manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 });
+  helper.stdout.write([
+    'OFFER', encodeField(result.sessionId), encodeField('7'), encodeField('v=0\r\n'),
+  ].join('\t') + '\n');
+  await new Promise(resolve => setImmediate(resolve));
+  const negotiationId = owner.signals.at(-1).payload.negotiationId;
+
+  const applying = manager.setRemoteDescription(owner, {
+    sessionId: result.sessionId,
+    negotiationId,
+    peerId: 7,
+    description: { type: 'answer', sdp: 'v=0\r\n' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const command = helper.commands.at(-1);
+  helper.stdout.write([
+    'COMMAND_RESULT',
+    encodeField(result.sessionId),
+    encodeField(command.values.at(-1)),
+    encodeField(command.command),
+    encodeField('0'),
+    encodeField('answer rejected'),
+  ].join('\t') + '\n');
+
+  await assert.rejects(applying, /answer rejected/);
+  await manager.stop(owner);
+});
+
+test('maps ICE identified only by MID and rejects unknown media sections', async () => {
+  const owner = createOwner();
+  const { manager, helper } = createManager();
+  const result = await manager.start(owner, {});
+  await manager.addPeer(owner, { sessionId: result.sessionId, peerId: 7 });
+  helper.stdout.write([
+    'OFFER', encodeField(result.sessionId), encodeField('7'), encodeField('v=0\r\n'),
+  ].join('\t') + '\n');
+  await new Promise(resolve => setImmediate(resolve));
+  const negotiationId = owner.signals.at(-1).payload.negotiationId;
+
+  await manager.setRemoteDescription(owner, {
+    sessionId: result.sessionId,
+    negotiationId,
+    peerId: 7,
+    description: {
+      type: 'answer',
+      sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:screen-video\r\n',
+    },
+  });
+  await manager.addIceCandidate(owner, {
+    sessionId: result.sessionId,
+    negotiationId,
+    peerId: 7,
+    candidate: { candidate: 'candidate:1', sdpMid: 'screen-video' },
+  });
+  assert.equal(helper.commands.at(-1).values[4], '0');
+
+  await assert.rejects(manager.addIceCandidate(owner, {
+    sessionId: result.sessionId,
+    negotiationId,
+    peerId: 7,
+    candidate: { candidate: 'candidate:1', sdpMid: 'unknown' },
+  }), /Unknown native screen ICE media section/);
+  await assert.rejects(manager.addIceCandidate(owner, {
+    sessionId: result.sessionId,
+    negotiationId,
+    peerId: 7,
+    candidate: { candidate: 'candidate:1' },
+  }), /Invalid native screen ICE candidate/);
+  await manager.stop(owner);
+});
+
+test('terminates a helper that exceeds the protocol line limit', async () => {
+  const owner = createOwner();
+  const { manager, helper } = createManager();
+  const result = await manager.start(owner, {});
+  assert.equal(result.started, true);
+
+  helper.stdout.write('x'.repeat(128 * 1024 + 1));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(helper.killed, true);
+  assert.equal(manager._session, null);
+  assert.match(owner.signals.at(-1).payload.message, /protocol line limit/i);
 });
 
 test('drops an offer that arrives after its peer was removed', async () => {

@@ -86,11 +86,42 @@ test('stops capture when its renderer is destroyed without affecting a newer cap
   assert.equal(stops, 2);
 });
 
+test('stops capture on cross-document main-frame navigation only', () => {
+  let stops = 0;
+  const owner = Object.assign(new EventEmitter(), { id: 1 });
+  const controller = createAudioCaptureController(() => { stops++; });
+  controller.start('share-1', owner);
+
+  owner.emit('did-start-navigation', {}, 'https://haven.test/#section', true, true);
+  owner.emit('did-start-navigation', {}, 'https://frame.test', false, false);
+  assert.equal(controller.isActive('share-1'), true);
+  assert.equal(stops, 0);
+
+  owner.emit('did-start-navigation', {}, 'https://haven.test/other', false, true);
+  assert.equal(controller.hasActive(), false);
+  assert.equal(stops, 1);
+});
+
+test('navigation from an old owner cannot stop a newer capture', () => {
+  let stops = 0;
+  const first = Object.assign(new EventEmitter(), { id: 1 });
+  const second = Object.assign(new EventEmitter(), { id: 2 });
+  const controller = createAudioCaptureController(() => { stops++; });
+
+  controller.start('share-1', first);
+  controller.start('share-2', second);
+  first.emit('did-start-navigation', {}, 'https://haven.test/other', false, true);
+
+  assert.equal(controller.isActive('share-2'), true);
+  assert.equal(stops, 1);
+  controller.stop();
+});
+
 test('ignores native callbacks retained from an older capture generation', () => {
   const sessions = [];
   const addon = {
-    startCapture(_pid, _mode, onData, onStatus) {
-      sessions.push({ onData, onStatus });
+    startCapture(_pid, _mode, identity, onData, onStatus) {
+      sessions.push({ identity, onData, onStatus });
       return true;
     },
     stopCapture() {},
@@ -99,11 +130,13 @@ test('ignores native callbacks retained from an older capture generation', () =>
   const received = [];
 
   manager.startCapture(1, {
+    identity: 'process-1',
     onData: () => received.push('old-data'),
     onStatus: () => received.push('old-status'),
   });
   manager.stopCapture();
   manager.startCapture(2, {
+    identity: 'process-2',
     onData: (_pcm, capturedAt) => received.push(`new-data:${capturedAt}`),
     onStatus: () => received.push('new-status'),
   });
@@ -113,6 +146,7 @@ test('ignores native callbacks retained from an older capture generation', () =>
   sessions[1].onData(Float32Array.of(2), 2000);
   sessions[1].onStatus({ kind: 'started' });
 
+  assert.deepEqual(sessions.map(session => session.identity), ['process-1', 'process-2']);
   assert.deepEqual(received, ['new-data:2000', 'new-status']);
   manager.stopCapture();
 });
@@ -129,6 +163,26 @@ test('runs capture teardown before stopping the native addon', () => {
   manager.stopCapture();
 
   assert.deepEqual(events, ['router', 'native']);
+});
+
+test('keeps the legacy capture callback overload functional', () => {
+  let nativeArgs;
+  const addon = {
+    startCapture(...args) {
+      nativeArgs = args;
+      return true;
+    },
+    stopCapture() {},
+  };
+  const manager = new AudioCaptureManager(addon);
+  const onData = () => {};
+
+  assert.equal(manager.startCapture(42, onData), true);
+  assert.equal(nativeArgs[0], 42);
+  assert.equal(nativeArgs[1], 'include');
+  assert.equal(nativeArgs[2], '');
+  assert.equal(typeof nativeArgs[3], 'function');
+  manager.stopCapture();
 });
 
 test('reports a stalled backend before the watchdog stops it', () => {

@@ -211,6 +211,72 @@ test('restores a native stream previous PipeWire target', () => {
   ]);
 });
 
+test('does not overwrite an output target changed while sharing', () => {
+  const monitor = createMonitor();
+  const commands = [];
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitor,
+    runCommand: (_command, args) => {
+      commands.push(args);
+      return { status: 0 };
+    },
+    processExternal: () => true,
+    logger: { warn() {} },
+  });
+
+  router.start('HavenCombined_100', 100);
+  monitor.stdout.emit('data', JSON.stringify(graph({ previousTarget: 2000 })));
+  monitor.stdout.emit('data', JSON.stringify([{
+    id: 60,
+    type: 'PipeWire:Interface:Metadata',
+    props: { 'metadata.name': 'default' },
+    metadata: [{
+      subject: 40,
+      key: 'target.object',
+      type: 'Spa:Id',
+      value: 3000,
+    }],
+  }]));
+  router.stop();
+
+  assert.deepEqual(commands, [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+  ]);
+});
+
+test('still restores after observing its own combined target update', () => {
+  const monitor = createMonitor();
+  const commands = [];
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitor,
+    runCommand: (_command, args) => {
+      commands.push(args);
+      return { status: 0 };
+    },
+    processExternal: () => true,
+    logger: { warn() {} },
+  });
+
+  router.start('HavenCombined_100', 100);
+  monitor.stdout.emit('data', JSON.stringify(graph({ previousTarget: 2000 })));
+  monitor.stdout.emit('data', JSON.stringify([{
+    id: 60,
+    type: 'PipeWire:Interface:Metadata',
+    props: { 'metadata.name': 'default' },
+    metadata: [{
+      subject: 40,
+      key: 'target.object',
+      type: 'Spa:Id',
+      value: 1000,
+    }],
+  }]));
+  router.stop();
+
+  assert.deepEqual(commands.at(-1), [
+    '-n', 'default', '40', 'target.object', '2000', 'Spa:Id',
+  ]);
+});
+
 test('does not route native streams that are not proven external', () => {
   const monitor = createMonitor();
   const commands = [];

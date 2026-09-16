@@ -155,6 +155,7 @@ class AudioCaptureManager {
    *                                   include: capture FROM this PID tree
    *                                   exclude: capture all system audio EXCEPT this PID tree
    *                                   (native on Windows and Linux)
+   * @param {string} [opts.identity]   Process identity captured during enumeration
    * @param {function} opts.onData     Receives (Float32Array, capturedAtMs) PCM chunks
    * @param {function} [opts.onStatus] Receives {kind, message, code} status events.
    *                                   kinds: 'starting' | 'started' | 'failed' | 'stopped'
@@ -177,6 +178,7 @@ class AudioCaptureManager {
       : 'include';
     const onData  = opts && opts.onData;
     const onStatus = opts && opts.onStatus;
+    const identity = typeof opts?.identity === 'string' ? opts.identity : '';
     if (typeof onData !== 'function') {
       const error = new Error(this._t('audio.error.callbackRequired'));
       error.messageKey = 'audio.error.callbackRequired';
@@ -209,7 +211,7 @@ class AudioCaptureManager {
     };
 
     try {
-      const ok = this._addon.startCapture(pid, mode, dataWrap, statusWrap);
+      const ok = this._addon.startCapture(pid, mode, identity, dataWrap, statusWrap);
       if (!ok) {
         this._capturing = false;
         const reason = this._lastStatus?.message || this._t('audio.error.startReturnedFalse');
