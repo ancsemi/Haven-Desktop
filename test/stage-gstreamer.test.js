@@ -19,6 +19,8 @@ test('includes dlopen NSS crypto providers required by Ubuntu SRTP', () => {
     .map(name => path.join('/usr/lib', name));
   const exists = file => providers.includes(file);
   assert.deepEqual(linuxDynamicDependencies(library, exists), providers);
+  const nestedProviders = providers.map(file => path.join(path.dirname(file), 'nss', path.basename(file)));
+  assert.deepEqual(linuxDynamicDependencies(library, file => nestedProviders.includes(file)), nestedProviders);
   assert.throws(() => linuxDynamicDependencies(library, () => false), /Missing NSS crypto modules/);
   assert.deepEqual(linuxDynamicDependencies(path.join('/usr/lib', 'libcrypto.so.3'), exists), []);
 });

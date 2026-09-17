@@ -85,10 +85,13 @@ function linuxDynamicDependencies(library, exists = fs.existsSync) {
   // Ubuntu's libsrtp uses NSS. NSS loads its crypto modules with dlopen;
   // ldd cannot discover them, and relocated NSS searches beside itself.
   const directory = path.dirname(library);
-  const softoken = path.join(directory, 'libsoftokn3.so');
+  const moduleDirectory = [directory, path.join(directory, 'nss')]
+    .find(candidate => exists(path.join(candidate, 'libsoftokn3.so')));
+  if (!moduleDirectory) throw new Error(`Missing NSS crypto modules beside ${library}`);
+  const softoken = path.join(moduleDirectory, 'libsoftokn3.so');
   const freebl = ['libfreebl3.so', 'libfreeblpriv3.so']
-    .map(name => path.join(directory, name)).filter(exists);
-  if (!exists(softoken) || freebl.length === 0) {
+    .map(name => path.join(moduleDirectory, name)).filter(exists);
+  if (freebl.length === 0) {
     throw new Error(`Missing NSS crypto modules beside ${library}`);
   }
   return [softoken, ...freebl];
