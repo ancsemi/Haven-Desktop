@@ -122,14 +122,21 @@ async function run() {
   });
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    // The staged GStreamer libraries belong to the helper, not the browser.
+    const browserEnv = { ...process.env };
+    delete browserEnv.LD_LIBRARY_PATH;
+    let browserErrors = '';
     browser = spawn(chromium, [
       '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
       '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling',
       '--autoplay-policy=no-user-gesture-required', '--user-data-dir=' + profile,
       'http://127.0.0.1:' + server.address().port
-    ], {stdio: 'ignore', windowsHide: true});
+    ], {stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: browserEnv});
+    browser.stderr.on('data', data => { browserErrors = (browserErrors + data).slice(-8192); });
     browser.on('error', rejectResult);
-    browser.on('exit', code => { if (!stopping) rejectResult(new Error('Chromium exited early: ' + code)); });
+    browser.on('exit', (code, signal) => {
+      if (!stopping) rejectResult(new Error(`Chromium exited early: ${code ?? signal}\n${browserErrors}`));
+    });
     deadline = setTimeout(() => rejectResult(new Error('Native media smoke timed out')), 90000);
     const stats = await result;
     console.log('Native media smoke passed:', JSON.stringify(stats));
