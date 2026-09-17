@@ -80,6 +80,20 @@ function selectLinuxEncoderPlugins(allPlugins) {
   );
 }
 
+function linuxDynamicDependencies(library, exists = fs.existsSync) {
+  if (path.basename(library) !== 'libnss3.so') return [];
+  // Ubuntu's libsrtp uses NSS. NSS loads its crypto modules with dlopen;
+  // ldd cannot discover them, and relocated NSS searches beside itself.
+  const directory = path.dirname(library);
+  const softoken = path.join(directory, 'libsoftokn3.so');
+  const freebl = ['libfreebl3.so', 'libfreeblpriv3.so']
+    .map(name => path.join(directory, name)).filter(exists);
+  if (!exists(softoken) || freebl.length === 0) {
+    throw new Error(`Missing NSS crypto modules beside ${library}`);
+  }
+  return [softoken, ...freebl];
+}
+
 function stageLinux(output) {
   const pluginDirectory = process.env.GSTREAMER_PLUGIN_DIR || execFileSync(
     'pkg-config',
@@ -141,6 +155,11 @@ function stageLinux(output) {
       const destination = path.join(libraryOutput, path.basename(dependency));
       if (!fs.existsSync(destination)) copy(dependency, destination);
       queue.push(dependency);
+      for (const dynamic of linuxDynamicDependencies(dependency)) {
+        const dynamicDestination = path.join(libraryOutput, path.basename(dynamic));
+        if (!fs.existsSync(dynamicDestination)) copy(dynamic, dynamicDestination);
+        queue.push(dynamic);
+      }
     }
   }
 }
@@ -211,5 +230,6 @@ module.exports = {
   WINDOWS_REQUIRED_PLUGIN_GROUPS,
   selectLinuxEncoderPlugins,
   selectRequiredPlugins,
+  linuxDynamicDependencies,
   supportsStaging,
 };

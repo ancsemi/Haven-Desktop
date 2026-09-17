@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const path = require('node:path');
 
 const {
   LINUX_REQUIRED_PLUGIN_GROUPS,
@@ -9,7 +10,18 @@ const {
   selectLinuxEncoderPlugins,
   selectRequiredPlugins,
   supportsStaging,
+  linuxDynamicDependencies,
 } = require('../scripts/stage-gstreamer');
+
+test('includes dlopen NSS crypto providers required by Ubuntu SRTP', () => {
+  const library = path.join('/usr/lib', 'libnss3.so');
+  const providers = ['libsoftokn3.so', 'libfreebl3.so', 'libfreeblpriv3.so']
+    .map(name => path.join('/usr/lib', name));
+  const exists = file => providers.includes(file);
+  assert.deepEqual(linuxDynamicDependencies(library, exists), providers);
+  assert.throws(() => linuxDynamicDependencies(library, () => false), /Missing NSS crypto modules/);
+  assert.deepEqual(linuxDynamicDependencies(path.join('/usr/lib', 'libcrypto.so.3'), exists), []);
+});
 
 test('stages the native runtime only on supported desktop platforms', () => {
   assert.equal(supportsStaging('linux'), true);

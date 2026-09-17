@@ -160,7 +160,13 @@ async function run() {
     })));
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
-    fs.rmSync(profile, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});
+    try {
+      await fs.promises.rm(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 200});
+    } catch (error) {
+      // Keep a media/transport failure visible even if Chrome's subprocesses
+      // have not released their temporary profile yet.
+      console.warn(`Could not remove smoke profile ${profile}: ${error.message}`);
+    }
   }
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });
