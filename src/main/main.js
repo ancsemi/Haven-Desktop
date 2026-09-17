@@ -804,26 +804,46 @@ function registerVoiceShortcuts() {
     // on every repeat while the key was held (Dispencer2, NumLock on Windows).
     // Hold is emulated instead: talk on the first press, release 350 ms after
     // the repeats stop.
-    try {
-      globalShortcut.register(b.accel, () => {
-        if (b.event === 'voice:ptt' && b.mode === 'hold') {
-          const stateKey = 'g:voice:ptt';
-          if (!_uiohookDownState.has(stateKey)) {
-            _uiohookDownState.add(stateKey);
-            safeSend(getActiveContents(), 'voice:ptt-down');
-          }
-          if (_gsPttTimer) clearTimeout(_gsPttTimer);
-          _gsPttTimer = setTimeout(() => {
-            _gsPttTimer = null;
-            _uiohookDownState.delete(stateKey);
-            safeSend(getActiveContents(), 'voice:ptt-up');
-          }, 350);
-          return;
+    const fire = () => {
+      if (b.event === 'voice:ptt' && b.mode === 'hold') {
+        const stateKey = 'g:voice:ptt';
+        if (!_uiohookDownState.has(stateKey)) {
+          _uiohookDownState.add(stateKey);
+          safeSend(getActiveContents(), 'voice:ptt-down');
         }
-        safeSend(getActiveContents(), b.event === 'voice:ptt' ? 'voice:ptt-toggle' : b.event);
-      });
+        if (_gsPttTimer) clearTimeout(_gsPttTimer);
+        _gsPttTimer = setTimeout(() => {
+          _gsPttTimer = null;
+          _uiohookDownState.delete(stateKey);
+          safeSend(getActiveContents(), 'voice:ptt-up');
+        }, 350);
+        return;
+      }
+      safeSend(getActiveContents(), b.event === 'voice:ptt' ? 'voice:ptt-toggle' : b.event);
+    };
+    let registered = false;
+    try {
+      registered = !!globalShortcut.register(b.accel, fire);
     } catch (e) {
       console.warn(`[Shortcuts] Failed to register ${b.accel}:`, e.message);
+    }
+    if (registered) continue;
+
+    // Electron will not take some keys on their own as a global shortcut
+    // (Tab, Caps Lock, the backtick key on some layouts). The input hook
+    // can, in either mode, so a binding Electron refused goes through it
+    // when it is available. (#38)
+    const combo = tryLoadUiohook() ? _accelToUiohookCombo(b.accel) : null;
+    if (combo) {
+      needUiohook = true;
+      _uiohookKeyBindings.set(b.accel + '|' + b.event, {
+        keycodes: combo.keycodes,
+        mods:     combo.mods,
+        event:    b.event,
+        mode:     b.mode,
+      });
+    } else {
+      console.warn(`[Shortcuts] Could not register ${b.accel} through Electron or the input hook`);
     }
   }
 
@@ -3004,6 +3024,16 @@ function registerIPC() {
     Object.entries(cfg).forEach(([k, v]) => {
       if (k === 'pttMode') { result[k] = { ok: true, reason: 'ok' }; return; }
       if (!v)              { result[k] = { ok: true, reason: 'ok' }; return; }
+      // A key the input hook took (hold mode, or one Electron refused) is
+      // not in globalShortcut, so asking it would call the binding a
+      // conflict and the settings page would throw the key away. (#38)
+      const viaHook = [..._uiohookKeyBindings.keys(), ..._uiohookMouseBindings.keys()].some(key => key.startsWith(v + '|'));
+      if (viaHook) {
+        result[k] = uiohookOk
+          ? { ok: true,  reason: 'ok' }
+          : { ok: false, reason: 'uiohook-unavailable', accel: v };
+        return;
+      }
       if (_isUiohookAccel(v)) {
         result[k] = uiohookOk
           ? { ok: true,  reason: 'ok' }

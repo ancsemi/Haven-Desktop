@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.34
+
+### Fixed
+- **Tab, Caps Lock and the backtick key can be push-to-talk keys.** Electron refuses some keys on their own as a global shortcut, and a key the input hook had taken instead was reported back to the settings page as a conflict, so the page threw it away. A key Electron refuses now goes through the input hook, and a key the hook holds counts as registered. Reported by Constooli. (#38)
+
+---
+
 ## v1.4.33
 
 ### Added
