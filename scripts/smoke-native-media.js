@@ -35,6 +35,7 @@ pc.ontrack = e => {
 };
 async function run() {
   await fetch('/start', {method: 'POST'});
+  let lastStats = {};
   for (let iteration = 0; iteration < 240; iteration++) {
     const events = await (await fetch('/events')).json();
     for (const {event, fields: f} of events) {
@@ -58,6 +59,10 @@ async function run() {
     const report = [...(await pc.getStats()).values()];
     const video = report.find(x => x.type === 'inbound-rtp' && x.kind === 'video');
     const audio = report.find(x => x.type === 'inbound-rtp' && x.kind === 'audio');
+    lastStats = {connection: pc.connectionState, ice: pc.iceConnectionState,
+      signaling: pc.signalingState, framesDecoded: video?.framesDecoded,
+      videoBytes: video?.bytesReceived, packetsLost: video?.packetsLost,
+      audioPackets: audio?.packetsReceived};
     if (video?.framesDecoded >= 60 && audio?.packetsReceived > 0) {
       await fetch('/result', {method: 'POST', body: JSON.stringify({
         framesDecoded: video.framesDecoded, packetsLost: video.packetsLost,
@@ -68,7 +73,7 @@ async function run() {
     }
     await new Promise(resolve => setTimeout(resolve, 250));
   }
-  throw new Error('No decoded video/audio within 60 seconds');
+  throw new Error('No decoded video/audio within 60 seconds: ' + JSON.stringify(lastStats));
 }
 run().catch(error => fetch('/result', {method: 'POST', body: JSON.stringify({error: String(error)})}));
 </script>`;
@@ -129,6 +134,9 @@ async function run() {
     browser = spawn(chromium, [
       '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
       '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling',
+      // Synthetic receiver has no microphone permission; avoid mDNS-only host
+      // candidates on isolated runners without a multicast DNS resolver.
+      '--disable-features=WebRtcHideLocalIpsWithMdns',
       '--autoplay-policy=no-user-gesture-required', '--user-data-dir=' + profile,
       'http://127.0.0.1:' + server.address().port
     ], {stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: browserEnv});
