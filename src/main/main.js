@@ -2,10 +2,14 @@
 // Haven Desktop — Main Process
 // ═══════════════════════════════════════════════════════════
 
+const { handleClosedOutput } = require('./stdio-errors');
+handleClosedOutput(process.stdout);
+handleClosedOutput(process.stderr);
+
 const {
   app, BrowserWindow, BrowserView, ipcMain, Notification, Tray, Menu,
   nativeImage, desktopCapturer, session, dialog, shell, screen, globalShortcut,
-  clipboard
+  clipboard, webContents
 } = require('electron');
 const path  = require('path');
 const fs    = require('fs');
@@ -1338,7 +1342,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // a [Haven Perf] prefix.  Capture those here so they appear in the
     // server console panel and Electron's stdout for post-mortem analysis.
     view.webContents.on('console-message', (_e, level, message) => {
-      if (message.startsWith('[Haven Perf')) {
+      if (message.startsWith('[Haven Perf') || message.startsWith('[NativeScreen]') ||
+          message.startsWith('[ScreenShare]')) {
         // level: 0=verbose, 1=info, 2=warning, 3=error
         if (level >= 2) console.warn('[Renderer]', message);
         else            console.log('[Renderer]', message);
@@ -2691,11 +2696,19 @@ function registerScreenShareHandler() {
         return;
       }
       callbackUsed = true;
-      callback(payload);
+      try {
+        callback(payload);
+      } catch (err) {
+        // Electron can throw after rejecting a request without a video source,
+        // or when the requesting frame disappears before consent completes.
+        console.warn('[ScreenShare] display request callback:', err.message);
+      }
     };
 
     const requestFrame = request?.frame;
-    const targetContents = requestFrame?.host;
+    const targetContents = requestFrame && !requestFrame.isDestroyed()
+      ? webContents.fromFrame(requestFrame)
+      : null;
     if (!getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
       console.warn('[ScreenShare] rejected display capture from an untrusted frame');
       safeCallback({});

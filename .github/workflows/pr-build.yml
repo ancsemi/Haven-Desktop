@@ -61,6 +61,9 @@ jobs:
           $env:HAVEN_NATIVE_FORCE_SOFTWARE = "1"
           npm run smoke:native-screen
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CHROMIUM_EXECUTABLE = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+          npm run smoke:native-media
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows installer
         run: npx electron-builder --win --publish never
@@ -131,6 +134,7 @@ jobs:
           node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==5||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" "$probe_output"
           npm run smoke:native-screen
           HAVEN_NATIVE_FORCE_SOFTWARE=1 npm run smoke:native-screen
+          CHROMIUM_EXECUTABLE="$(command -v google-chrome)" HAVEN_NATIVE_FORCE_SOFTWARE=1 npm run smoke:native-media
 
       - name: Build Linux packages
         run: npx electron-builder --linux --publish never

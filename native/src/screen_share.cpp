@@ -1061,6 +1061,8 @@ void configure_ice(Peer* peer) {
                nullptr);
 }
 
+void remove_peer(App* app, const std::string& peerId);
+
 bool add_peer(App* app, const std::string& peerId, std::string* error) {
   if (peerId.empty() || app->peers.count(peerId)) return true;
   if (app->peers.size() >= kMaxActivePeers) {
@@ -1094,9 +1096,12 @@ bool add_peer(App* app, const std::string& peerId, std::string* error) {
   }
 
   g_object_set(peer->videoQueue,
-               "max-size-buffers", 4,
-               "max-size-bytes", 0,
-               "max-size-time", static_cast<guint64>(0),
+               // This queue holds RTP packets, not raw video frames. A single
+               // keyframe can span hundreds of packets with the same timestamp.
+               // A four-buffer leaky queue truncates those frames even on LAN.
+               "max-size-buffers", 0,
+               "max-size-bytes", 16 * 1024 * 1024,
+               "max-size-time", static_cast<guint64>(250 * GST_MSECOND),
                "leaky", 2,
                nullptr);
   GstCaps* rtpCaps = gst_caps_from_string(
@@ -1203,14 +1208,14 @@ bool add_peer(App* app, const std::string& peerId, std::string* error) {
     return false;
   }
 
-  gst_element_sync_state_with_parent(peer->videoQueue);
-  gst_element_sync_state_with_parent(peer->videoCapsFilter);
-  if (peer->audioQueue) gst_element_sync_state_with_parent(peer->audioQueue);
-  if (peer->audioCapsFilter) gst_element_sync_state_with_parent(peer->audioCapsFilter);
-  gst_element_sync_state_with_parent(peer->webrtc);
+  // Register before activating any element: negotiation callbacks can dispatch
+  // inline on this main context and must already be able to find the peer.
+  Peer* activePeer = peer.get();
+  app->peers.emplace(peerId, std::move(peer));
+  app->nextPeerGeneration++;
 
   GArray* transceivers = nullptr;
-  g_signal_emit_by_name(peer->webrtc, "get-transceivers", &transceivers);
+  g_signal_emit_by_name(activePeer->webrtc, "get-transceivers", &transceivers);
   if (transceivers) {
     for (guint index = 0; index < transceivers->len; ++index) {
       auto* transceiver = g_array_index(
@@ -1221,8 +1226,18 @@ bool add_peer(App* app, const std::string& peerId, std::string* error) {
     g_array_unref(transceivers);
   }
 
-  app->peers.emplace(peerId, std::move(peer));
-  app->nextPeerGeneration++;
+  if (!gst_element_sync_state_with_parent(activePeer->webrtc) ||
+      !gst_element_sync_state_with_parent(activePeer->videoCapsFilter) ||
+      (activePeer->audioCapsFilter &&
+       !gst_element_sync_state_with_parent(activePeer->audioCapsFilter)) ||
+      !gst_element_sync_state_with_parent(activePeer->videoQueue) ||
+      (activePeer->audioQueue &&
+       !gst_element_sync_state_with_parent(activePeer->audioQueue))) {
+    *error = "Could not activate viewer WebRTC elements";
+    remove_peer(app, peerId);
+    return false;
+  }
+
   return true;
 }
 
