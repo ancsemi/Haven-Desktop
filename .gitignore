@@ -1,6 +1,7 @@
 node_modules/
 dist/
 native/build/
+native/runtime/
 *.node
 .env
 .DS_Store

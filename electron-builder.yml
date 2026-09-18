@@ -32,6 +32,13 @@ win:
     - target: nsis
       arch: [x64]
   icon: assets/icon.png
+  extraResources:
+    - from: native/build/Release/
+      to: native/
+      filter:
+        - "haven_screen_share*"
+    - from: native/runtime/gstreamer/
+      to: native/gstreamer/
 
 nsis:
   oneClick: true
@@ -50,6 +57,13 @@ linux:
       arch: [x64]
   icon: assets/icon.png
   category: Network;Chat;InstantMessaging
+  extraResources:
+    - from: native/build/Release/
+      to: native/
+      filter:
+        - "haven_screen_share*"
+    - from: native/runtime/gstreamer/
+      to: native/gstreamer/
   desktop:
     entry:
       Name: Haven

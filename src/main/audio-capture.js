@@ -2,7 +2,7 @@
 // Haven Desktop — Audio Capture Manager
 //
 // Provides per-application audio capture via native addons:
-//   • Windows  →  WASAPI Process Loopback (Win 10 2004+)
+//   • Windows  →  WASAPI Process Loopback (build 20348+)
 //   • Linux    →  PulseAudio sink-input isolation
 //
 // The native addon (native/build/Release/haven_audio.node) is
@@ -13,12 +13,18 @@
 const path = require('path');
 
 class AudioCaptureManager {
-  constructor(opts = {}) {
-    this._t        = opts.t || (key => key);
-    this._addon    = null;
+  constructor(addon = null, beforeStop = null, t = key => key, timers = {}) {
+    this._t        = t;
+    this._addon    = addon;
+    this._beforeStop = beforeStop;
     this._capturing = false;
-    this._callback  = null;
-    this._loadAddon();
+    this._generation = 0;
+    this._now = timers.now || Date.now;
+    this._setInterval = timers.setInterval || setInterval;
+    this._clearInterval = timers.clearInterval || clearInterval;
+    this._watchdogIntervalMs = timers.watchdogIntervalMs || 2000;
+    this._watchdogStallMs = timers.watchdogStallMs || 11000;
+    if (!this._addon) this._loadAddon();
   }
 
   // ── Load the compiled native module ─────────────────────
@@ -92,6 +98,7 @@ class AudioCaptureManager {
       ['pa_context_connect failed (PulseAudio/PipeWire daemon not reachable)', 'audio.status.pulseUnavailable'],
       ['pa_context_get_sink_input_info_list returned NULL', 'audio.status.pulseEnumerationFailed'],
       ['pulse capture active', 'audio.status.pulseActive'],
+      ['Native audio capture stopped producing data', 'audio.status.captureStalled'],
     ]);
 
     let messageKey = exact.get(rawMessage);
@@ -144,11 +151,12 @@ class AudioCaptureManager {
    * Start capturing audio.
    * @param {number} pid               Target process ID
    * @param {Object} opts              Capture options
-   * @param {'include'|'exclude'} [opts.mode='include']
+   * @param {'include'|'exclude'|'system'} [opts.mode='include']
    *                                   include: capture FROM this PID tree
    *                                   exclude: capture all system audio EXCEPT this PID tree
-   *                                   (Windows only — Linux returns failure for exclude)
-   * @param {function} opts.onData     Receives Float32Array PCM chunks (48 kHz mono)
+   *                                   (native on Windows and Linux)
+   * @param {string} [opts.identity]   Process identity captured during enumeration
+   * @param {function} opts.onData     Receives (Float32Array, capturedAtMs) PCM chunks
    * @param {function} [opts.onStatus] Receives {kind, message, code} status events.
    *                                   kinds: 'starting' | 'started' | 'failed' | 'stopped'
    * @returns {boolean} true if synchronous activation succeeded
@@ -164,9 +172,13 @@ class AudioCaptureManager {
     if (typeof opts === 'function') {
       opts = { mode: 'include', onData: opts };
     }
-    const mode    = (opts && opts.mode) === 'exclude' ? 'exclude' : 'include';
+    const requestedMode = opts && opts.mode;
+    const mode = requestedMode === 'exclude' || requestedMode === 'system'
+      ? requestedMode
+      : 'include';
     const onData  = opts && opts.onData;
     const onStatus = opts && opts.onStatus;
+    const identity = typeof opts?.identity === 'string' ? opts.identity : '';
     if (typeof onData !== 'function') {
       const error = new Error(this._t('audio.error.callbackRequired'));
       error.messageKey = 'audio.error.callbackRequired';
@@ -175,66 +187,73 @@ class AudioCaptureManager {
 
     if (this._capturing) this.stopCapture();
 
-    this._callback   = onData;
-    this._onStatus   = onStatus || null;
+    const generation = ++this._generation;
     this._capturing  = true;
-    this._lastDataAt = Date.now();
+    this._lastDataAt = this._now();
     this._initFailed = false;
     this._lastStatus = null;
 
-    const dataWrap = (pcm) => {
-      this._lastDataAt = Date.now();
-      if (this._callback) this._callback(pcm);
+    const dataWrap = (pcm, capturedAt) => {
+      if (!this._capturing || this._generation !== generation) return;
+      this._lastDataAt = this._now();
+      onData(pcm, capturedAt);
     };
 
     const statusWrap = (nativeStatus) => {
+      if (!this._capturing || this._generation !== generation) return;
       const s = this._localizeStatus(nativeStatus);
       this._lastStatus = s;
       if (s && s.kind === 'failed') this._initFailed = true;
       console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}) — ${nativeStatus?.message}`);
-      if (this._onStatus) {
-        try { this._onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
+      if (onStatus) {
+        try { onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
       }
     };
 
     try {
-      const ok = this._addon.startCapture(pid, mode, dataWrap, statusWrap);
+      const ok = this._addon.startCapture(pid, mode, identity, dataWrap, statusWrap);
       if (!ok) {
         this._capturing = false;
-        this._callback  = null;
         const reason = this._lastStatus?.message || this._t('audio.error.startReturnedFalse');
         console.warn(`[AudioCapture] start failed (mode=${mode}, pid=${pid}): ${reason}`);
         return false;
       }
       console.log(`[AudioCapture] Capturing PID ${pid} (mode=${mode})`);
 
-      // Watchdog: if no data arrives for 12 seconds after start, the native
-      // capture thread likely went silent on us (target PID exited, etc).
-      // Bumped from 8s because some sources (paused games) take a while to
-      // produce real audio; the native heartbeat keeps lastDataAt fresh.
-      this._watchdog = setTimeout(() => {
-        if (this._capturing && Date.now() - this._lastDataAt > 11000) {
+      // Keep checking for the lifetime of the capture. Native heartbeats keep
+      // silent but healthy sources alive, while a dead backend is torn down.
+      this._watchdog = this._setInterval(() => {
+        if (this._capturing && this._generation === generation &&
+            this._now() - this._lastDataAt > this._watchdogStallMs) {
           console.warn('[AudioCapture] No data received in 11s — stopping capture');
-          this.stopCapture();
+          statusWrap({
+            kind: 'failed',
+            message: 'Native audio capture stopped producing data',
+            code: 0,
+          });
+          if (this._capturing && this._generation === generation) this.stopCapture();
         }
-      }, 12000);
+      }, this._watchdogIntervalMs);
+      this._watchdog.unref?.();
 
       return true;
     } catch (e) {
       this._capturing = false;
-      this._callback  = null;
       throw e;
     }
   }
 
   /** Stop active capture. */
   stopCapture() {
-    clearTimeout(this._watchdog);
+    this._clearInterval(this._watchdog);
+    this._generation++;
+    if (this._beforeStop) {
+      try { this._beforeStop(); } catch { /* */ }
+    }
     if (this._addon && this._capturing) {
       try { this._addon.stopCapture(); } catch { /* */ }
     }
     this._capturing = false;
-    this._callback  = null;
   }
 
   /**

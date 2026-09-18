@@ -19,6 +19,18 @@ jobs:
         with:
           node-version: 22.23.2
 
+      - name: Install GStreamer SDK
+        shell: pwsh
+        run: |
+          choco install gstreamer --version=1.26.9 -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          choco install gstreamer-devel --version=1.26.9 -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $gstreamerRoot = Join-Path $env:ProgramFiles "gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$gstreamerRoot\include\gstreamer-1.0\gst\gst.h")) { throw "GStreamer development headers not found" }
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gstreamerRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$gstreamerRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
       - name: Install dependencies
         run: npm ci
 
@@ -31,6 +43,28 @@ jobs:
       - name: Smoke test Electron runtime
         run: npm run smoke:electron
 
+      - name: Stage and smoke test native screen sharing
+        shell: pwsh
+        run: |
+          npm run stage:native-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$PWD\native\runtime\gstreamer\bin;$env:PATH"
+          $env:GST_PLUGIN_PATH_1_0 = "$PWD\native\runtime\gstreamer\plugins"
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $env:GST_PLUGIN_PATH_1_0
+          $env:GST_PLUGIN_SCANNER_1_0 = "$PWD\native\runtime\gstreamer\libexec\gst-plugin-scanner.exe"
+          $probeOutput = .\native\build\Release\haven_screen_share.exe --probe | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==5||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" $probeOutput.Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run smoke:native-screen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:HAVEN_NATIVE_FORCE_SOFTWARE = "1"
+          npm run smoke:native-screen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CHROMIUM_EXECUTABLE = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+          npm run smoke:native-media
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build Windows installer
         run: npx electron-builder --win --publish never
 
@@ -40,6 +74,18 @@ jobs:
           $env:ELECTRON_RUN_AS_NODE = "1"
           .\dist\win-unpacked\Haven.exe -e "const a=require('./dist/win-unpacked/resources/native/haven_audio.node'); if(typeof a.startCapture!=='function') process.exit(1)"
 
+      - name: Smoke test packaged Windows helper
+        shell: pwsh
+        run: |
+          $runtime = "$PWD\dist\win-unpacked\resources\native\gstreamer"
+          $env:PATH = "$runtime\bin;$env:PATH"
+          $env:GST_PLUGIN_PATH_1_0 = "$runtime\plugins"
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $env:GST_PLUGIN_PATH_1_0
+          $env:GST_PLUGIN_SCANNER_1_0 = "$runtime\libexec\gst-plugin-scanner.exe"
+          $env:HAVEN_SCREEN_SHARE_HELPER = "$PWD\dist\win-unpacked\resources\native\haven_screen_share.exe"
+          npm run smoke:native-screen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
@@ -48,7 +94,7 @@ jobs:
           retention-days: 30
 
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,8 +105,11 @@ jobs:
         with:
           node-version: 22.23.2
 
-      - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev xvfb
+      - name: Install native media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get remove -y libunwind-14-dev
+          sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev xvfb libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-nice gstreamer1.0-pipewire gstreamer1.0-vaapi
 
       - name: Install dependencies
         run: npm ci
@@ -74,11 +123,33 @@ jobs:
       - name: Smoke test Electron runtime
         run: xvfb-run -a npm run smoke:electron -- --no-sandbox
 
+      - name: Stage and smoke test native screen sharing
+        run: |
+          npm run stage:native-runtime
+          export LD_LIBRARY_PATH="$PWD/native/runtime/gstreamer/lib"
+          export GST_PLUGIN_PATH_1_0="$PWD/native/runtime/gstreamer/plugins"
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$PWD/native/runtime/gstreamer/plugins"
+          export GST_PLUGIN_SCANNER_1_0="$PWD/native/runtime/gstreamer/libexec/gst-plugin-scanner"
+          probe_output=$(native/build/Release/haven_screen_share --probe)
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==5||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" "$probe_output"
+          npm run smoke:native-screen
+          HAVEN_NATIVE_FORCE_SOFTWARE=1 npm run smoke:native-screen
+          CHROMIUM_EXECUTABLE="$(command -v google-chrome)" HAVEN_NATIVE_FORCE_SOFTWARE=1 npm run smoke:native-media
+
       - name: Build Linux packages
         run: npx electron-builder --linux --publish never
 
       - name: Smoke test packaged Linux addon
         run: ELECTRON_RUN_AS_NODE=1 dist/linux-unpacked/haven-desktop -e "const a=require('./dist/linux-unpacked/resources/native/haven_audio.node'); if(typeof a.startCapture!=='function') process.exit(1)"
+
+      - name: Smoke test packaged Linux helper
+        run: |
+          runtime="$PWD/dist/linux-unpacked/resources/native/gstreamer"
+          export LD_LIBRARY_PATH="$runtime/lib"
+          export GST_PLUGIN_PATH_1_0="$runtime/plugins"
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$runtime/plugins"
+          export GST_PLUGIN_SCANNER_1_0="$runtime/libexec/gst-plugin-scanner"
+          HAVEN_SCREEN_SHARE_HELPER="$PWD/dist/linux-unpacked/resources/native/haven_screen_share" npm run smoke:native-screen
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4

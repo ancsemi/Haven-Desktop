@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:">
+  <title>Share Your Screen</title>
+  <link rel="stylesheet" href="screen-picker.css">
+</head>
+<body>
+  <main class="picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+    <header>
+      <p class="eyebrow">HAVEN DESKTOP</p>
+      <h1 id="picker-title"></h1>
+      <p id="picker-subtitle" class="subtitle"></p>
+    </header>
+
+    <div class="content">
+      <section id="screens-section">
+        <h2 id="screens-title"></h2>
+        <div id="screens" class="source-grid"></div>
+      </section>
+
+      <section id="windows-section">
+        <h2 id="windows-title"></h2>
+        <div id="windows" class="source-grid"></div>
+      </section>
+
+      <section class="options-section">
+        <h2 id="video-title"></h2>
+        <select id="video-encoder"></select>
+        <p id="video-note" class="note"></p>
+      </section>
+
+      <section id="audio-section" class="options-section">
+        <h2 id="audio-title"></h2>
+        <div id="audio-modes" class="audio-options"></div>
+        <h3 id="application-audio-title"></h3>
+        <div id="audio-apps" class="audio-options"></div>
+      </section>
+    </div>
+
+    <footer>
+      <button id="cancel" class="button secondary" type="button"></button>
+      <button id="share" class="button primary" type="button" disabled></button>
+    </footer>
+  </main>
+  <script src="screen-picker.js"></script>
+</body>
+</html>
