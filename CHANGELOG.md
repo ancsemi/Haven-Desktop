@@ -6,7 +6,7 @@
 - **The native window follows the page palette.** Matrix, Braid, Compact and
   the other themes update the Electron chrome background from `--bg-primary`
   and `--accent`, so a layout overlay no longer leaves a leftover strip of
-  the previous color.
+  the previous color. By @Amnibro. (#53)
 
 ### Fixed
 - **Tab, Caps Lock and the backtick key can be push-to-talk keys.** Electron refuses some keys on their own as a global shortcut, and a key the input hook had taken instead was reported back to the settings page as a conflict, so the page threw it away. A key Electron refuses now goes through the input hook, and a key the hook holds counts as registered. Reported by Constooli. (#38)
