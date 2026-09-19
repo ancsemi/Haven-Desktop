@@ -928,7 +928,7 @@ function createWelcomeWindow() {
     minWidth: 620, minHeight: 480,
     resizable: false,
     frame: false,
-    backgroundColor: '#0d0d1a',
+    backgroundColor: store.get('themeColors.bg') || '#0d0d1a',
     icon: ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -955,7 +955,7 @@ function createAppWindow(serverUrl) {
       minWidth: 800, minHeight: 600,
       frame: true,
       autoHideMenuBar: !!store.get('hideMenuBar'),
-      backgroundColor: '#0d0d1a',
+      backgroundColor: store.get('themeColors.bg') || '#0d0d1a',
       icon: ICON_PATH,
       show: false,
       // The BrowserView per-server already disables backgroundThrottling, but
@@ -2559,7 +2559,31 @@ function registerScreenShareHandler() {
 // IPC Handlers
 // ═══════════════════════════════════════════════════════════
 
+function cssColorToHex(s) {
+  if (!s || typeof s !== 'string') return null;
+  const v = s.trim();
+  if (/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) {
+    const h = v.slice(1);
+    if (h.length === 3 || h.length === 4) return `#${[...h.slice(0, 3)].map((c) => c + c).join('')}`;
+    return `#${h.slice(0, 6)}`;
+  }
+  const m = v.match(/rgba?\(\s*([\d.]+)\s*[, ]+\s*([\d.]+)\s*[, ]+\s*([\d.]+)/i);
+  if (!m) return null;
+  const hex = (n) => Math.round(Number(n)).toString(16).padStart(2, '0');
+  return `#${hex(m[1])}${hex(m[2])}${hex(m[3])}`;
+}
+
+function applyWindowTheme({ bg, accent } = {}) {
+  const color = cssColorToHex(bg) || store.get('themeColors.bg') || '#0d0d1a';
+  store.set('themeColors', { bg: color, accent: cssColorToHex(accent) || store.get('themeColors.accent') || '#7c5cfc' });
+  for (const win of [mainWindow, welcomeWindow]) {
+    if (win && !win.isDestroyed()) win.setBackgroundColor(color);
+  }
+}
+
 function registerIPC() {
+
+  ipcMain.on('theme:colors', (_e, payload) => applyWindowTheme(payload || {}));
 
   // ── Internationalization ──────────────────────────────
   ipcMain.on('i18n:get-state-sync', (event) => {
