@@ -2569,7 +2569,9 @@ function cssColorToHex(s) {
   }
   const m = v.match(/rgba?\(\s*([\d.]+)\s*[, ]+\s*([\d.]+)\s*[, ]+\s*([\d.]+)/i);
   if (!m) return null;
-  const hex = (n) => Math.round(Number(n)).toString(16).padStart(2, '0');
+  // The value comes from the server's page, so a channel is held to 0-255;
+  // rgb(999, 0, 0) would otherwise build a seven digit color.
+  const hex = (n) => Math.max(0, Math.min(255, Math.round(Number(n)) || 0)).toString(16).padStart(2, '0');
   return `#${hex(m[1])}${hex(m[2])}${hex(m[3])}`;
 }
 
