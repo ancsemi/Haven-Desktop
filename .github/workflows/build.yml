@@ -21,6 +21,18 @@ jobs:
         with:
           node-version: 22.23.2
 
+      - name: Install GStreamer SDK
+        shell: pwsh
+        run: |
+          choco install gstreamer --version=1.26.9 -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          choco install gstreamer-devel --version=1.26.9 -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $gstreamerRoot = Join-Path $env:ProgramFiles "gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$gstreamerRoot\include\gstreamer-1.0\gst\gst.h")) { throw "GStreamer development headers not found" }
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gstreamerRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$gstreamerRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
       - name: Install dependencies
         run: npm ci
 
@@ -33,6 +45,26 @@ jobs:
       - name: Smoke test Electron runtime
         run: npm run smoke:electron
 
+      - name: Stage native media runtime
+        run: npm run stage:native-runtime
+
+      - name: Probe staged native media runtime
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\native\runtime\gstreamer\bin;$env:PATH"
+          $env:GST_PLUGIN_PATH_1_0 = "$PWD\native\runtime\gstreamer\plugins"
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $env:GST_PLUGIN_PATH_1_0
+          $env:GST_PLUGIN_SCANNER_1_0 = "$PWD\native\runtime\gstreamer\libexec\gst-plugin-scanner.exe"
+          $probeOutput = .\native\build\Release\haven_screen_share.exe --probe | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==5||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" $probeOutput.Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run smoke:native-screen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:HAVEN_NATIVE_FORCE_SOFTWARE = "1"
+          npm run smoke:native-screen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # electron-builder 26 uploads the installer and its blockmap in parallel,
       # and when no release exists yet each upload creates one, so a tag ended
       # up with two releases (1.4.29). Creating the release first gives both
@@ -43,7 +75,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1             || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "${GITHUB_REF_NAME#v}" --notes "Release notes to follow."
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "${GITHUB_REF_NAME#v}" --notes "Release notes to follow."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -63,7 +96,7 @@ jobs:
   # ─── Linux Build ────────────────────────────────────────
   build-linux:
     needs: [build-windows]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -72,8 +105,8 @@ jobs:
         with:
           node-version: 22.23.2
 
-      - name: Install PulseAudio dev headers
-        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev xvfb
+      - name: Install native media development packages
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev xvfb libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-nice gstreamer1.0-pipewire gstreamer1.0-vaapi
 
       - name: Install dependencies
         run: npm ci
@@ -86,6 +119,20 @@ jobs:
 
       - name: Smoke test Electron runtime
         run: xvfb-run -a npm run smoke:electron -- --no-sandbox
+
+      - name: Stage native media runtime
+        run: npm run stage:native-runtime
+
+      - name: Probe staged native media runtime
+        run: |
+          export LD_LIBRARY_PATH="$PWD/native/runtime/gstreamer/lib"
+          export GST_PLUGIN_PATH_1_0="$PWD/native/runtime/gstreamer/plugins"
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$PWD/native/runtime/gstreamer/plugins"
+          export GST_PLUGIN_SCANNER_1_0="$PWD/native/runtime/gstreamer/libexec/gst-plugin-scanner"
+          probe_output=$(native/build/Release/haven_screen_share --probe)
+          node -e "const p=JSON.parse(process.argv[1]); if(p.protocolVersion!==5||p.supported!==true||p.components?.capture!==true||p.components?.encoder!==true||p.components?.audio!==true||p.components?.transport!==true) process.exit(1)" "$probe_output"
+          npm run smoke:native-screen
+          HAVEN_NATIVE_FORCE_SOFTWARE=1 npm run smoke:native-screen
 
       - name: Build & Publish Linux packages
         run: npx electron-builder --linux --publish always

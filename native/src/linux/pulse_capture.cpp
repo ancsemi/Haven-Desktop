@@ -29,6 +29,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <utility>
 
 namespace haven {
 
@@ -46,6 +47,75 @@ static std::string procName(uint32_t pid) {
         return name;
     }
     return "Unknown";
+}
+
+static bool procParentPid(uint32_t pid, uint32_t* parent) {
+    std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+    std::string line;
+    if (!f.is_open() || !std::getline(f, line)) return false;
+
+    // The command is parenthesized and may contain spaces. Fields after the
+    // final ')' start with state, then parent PID.
+    const size_t commandEnd = line.rfind(')');
+    if (commandEnd == std::string::npos || commandEnd + 2 >= line.size()) return false;
+    std::istringstream fields(line.substr(commandEnd + 2));
+    char state = 0;
+    return static_cast<bool>(fields >> state >> *parent);
+}
+
+static std::string procExecutable(uint32_t pid) {
+    const std::string procPath = "/proc/" + std::to_string(pid) + "/exe";
+    std::vector<char> path(4096);
+    const ssize_t size = readlink(procPath.c_str(), path.data(), path.size() - 1);
+    if (size <= 0) return {};
+    path[static_cast<size_t>(size)] = '\0';
+    return path.data();
+}
+
+static std::string procIdentity(uint32_t pid) {
+    const std::string executable = procExecutable(pid);
+    if (executable.empty()) return {};
+    std::ifstream file("/proc/" + std::to_string(pid) + "/stat");
+    std::string line;
+    if (!file.is_open() || !std::getline(file, line)) return {};
+    const size_t commandEnd = line.rfind(')');
+    if (commandEnd == std::string::npos || commandEnd + 2 >= line.size()) return {};
+    std::istringstream fields(line.substr(commandEnd + 2));
+    std::string value;
+    for (int field = 3; field <= 22; ++field) {
+        if (!(fields >> value)) return {};
+    }
+    return executable + ":" + value;
+}
+
+static bool isExternalProcess(uint32_t pid, uint32_t rootPid) {
+    const std::string executable = procExecutable(pid);
+    const std::string rootExecutable = procExecutable(rootPid);
+    if (executable.empty() || rootExecutable.empty() || executable == rootExecutable) return false;
+
+    for (int depth = 0; pid != 0 && depth < 64; depth++) {
+        if (pid == rootPid) return false;
+        uint32_t parent = 0;
+        if (!procParentPid(pid, &parent) || parent == pid) return false;
+        if (parent == 0) return true;
+        pid = parent;
+    }
+    return false;
+}
+
+static bool isOwnProcess(uint32_t pid, uint32_t rootPid) {
+    const std::string executable = procExecutable(pid);
+    const std::string rootExecutable = procExecutable(rootPid);
+    if (!executable.empty() && !rootExecutable.empty() && executable == rootExecutable)
+        return true;
+
+    for (int depth = 0; pid != 0 && depth < 64; depth++) {
+        if (pid == rootPid) return true;
+        uint32_t parent = 0;
+        if (!procParentPid(pid, &parent) || parent == pid) return false;
+        pid = parent;
+    }
+    return false;
 }
 
 // Synchronous PulseAudio helper — runs main loop until callback signals done
@@ -89,6 +159,7 @@ struct SinkInputInfo {
     uint32_t    index;
     uint32_t    pid;
     uint32_t    sinkIndex;
+    uint32_t    ownerModule;
     std::string name;
 };
 
@@ -108,6 +179,7 @@ static void sinkInputCb(pa_context*, const pa_sink_input_info* info, int eol, vo
     SinkInputInfo si;
     si.index     = info->index;
     si.sinkIndex = info->sink;
+    si.ownerModule = info->owner_module;
     si.name      = info->name ? info->name : "Unknown";
 
     const char* pidStr = pa_proplist_gets(info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
@@ -132,9 +204,91 @@ static void moduleLoadCb(pa_context*, uint32_t idx, void* ud) {
 }
 
 // Success callback
-struct OpDone { bool done = false; };
-static void successCb(pa_context*, int, void* ud) {
-    ((OpDone*)ud)->done = true;
+struct OpDone {
+    bool done = false;
+    bool success = false;
+};
+static void successCb(pa_context*, int success, void* ud) {
+    auto* result = static_cast<OpDone*>(ud);
+    result->success = success != 0;
+    result->done = true;
+}
+
+static pa_buffer_attr lowLatencyRecordBuffer(const pa_sample_spec& spec) {
+    pa_buffer_attr attr;
+    attr.maxlength = static_cast<uint32_t>(pa_usec_to_bytes(100000, &spec));
+    attr.tlength = static_cast<uint32_t>(-1);
+    attr.prebuf = static_cast<uint32_t>(-1);
+    attr.minreq = static_cast<uint32_t>(-1);
+    attr.fragsize = static_cast<uint32_t>(pa_usec_to_bytes(10000, &spec));
+    return attr;
+}
+
+struct ServerSinkResult {
+    std::string name;
+    bool done = false;
+};
+
+static void serverSinkCb(pa_context*, const pa_server_info* info, void* ud) {
+    auto* result = static_cast<ServerSinkResult*>(ud);
+    if (info && info->default_sink_name) result->name = info->default_sink_name;
+    result->done = true;
+}
+
+static std::string defaultSinkName(PaSync& pa) {
+    ServerSinkResult result;
+    pa_operation* op = pa_context_get_server_info(pa.ctx, serverSinkCb, &result);
+    if (!op) return {};
+    while (!result.done) pa.iterateBlock();
+    pa_operation_unref(op);
+    return result.name;
+}
+
+struct NamedSinkResult {
+    std::string name;
+    uint32_t index = PA_INVALID_INDEX;
+    bool done = false;
+};
+
+static void namedSinkCb(pa_context*, const pa_sink_info* info, int eol, void* ud) {
+    auto* result = static_cast<NamedSinkResult*>(ud);
+    if (eol > 0 || !info) {
+        result->done = true;
+        return;
+    }
+    if (info->name && result->name == info->name) result->index = info->index;
+}
+
+static uint32_t sinkIndexByName(PaSync& pa, const std::string& name) {
+    NamedSinkResult result;
+    result.name = name;
+    pa_operation* op = pa_context_get_sink_info_by_name(pa.ctx, name.c_str(), namedSinkCb, &result);
+    if (!op) return PA_INVALID_INDEX;
+    while (!result.done) pa.iterateBlock();
+    pa_operation_unref(op);
+    return result.index;
+}
+
+static bool moveSinkInput(PaSync& pa, uint32_t inputIndex, uint32_t sinkIndex) {
+    OpDone result;
+    pa_operation* op = pa_context_move_sink_input_by_index(
+        pa.ctx, inputIndex, sinkIndex, successCb, &result);
+    if (!op) return false;
+    while (!result.done) pa.iterateBlock();
+    pa_operation_unref(op);
+    return result.success;
+}
+
+static bool unloadModule(PaSync& pa, uint32_t& moduleIndex) {
+    if (moduleIndex == PA_INVALID_INDEX) return true;
+    OpDone result;
+    pa_operation* op = pa_context_unload_module(pa.ctx, moduleIndex, successCb, &result);
+    if (!op) return false;
+    while (!result.done) pa.iterateBlock();
+    pa_operation_unref(op);
+    if (!result.success) return false;
+    moduleIndex = PA_INVALID_INDEX;
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -169,12 +323,10 @@ void PulseCapture::emitStatus(CaptureStatusKind kind, const std::string& msg, in
 }
 
 bool PulseCapture::IsSupported() const {
-    // Check if PulseAudio is available
-    pa_simple* s = nullptr;
-    pa_sample_spec ss = { PA_SAMPLE_FLOAT32LE, 48000, 1 };
-    s = pa_simple_new(nullptr, "HavenProbe", PA_STREAM_RECORD, nullptr, "probe", &ss, nullptr, nullptr, nullptr);
-    if (s) { pa_simple_free(s); return true; }
-    return false;
+    // Capability checks must not open the default recording source (usually
+    // the microphone). A control connection is enough for both capture modes.
+    PaSync pa;
+    return pa.connect();
 }
 
 std::vector<AudioApp> PulseCapture::GetAudioApplications() {
@@ -194,14 +346,18 @@ std::vector<AudioApp> PulseCapture::GetAudioApplications() {
 
     // Deduplicate by PID
     std::vector<uint32_t> seen;
+    const uint32_t ourPid = static_cast<uint32_t>(getpid());
     for (auto& si : ed.inputs) {
         if (si.pid == 0) continue;
+        if (isOwnProcess(si.pid, ourPid)) continue;
         if (std::find(seen.begin(), seen.end(), si.pid) != seen.end()) continue;
         seen.push_back(si.pid);
 
         AudioApp app;
         app.pid  = si.pid;
         app.name = si.name.empty() ? procName(si.pid) : si.name;
+        app.identity = procIdentity(si.pid);
+        if (app.identity.empty()) continue;
         result.push_back(app);
     }
 
@@ -209,33 +365,45 @@ std::vector<AudioApp> PulseCapture::GetAudioApplications() {
 }
 
 bool PulseCapture::StartCapture(uint32_t pid, CaptureMode mode,
-                                AudioDataCb dataCb, CaptureStatusCb statusCb) {
+                                   const std::string& expectedIdentity,
+                                   AudioDataCb dataCb, CaptureStatusCb statusCb) {
     StopCapture();
+    if (m_nullSinkModule != PA_INVALID_INDEX || m_loopbackModule != PA_INVALID_INDEX) {
+        return false;
+    }
 
+    std::string targetIdentity = expectedIdentity;
+    if (mode == CaptureMode::IncludeProcess && targetIdentity.empty()) {
+        targetIdentity = procIdentity(pid);
+    }
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_targetPid      = pid;
+        m_targetIdentity = targetIdentity;
         m_mode           = mode;
         m_callback       = dataCb;
         m_statusCallback = statusCb;
-        m_running        = true;
     }
-
-    if (mode == CaptureMode::ExcludeProcess) {
-        // PulseAudio/PipeWire don't have a built-in equivalent to Windows'
-        // exclude-mode process loopback. Surface this clearly so the JS
-        // side can fall back to system-monitor capture explicitly.
+    if (mode == CaptureMode::IncludeProcess &&
+        (targetIdentity.empty() || procIdentity(pid) != targetIdentity)) {
         emitStatus(CaptureStatusKind::Failed,
-            "Exclude-mode capture is not supported on Linux (PulseAudio/PipeWire)", 0);
-        m_running = false;
+                   "Selected audio process changed before capture started");
         std::lock_guard<std::mutex> lock(m_mutex);
         m_callback = nullptr;
         m_statusCallback = nullptr;
         return false;
     }
+    m_running = true;
 
-    emitStatus(CaptureStatusKind::Starting,
-        "preparing pulse capture for PID " + std::to_string(pid));
+    std::string startingMessage;
+    if (mode == CaptureMode::ExcludeProcess) {
+        startingMessage = "preparing system capture without PID tree " + std::to_string(pid);
+    } else if (mode == CaptureMode::SystemLoopback) {
+        startingMessage = "preparing pulse system capture";
+    } else {
+        startingMessage = "preparing pulse capture for PID " + std::to_string(pid);
+    }
+    emitStatus(CaptureStatusKind::Starting, startingMessage);
 
     m_thread = std::thread([this]() { captureLoop(); });
     return true;
@@ -247,25 +415,20 @@ void PulseCapture::StopCapture() {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_callback = nullptr;
+        m_targetIdentity.clear();
     }
 
     // Clean up PulseAudio modules
-    if (m_nullSinkModule != 0 || m_loopbackModule != 0) {
+    if (m_nullSinkModule != PA_INVALID_INDEX || m_loopbackModule != PA_INVALID_INDEX) {
         PaSync pa;
         if (pa.connect()) {
-            if (m_loopbackModule != 0) {
-                OpDone od;
-                auto* op = pa_context_unload_module(pa.ctx, m_loopbackModule, successCb, &od);
-                if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
-            }
-            if (m_nullSinkModule != 0) {
-                OpDone od;
-                auto* op = pa_context_unload_module(pa.ctx, m_nullSinkModule, successCb, &od);
-                if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
-            }
+            if (!unloadModule(pa, m_loopbackModule))
+                fprintf(stderr, "[Haven Pulse] failed to unload routing module\n");
+            if (!unloadModule(pa, m_nullSinkModule))
+                fprintf(stderr, "[Haven Pulse] failed to unload capture module\n");
+        } else {
+            fprintf(stderr, "[Haven Pulse] cleanup deferred: server unavailable\n");
         }
-        m_nullSinkModule = 0;
-        m_loopbackModule = 0;
     }
     if (wasRunning) emitStatus(CaptureStatusKind::Stopped, "pulse capture stopped");
     {
@@ -285,7 +448,265 @@ void PulseCapture::captureLoop() {
         return;
     }
 
+    if (m_mode == CaptureMode::ExcludeProcess) {
+        const std::string outputName = defaultSinkName(pa);
+        const uint32_t outputIndex = sinkIndexByName(pa, outputName);
+        if (outputName.empty() || outputIndex == PA_INVALID_INDEX) {
+            emitStatus(CaptureStatusKind::Failed, "PulseAudio has no default output");
+            m_running = false;
+            return;
+        }
+
+        const std::string suffix = std::to_string(getpid());
+        const std::string captureSinkName = "HavenCapture_" + suffix;
+        const std::string combinedSinkName = "HavenCombined_" + suffix;
+
+        ModuleLoadResult nullResult;
+        std::string nullArgs = "sink_name=" + captureSinkName +
+            " sink_properties=device.description=\"Haven\\ Clean\\ System\\ Capture\"" +
+            " rate=48000 channels=1 format=float32le";
+        pa_operation* op = pa_context_load_module(
+            pa.ctx, "module-null-sink", nullArgs.c_str(), moduleLoadCb, &nullResult);
+        if (op) {
+            while (!nullResult.done) pa.iterateBlock();
+            pa_operation_unref(op);
+        }
+        if (nullResult.index == PA_INVALID_INDEX) {
+            emitStatus(CaptureStatusKind::Failed, "PulseAudio could not create the clean capture output");
+            m_running = false;
+            return;
+        }
+        m_nullSinkModule = nullResult.index;
+
+        ModuleLoadResult combinedResult;
+        std::string combinedArgs = "sink_name=" + combinedSinkName +
+            " sink_properties=device.description=\"Haven\\ System\\ Without\\ Haven\"" +
+            " slaves=" + outputName + "," + captureSinkName + " adjust_time=0";
+        op = pa_context_load_module(
+            pa.ctx, "module-combine-sink", combinedArgs.c_str(), moduleLoadCb, &combinedResult);
+        if (op) {
+            while (!combinedResult.done) pa.iterateBlock();
+            pa_operation_unref(op);
+        }
+        if (combinedResult.index == PA_INVALID_INDEX) {
+            unloadModule(pa, m_nullSinkModule);
+            emitStatus(CaptureStatusKind::Failed,
+                "PipeWire could not create the clean system audio route");
+            m_running = false;
+            return;
+        }
+        m_loopbackModule = combinedResult.index;
+
+        usleep(50000);
+        const uint32_t captureSinkIndex = sinkIndexByName(pa, captureSinkName);
+        const uint32_t combinedSinkIndex = sinkIndexByName(pa, combinedSinkName);
+        if (captureSinkIndex == PA_INVALID_INDEX || combinedSinkIndex == PA_INVALID_INDEX) {
+            unloadModule(pa, m_loopbackModule);
+            unloadModule(pa, m_nullSinkModule);
+            emitStatus(CaptureStatusKind::Failed,
+                "PipeWire could not activate the clean system audio route");
+            m_running = false;
+            return;
+        }
+
+        struct MovedSinkInput {
+            uint32_t index;
+            uint32_t originalSink;
+            uint32_t pid;
+            std::string identity;
+        };
+        std::vector<MovedSinkInput> movedInputs;
+        auto routeNewInputs = [&]() {
+            SinkInputEnumData inputs;
+            pa_operation* listOp = pa_context_get_sink_input_info_list(
+                pa.ctx, sinkInputCb, &inputs);
+            if (!listOp) return;
+            while (!inputs.done) pa.iterateBlock();
+            pa_operation_unref(listOp);
+
+            movedInputs.erase(std::remove_if(
+                movedInputs.begin(), movedInputs.end(), [&](const auto& moved) {
+                    return std::none_of(inputs.inputs.begin(), inputs.inputs.end(),
+                        [&](const auto& input) {
+                            return input.index == moved.index && input.pid == moved.pid &&
+                                procIdentity(input.pid) == moved.identity;
+                        });
+                }), movedInputs.end());
+
+            for (const auto& input : inputs.inputs) {
+                if (input.ownerModule != PA_INVALID_INDEX || input.pid == 0 ||
+                    input.sinkIndex != outputIndex) continue;
+                if (!isExternalProcess(input.pid, m_targetPid)) continue;
+                const bool alreadyMoved = std::any_of(
+                    movedInputs.begin(), movedInputs.end(),
+                    [&](const auto& moved) { return moved.index == input.index; });
+                if (alreadyMoved) continue;
+                const std::string identity = procIdentity(input.pid);
+                if (identity.empty()) continue;
+                if (moveSinkInput(pa, input.index, combinedSinkIndex)) {
+                    movedInputs.push_back({
+                        input.index, input.sinkIndex, input.pid, identity,
+                    });
+                }
+            }
+        };
+        auto restoreWith = [&](PaSync& context) {
+            SinkInputEnumData inputs;
+            pa_operation* listOp = pa_context_get_sink_input_info_list(
+                context.ctx, sinkInputCb, &inputs);
+            if (!listOp) return false;
+            while (!inputs.done) context.iterateBlock();
+            pa_operation_unref(listOp);
+            bool restored = true;
+            for (const auto& moved : movedInputs) {
+                const auto current = std::find_if(
+                    inputs.inputs.begin(), inputs.inputs.end(), [&](const auto& input) {
+                        return input.index == moved.index && input.pid == moved.pid &&
+                            input.sinkIndex == combinedSinkIndex;
+                    });
+                if (current == inputs.inputs.end() ||
+                    procIdentity(current->pid) != moved.identity) continue;
+                if (!moveSinkInput(context, moved.index, moved.originalSink)) restored = false;
+            }
+            return restored;
+        };
+        auto restoreInputs = [&]() {
+            if (restoreWith(pa)) return true;
+            PaSync retry;
+            return retry.connect() && restoreWith(retry);
+        };
+
+        routeNewInputs();
+
+        pa_sample_spec ss = { PA_SAMPLE_FLOAT32LE, 48000, 1 };
+        const pa_buffer_attr bufferAttr = lowLatencyRecordBuffer(ss);
+        const std::string monitorName = captureSinkName + ".monitor";
+        int err = 0;
+        pa_simple* rec = pa_simple_new(
+            nullptr, "HavenDesktop", PA_STREAM_RECORD,
+            monitorName.c_str(), "System Audio Without Haven",
+            &ss, nullptr, &bufferAttr, &err
+        );
+        if (!rec) {
+            if (!restoreInputs())
+                fprintf(stderr, "[Haven Pulse] failed to restore one or more audio streams\n");
+            unloadModule(pa, m_loopbackModule);
+            unloadModule(pa, m_nullSinkModule);
+            emitStatus(CaptureStatusKind::Failed,
+                std::string("pa_simple_new failed: ") + pa_strerror(err), err);
+            m_running = false;
+            return;
+        }
+
+        emitStatus(CaptureStatusKind::Started, "system capture active without Haven audio");
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_callback) {
+                std::vector<float> silence(480, 0.0f);
+                m_callback(silence.data(), silence.size());
+            }
+        }
+
+        const size_t chunkFrames = 480;
+        std::vector<float> buf(chunkFrames);
+        unsigned int chunksSinceRouteScan = 0;
+        while (m_running) {
+            if (pa_simple_read(rec, buf.data(), chunkFrames * sizeof(float), &err) < 0) {
+                emitStatus(CaptureStatusKind::Failed,
+                    std::string("PulseAudio clean system capture failed: ") + pa_strerror(err), err);
+                m_running = false;
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_callback) m_callback(buf.data(), chunkFrames);
+            }
+            if (++chunksSinceRouteScan >= 25) {
+                routeNewInputs();
+                chunksSinceRouteScan = 0;
+            }
+        }
+
+        pa_simple_free(rec);
+        if (!restoreInputs())
+            fprintf(stderr, "[Haven Pulse] failed to restore one or more audio streams\n");
+        return;
+    }
+
+    if (m_mode == CaptureMode::SystemLoopback) {
+        struct DefaultSinkInfo {
+            std::string name;
+            bool done = false;
+        } sink;
+        auto serverInfoCb = [](pa_context*, const pa_server_info* info, void* ud) {
+            auto* result = static_cast<DefaultSinkInfo*>(ud);
+            if (info && info->default_sink_name) result->name = info->default_sink_name;
+            result->done = true;
+        };
+
+        pa_operation* op = pa_context_get_server_info(pa.ctx, serverInfoCb, &sink);
+        if (!op) {
+            emitStatus(CaptureStatusKind::Failed, "PulseAudio could not read the default output");
+            m_running = false;
+            return;
+        }
+        while (!sink.done) pa.iterateBlock();
+        pa_operation_unref(op);
+        if (sink.name.empty()) {
+            emitStatus(CaptureStatusKind::Failed, "PulseAudio has no default output");
+            m_running = false;
+            return;
+        }
+
+        const std::string monitor = sink.name + ".monitor";
+        pa_sample_spec ss = { PA_SAMPLE_FLOAT32LE, 48000, 1 };
+        const pa_buffer_attr bufferAttr = lowLatencyRecordBuffer(ss);
+        int err = 0;
+        pa_simple* rec = pa_simple_new(
+            nullptr, "HavenDesktop", PA_STREAM_RECORD,
+            monitor.c_str(), "System Audio Capture",
+            &ss, nullptr, &bufferAttr, &err
+        );
+        if (!rec) {
+            emitStatus(CaptureStatusKind::Failed,
+                std::string("pa_simple_new failed: ") + pa_strerror(err), err);
+            m_running = false;
+            return;
+        }
+
+        emitStatus(CaptureStatusKind::Started, "pulse system capture active");
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_callback) {
+                std::vector<float> silence(480, 0.0f);
+                m_callback(silence.data(), silence.size());
+            }
+        }
+
+        const size_t chunkFrames = 480;
+        std::vector<float> buf(chunkFrames);
+        while (m_running) {
+            if (pa_simple_read(rec, buf.data(), chunkFrames * sizeof(float), &err) < 0) {
+                emitStatus(CaptureStatusKind::Failed,
+                    std::string("PulseAudio system capture failed: ") + pa_strerror(err), err);
+                m_running = false;
+                break;
+            }
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_callback) m_callback(buf.data(), chunkFrames);
+        }
+        pa_simple_free(rec);
+        return;
+    }
+
     // ── Step 1: Find the target process's sink input ──────
+    if (m_mode == CaptureMode::IncludeProcess &&
+        procIdentity(m_targetPid) != m_targetIdentity) {
+        emitStatus(CaptureStatusKind::Failed,
+                   "Selected audio process changed before routing started");
+        m_running = false;
+        return;
+    }
     SinkInputEnumData ed;
 
     pa_operation* op = pa_context_get_sink_input_info_list(pa.ctx, sinkInputCb, &ed);
@@ -299,6 +720,14 @@ void PulseCapture::captureLoop() {
 
     uint32_t targetSinkInput = PA_INVALID_INDEX;
     uint32_t originalSink    = PA_INVALID_INDEX;
+
+    if (m_mode == CaptureMode::IncludeProcess &&
+        procIdentity(m_targetPid) != m_targetIdentity) {
+        emitStatus(CaptureStatusKind::Failed,
+                   "Selected audio process changed during routing setup");
+        m_running = false;
+        return;
+    }
 
     for (auto& si : ed.inputs) {
         if (si.pid == m_targetPid) {
@@ -315,6 +744,72 @@ void PulseCapture::captureLoop() {
         m_running = false;
         return;
     }
+
+    struct RoutedTargetInput {
+        uint32_t index;
+        uint32_t originalSink;
+        uint32_t pid;
+        std::string identity;
+    };
+    std::vector<RoutedTargetInput> routedTargetInputs;
+    auto routeTargetInputs = [&](PaSync& context, uint32_t routeSink) {
+        if (procIdentity(m_targetPid) != m_targetIdentity) {
+            emitStatus(CaptureStatusKind::Failed,
+                       "Selected audio process changed while capture was active");
+            m_running = false;
+            return false;
+        }
+        SinkInputEnumData inputs;
+        pa_operation* listOp = pa_context_get_sink_input_info_list(
+            context.ctx, sinkInputCb, &inputs);
+        if (!listOp) return !routedTargetInputs.empty();
+        while (!inputs.done) context.iterateBlock();
+        pa_operation_unref(listOp);
+
+        routedTargetInputs.erase(std::remove_if(
+            routedTargetInputs.begin(), routedTargetInputs.end(), [&](const auto& routed) {
+                return std::none_of(inputs.inputs.begin(), inputs.inputs.end(),
+                    [&](const auto& input) {
+                        return input.index == routed.index && input.pid == routed.pid &&
+                            procIdentity(input.pid) == routed.identity;
+                    });
+            }), routedTargetInputs.end());
+
+        for (const auto& input : inputs.inputs) {
+            if (input.pid != m_targetPid) continue;
+            if (std::any_of(routedTargetInputs.begin(), routedTargetInputs.end(),
+                [&](const auto& routed) { return routed.index == input.index; })) continue;
+            const std::string identity = procIdentity(input.pid);
+            if (identity != m_targetIdentity) continue;
+            if (moveSinkInput(context, input.index, routeSink)) {
+                routedTargetInputs.push_back({
+                    input.index, input.sinkIndex, input.pid, identity,
+                });
+            }
+        }
+        return !routedTargetInputs.empty();
+    };
+    auto restoreTargetInputs = [&](PaSync& context, uint32_t routeSink) {
+        SinkInputEnumData inputs;
+        pa_operation* listOp = pa_context_get_sink_input_info_list(
+            context.ctx, sinkInputCb, &inputs);
+        if (!listOp) return false;
+        while (!inputs.done) context.iterateBlock();
+        pa_operation_unref(listOp);
+        bool restored = true;
+        for (const auto& routed : routedTargetInputs) {
+            const auto current = std::find_if(
+                inputs.inputs.begin(), inputs.inputs.end(), [&](const auto& input) {
+                    return input.index == routed.index && input.pid == routed.pid &&
+                        input.sinkIndex == routeSink;
+                });
+            if (current == inputs.inputs.end() ||
+                procIdentity(current->pid) != routed.identity) continue;
+            if (!moveSinkInput(context, routed.index, routed.originalSink)) restored = false;
+        }
+        return restored;
+    };
+    uint32_t routedSinkIndex = PA_INVALID_INDEX;
 
     // ── Detect PipeWire ───────────────────────────────────
     // PipeWire's pipewire-pulse adds "pipewire" to server info.
@@ -341,11 +836,19 @@ void PulseCapture::captureLoop() {
         "sink_properties=device.description=\"Haven\\ Per-App\\ Capture\" "
         "rate=48000 channels=1 format=float32le",
         moduleLoadCb, &nullRes);
-    if (!op) { m_running = false; return; }
+    if (!op) {
+        emitStatus(CaptureStatusKind::Failed, "PulseAudio could not create the capture output");
+        m_running = false;
+        return;
+    }
     while (!nullRes.done) pa.iterateBlock();
     pa_operation_unref(op);
 
-    if (nullRes.index == PA_INVALID_INDEX) { m_running = false; return; }
+    if (nullRes.index == PA_INVALID_INDEX) {
+        emitStatus(CaptureStatusKind::Failed, "PulseAudio rejected the capture output");
+        m_running = false;
+        return;
+    }
     m_nullSinkModule = nullRes.index;
 
     // ── Look up the null sink index ───────────────────────
@@ -364,11 +867,8 @@ void PulseCapture::captureLoop() {
     if (op) { while (!sl.done) pa.iterateBlock(); pa_operation_unref(op); }
 
     if (sl.idx == PA_INVALID_INDEX) {
-        // Cleanup and bail
-        OpDone od;
-        op = pa_context_unload_module(pa.ctx, m_nullSinkModule, successCb, &od);
-        if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
-        m_nullSinkModule = 0;
+        unloadModule(pa, m_nullSinkModule);
+        emitStatus(CaptureStatusKind::Failed, "PulseAudio could not find the capture output");
         m_running = false;
         return;
     }
@@ -384,6 +884,14 @@ void PulseCapture::captureLoop() {
 
     op = pa_context_get_sink_info_by_index(pa.ctx, originalSink, sinkNameCb, &origSinkLookup);
     if (op) { while (!origSinkLookup.done) pa.iterateBlock(); pa_operation_unref(op); }
+
+    if (isPipeWire && origSinkLookup.name.empty()) {
+        unloadModule(pa, m_nullSinkModule);
+        emitStatus(CaptureStatusKind::Failed,
+            "PipeWire could not identify the selected application's output");
+        m_running = false;
+        return;
+    }
 
     // ── Step 3: Route audio ───────────────────────────────
     //
@@ -429,38 +937,31 @@ void PulseCapture::captureLoop() {
             if (csl.idx != PA_INVALID_INDEX) {
                 // Small delay to let PipeWire finish setting up the combined sink
                 usleep(150000);
-                OpDone od;
-                op = pa_context_move_sink_input_by_index(pa.ctx, targetSinkInput, csl.idx, successCb, &od);
-                if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
-                combineSinkOk = true;
+                routedSinkIndex = csl.idx;
+                combineSinkOk = routeTargetInputs(pa, routedSinkIndex);
             }
         }
 
         if (!combineSinkOk) {
-            // Combine-sink failed — fall back to loopback from original sink's
-            // monitor.  This captures ALL audio on that output device (not just
-            // the target app), but it won't crash.
-            fprintf(stderr, "[Haven AudioCapture] combine-sink unavailable on PipeWire — falling back to loopback\n");
-            // Clean up failed combine-sink module if it was partially loaded
-            if (m_loopbackModule != 0) {
-                OpDone od2;
-                auto* unOp = pa_context_unload_module(pa.ctx, m_loopbackModule, successCb, &od2);
-                if (unOp) { while (!od2.done) pa.iterateBlock(); pa_operation_unref(unOp); }
-                m_loopbackModule = 0;
-            }
-            // Loopback from original sink's monitor → HavenCapture
-            ModuleLoadResult lbRes;
-            std::string args = "source=" + origSinkLookup.name + ".monitor sink=HavenCapture sink_dont_move=true";
-            op = pa_context_load_module(pa.ctx, "module-loopback", args.c_str(), moduleLoadCb, &lbRes);
-            if (op) { while (!lbRes.done) pa.iterateBlock(); pa_operation_unref(op); }
-            m_loopbackModule = lbRes.index;
+            // Never fall back to the output monitor here: that would turn an
+            // application-only choice into a capture of every app, including
+            // Haven voice output.
+            unloadModule(pa, m_loopbackModule);
+            unloadModule(pa, m_nullSinkModule);
+            emitStatus(CaptureStatusKind::Failed,
+                "PipeWire could not isolate the selected application audio");
+            m_running = false;
+            return;
         }
     } else {
-        // Classic PulseAudio: move sink input to null sink directly
-        {
-            OpDone od;
-            op = pa_context_move_sink_input_by_index(pa.ctx, targetSinkInput, sl.idx, successCb, &od);
-            if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
+        // Classic PulseAudio: move every current stream from the selected app.
+        routedSinkIndex = sl.idx;
+        if (!routeTargetInputs(pa, routedSinkIndex)) {
+            unloadModule(pa, m_nullSinkModule);
+            emitStatus(CaptureStatusKind::Failed,
+                "PulseAudio could not isolate the selected application audio");
+            m_running = false;
+            return;
         }
 
         // Loopback null sink → default output so user still hears the app
@@ -470,6 +971,16 @@ void PulseCapture::captureLoop() {
             op = pa_context_load_module(pa.ctx, "module-loopback", args.c_str(), moduleLoadCb, &lbRes);
             if (op) { while (!lbRes.done) pa.iterateBlock(); pa_operation_unref(op); }
             m_loopbackModule = lbRes.index;
+            if (m_loopbackModule == PA_INVALID_INDEX) {
+                if (!restoreTargetInputs(pa, routedSinkIndex)) {
+                    fprintf(stderr, "[Haven Pulse] failed to restore application output\n");
+                }
+                unloadModule(pa, m_nullSinkModule);
+                emitStatus(CaptureStatusKind::Failed,
+                    "PulseAudio could not create the application playback route");
+                m_running = false;
+                return;
+            }
         }
     }
 
@@ -482,36 +993,23 @@ void PulseCapture::captureLoop() {
     ss.format   = PA_SAMPLE_FLOAT32LE;
     ss.rate     = 48000;
     ss.channels = 1;
+    const pa_buffer_attr bufferAttr = lowLatencyRecordBuffer(ss);
 
     int err = 0;
     pa_simple* rec = pa_simple_new(
         nullptr, "HavenDesktop", PA_STREAM_RECORD,
         "HavenCapture.monitor", "Per-App Capture",
-        &ss, nullptr, nullptr, &err
+        &ss, nullptr, &bufferAttr, &err
     );
 
     if (!rec) {
         emitStatus(CaptureStatusKind::Failed,
             std::string("pa_simple_new failed: ") + pa_strerror(err), err);
+        if (!restoreTargetInputs(pa, routedSinkIndex))
+            fprintf(stderr, "[Haven Pulse] failed to restore application output\n");
         // Clean up modules before returning
-        if (m_loopbackModule != 0) {
-            OpDone od;
-            auto* unOp = pa_context_unload_module(pa.ctx, m_loopbackModule, successCb, &od);
-            if (unOp) { while (!od.done) pa.iterateBlock(); pa_operation_unref(unOp); }
-            m_loopbackModule = 0;
-        }
-        if (m_nullSinkModule != 0) {
-            OpDone od;
-            auto* unOp = pa_context_unload_module(pa.ctx, m_nullSinkModule, successCb, &od);
-            if (unOp) { while (!od.done) pa.iterateBlock(); pa_operation_unref(unOp); }
-            m_nullSinkModule = 0;
-        }
-        // Restore original sink
-        if (originalSink != PA_INVALID_INDEX) {
-            OpDone od;
-            auto* mvOp = pa_context_move_sink_input_by_index(pa.ctx, targetSinkInput, originalSink, successCb, &od);
-            if (mvOp) { while (!od.done) pa.iterateBlock(); pa_operation_unref(mvOp); }
-        }
+        unloadModule(pa, m_loopbackModule);
+        unloadModule(pa, m_nullSinkModule);
         m_running = false;
         return;
     }
@@ -529,15 +1027,22 @@ void PulseCapture::captureLoop() {
     // Read PCM data in ~10 ms chunks
     const size_t chunkFrames = 480; // 10 ms at 48 kHz
     std::vector<float> buf(chunkFrames);
+    unsigned int chunksSinceRouteScan = 0;
 
     while (m_running) {
         if (pa_simple_read(rec, buf.data(), chunkFrames * sizeof(float), &err) < 0) {
             break;
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_callback) {
-            m_callback(buf.data(), chunkFrames);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_callback) {
+                m_callback(buf.data(), chunkFrames);
+            }
+        }
+        if (++chunksSinceRouteScan >= 25) {
+            routeTargetInputs(pa, routedSinkIndex);
+            chunksSinceRouteScan = 0;
         }
     }
 
@@ -547,11 +1052,8 @@ void PulseCapture::captureLoop() {
     {
         PaSync pa2;
         if (pa2.connect()) {
-            if (originalSink != PA_INVALID_INDEX) {
-                OpDone od;
-                op = pa_context_move_sink_input_by_index(pa2.ctx, targetSinkInput, originalSink, successCb, &od);
-                if (op) { while (!od.done) pa2.iterateBlock(); pa_operation_unref(op); }
-            }
+            if (!restoreTargetInputs(pa2, routedSinkIndex))
+                fprintf(stderr, "[Haven Pulse] failed to restore application output\n");
         }
     }
     // Module cleanup happens in StopCapture()
