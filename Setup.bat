@@ -94,8 +94,9 @@ echo [4/4] Building native per-app audio addon...
 echo        (Requires Visual Studio Build Tools with C++ workload^)
 echo.
 
-:: Use explicit path to node-gyp (avoids npx @ path resolution bug)
-node "./node_modules/node-gyp/bin/node-gyp.js" rebuild --directory=native
+:: Builds against Electron's headers first (the installed Node's own headers
+:: break the link step on Node 26), then falls back to a plain node-gyp build.
+node "./scripts/build-native.js"
 
 :: node-gyp sends info to stderr so exit code can be wrong — check the file
 if exist "native\build\Release\haven_audio.node" (

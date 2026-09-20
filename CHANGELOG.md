@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Fixed
+- **Running from source on Node 26 lost per-app audio.** Setup rebuilt the audio addon against the installed Node's headers, which on Node 26 add clang-only link flags that Visual Studio rejects, and because the rebuild cleans first, the working addon was deleted too. The share picker then only offered System Audio and No Audio. Setup now builds against Electron's headers and only falls back to the plain build. Installers were never affected: the release build runs on its own pinned Node and checks that the addon loads.
+- **Electron's logo on the Windows taskbar when run from source.** The app sets its Windows app id now, so the taskbar shows the Haven icon.
+
+---
+
 ## v1.4.34
 
 ### Added

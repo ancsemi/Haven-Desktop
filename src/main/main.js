@@ -177,6 +177,16 @@ if (store.get('unlimitFrameRate')) {
 // only the last occurrence of a switch, so appending it a second time
 // somewhere else silently throws away everything in the first one.
 
+// ── Windows app identity ────────────────────────────────────
+// Without an explicit AppUserModelID, Windows files a copy run from source
+// under electron.exe and shows Electron's logo on the taskbar instead of the
+// window's Haven icon. The id matches electron-builder's appId, which is what
+// the installer's shortcuts carry, so an installed copy keeps one taskbar
+// entry and its notifications keep their name.
+if (process.platform === 'win32') {
+  try { app.setAppUserModelId('com.haven.desktop'); } catch {}
+}
+
 // ── Suppress Chromium stderr noise (WGC ProcessFrame spam, GPU errors, etc.) ──
 // disable-logging shuts down Chromium's logging system across ALL subprocesses
 // (browser, renderer, GPU).  --log-level only affects the browser process,

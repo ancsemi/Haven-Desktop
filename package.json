@@ -23,6 +23,7 @@
     "build:win": "npm run i18n:check && npm run build:native && electron-builder --win",
     "build:linux": "npm run i18n:check && npm run build:native && electron-builder --linux",
     "build:native": "node ./node_modules/node-gyp/bin/node-gyp.js rebuild --directory=native",
+    "build:native:local": "node ./scripts/build-native.js",
     "rebuild:electron": "electron-builder install-app-deps && npm run build:native",
     "postinstall": "electron-builder install-app-deps || echo electron-rebuild skipped"
   },
