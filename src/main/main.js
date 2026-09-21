@@ -1024,6 +1024,16 @@ function createAppWindow(serverUrl) {
     mainWindow.on('enter-full-screen', syncViewBounds);
     mainWindow.on('leave-full-screen', syncViewBounds);
 
+    // The taskbar flash says "look over here", and looking is what stops it.
+    // Windows keeps a flashFrame(true) going until it is told to stop, and
+    // the only stop was every unread being read, so one unread the person
+    // could not or would not open (a muted server, a hidden channel) left
+    // the taskbar button blinking for good. The unread badge stays; only the
+    // blinking ends. (Haven #5683)
+    mainWindow.on('focus', () => {
+      try { mainWindow.flashFrame(false); } catch {}
+    });
+
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
       if (!app.isQuitting && store.get('minimizeToTray')) {
