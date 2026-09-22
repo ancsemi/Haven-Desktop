@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.4.35
 
 ### Fixed
 - **The taskbar button could blink forever.** The flash only stopped once every unread was read, so an unread you could not or did not want to open kept the button blinking even with the app in front of you. Clicking into the app stops the blinking now; the unread badge stays until things are read. Reported by quakeman00. (Haven #5683)
