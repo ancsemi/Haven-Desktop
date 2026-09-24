@@ -1,5 +1,23 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Security
+Update soon. A server you connect to, or a script injected into one, could
+reach further into your computer than any web page should.
+
+- **Links a server page opened went to Windows unchecked.** Anything that was
+  not the server itself was handed to the system to open, including the kinds
+  of links Windows uses to run programs. Only web links go to your browser now.
+- **A server page could change the app's own settings**, including which
+  folder "host a server" starts from, so the next launch could run a program
+  from a place the server chose. Only the app's own screens can reach those
+  settings now.
+- **Every server could read your clipboard without asking.** Haven never needed
+  it, and the permission is gone. Copying into the clipboard still works.
+
+---
+
 ## v1.4.35
 
 ### Fixed
