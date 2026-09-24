@@ -2862,9 +2862,20 @@ function registerIPC() {
     'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
     'disableGpuVsync', 'unlimitFrameRate'
   ]);
-  ipcMain.handle('settings:get', (_e, key)        => store.get(key));
-  ipcMain.handle('settings:set', (_e, key, value)  => {
-    if (!ALLOWED_SETTINGS_KEYS.has(key)) return false;
+  // Only Haven Desktop's own screens (welcome, splash, the error page) use
+  // the generic store; they load from local files. A server page must never
+  // reach it: it could point the "host a server" folder at a network share it
+  // controls, and the next launch would run whatever server.js it found there.
+  // Server pages have their own narrow calls (prefs, shortcuts, history).
+  const fromLocalPage = (e) => {
+    try { return String(e.senderFrame?.url || '').startsWith('file://'); } catch { return false; }
+  };
+  ipcMain.handle('settings:get', (e, key) => {
+    if (!fromLocalPage(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return undefined;
+    return store.get(key);
+  });
+  ipcMain.handle('settings:set', (e, key, value)  => {
+    if (!fromLocalPage(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return false;
     store.set(key, value);
     return true;
   });

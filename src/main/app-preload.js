@@ -1596,11 +1596,6 @@ window.havenDesktop = {
   /** Signal the taskbar/dock badge (no native notification needed) */
   setUnreadBadge: (hasUnread) => ipcRenderer.send('notification-badge', hasUnread),
 
-  settings: {
-    get: (key)       => ipcRenderer.invoke('settings:get', key),
-    set: (key, val)  => ipcRenderer.invoke('settings:set', key, val),
-  },
-
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
     maximize: () => ipcRenderer.send('window:maximize'),
