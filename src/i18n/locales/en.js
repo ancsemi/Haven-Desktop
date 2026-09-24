@@ -127,6 +127,18 @@ module.exports = {
   'dialog.ok': 'OK',
   'dialog.defaultValue': 'Default: {value}',
 
+  'cert.title': 'Certificate check',
+  'cert.unknownMessage': "{host} is using a certificate your computer can't verify.",
+  'cert.unknownDetail': "That's normal for a Haven server that made its own certificate. Trust it only if this is a server you know, because on a shared network someone could be pretending to be it. Haven remembers your answer, and asks again if the certificate ever changes.",
+  'cert.changedMessage': 'The certificate for {host} has changed.',
+  'cert.changedDetail': 'This happens when a server gets a new certificate, but it can also mean someone is intercepting your connection. Trust the new one only if whoever runs the server says it changed.',
+  'cert.fingerprint': 'Fingerprint: {value}',
+  'cert.previousFingerprint': 'Previous fingerprint: {value}',
+  'cert.issuer': 'Issued by: {value}',
+  'cert.expires': 'Valid until: {value}',
+  'cert.trust': 'Trust this certificate',
+  'cert.trustNew': 'Trust the new certificate',
+
   'device.microphone': 'Mic',
   'device.speaker': 'Speaker',
 

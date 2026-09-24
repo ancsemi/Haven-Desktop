@@ -13,6 +13,7 @@ const os    = require('os');
 const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
+const { normalizeHost, isLocalHost, certDecision } = require('./cert-trust');
 const {
   DEFAULT_LOCALE, SYSTEM_LANGUAGE, SUPPORTED_LOCALES, normalizeLocale,
   resolveLocale, translate, getLocaleMetadata,
@@ -356,36 +357,152 @@ if (!gotLock) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Self-Signed Certificate Handling
+// Certificate Trust
 //
-// Haven servers often use self-signed certs for localhost.
-// Accept them for local connections so the app can load.
+// Haven servers often use a certificate they made themselves. The app used
+// to accept every certificate from every host, so someone on the same
+// network could pose as a remote server. The rules are in cert-trust.js: a
+// certificate the system trusts is fine, this computer and the local
+// network stay automatic, and any other host's own certificate is accepted
+// once the user trusts it, then remembered by fingerprint.
+//
+// setCertificateVerifyProc sees every connection (pages, scripts and the
+// Socket.IO reconnect storms that used to exhaust the renderer when TLS
+// errors piled up). The question is asked while the connection waits, and
+// the answer goes straight to its callback, so the page loads as soon as
+// the certificate is trusted.
 // ═══════════════════════════════════════════════════════════
 
-app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
-  // Haven servers commonly use self-signed certs.
-  // Accept them so users can connect to LAN / remote servers without a blank screen.
-  event.preventDefault();
-  callback(true);
+const _certQuestions = new Map(); // "host|fingerprint" -> Promise<boolean>
+
+// Chromium caches the verify proc's answers, and a question left open for
+// about 30 seconds times the connection out and leaves a refusal in that
+// cache. A certificate trusted after that is still turned away there and
+// lands here instead, so the same rules decide.
+app.on('certificate-error', (event, _webContents, url, _error, certificate, callback) => {
+  let host = '';
+  try { host = normalizeHost(new URL(url).hostname); } catch { /* not a URL */ }
+  const verdict = certDecision(
+    { hostname: host, errorCode: -1, fingerprint: certificate?.fingerprint || '' },
+    { pins: trustedCertificates() }
+  );
+  if (verdict === 'local' || verdict === 'pinned') {
+    event.preventDefault();
+    callback(true);
+    return;
+  }
+  callback(false);
 });
 
-// ═══════════════════════════════════════════════════════════
-// Session-Level Certificate Bypass
-//
-// The 'certificate-error' event above only fires for navigation
-// (page loads).  WebSocket, fetch, and XHR connections go through
-// Chromium's network stack directly, where self-signed cert
-// failures flood ssl_client_socket_impl with rapid-fire errors.
-// Each error allocates renderer-heap objects; in a Socket.IO
-// reconnection storm the renderer OOMs and the screen goes blank.
-//
-// setCertificateVerifyProc handles ALL connections — navigation
-// *and* sub-resources — at a level above the C++ TLS code, so
-// the handshake never fails and no error objects accumulate.
-// ═══════════════════════════════════════════════════════════
+function trustedCertificates() {
+  return store.get('trustedCertificates') || {};
+}
+
+function rememberCertificate(host, fingerprint) {
+  store.set('trustedCertificates', { ...trustedCertificates(), [host]: fingerprint });
+  const waiting = store.get('certTrustGrandfathered') || [];
+  if (waiting.includes(host)) store.set('certTrustGrandfathered', waiting.filter(h => h !== host));
+}
+
+/** A host the user is opening as a Haven server. Only these are asked about;
+ *  a picture in a message from some other host with its own certificate is
+ *  refused quietly, the way a browser would. */
+function isServerHost(host) {
+  const urls = [primaryServerUrl, activeServerUrl, ...serverViews.keys(), store.get('userPrefs.serverUrl'),
+    ...(store.get('serverHistory') || []).map(e => e && e.url)];
+  return urls.some((u) => {
+    try { return normalizeHost(new URL(u).hostname) === host; } catch { return false; }
+  });
+}
+
+/** True while the user is being asked about the certificate of url's host. */
+function certQuestionPending(url) {
+  let host = '';
+  try { host = normalizeHost(new URL(url).hostname); } catch { return false; }
+  for (const key of _certQuestions.keys()) if (key.startsWith(`${host}|`)) return true;
+  return false;
+}
+
+function askToTrustCertificate(host, certificate, changed) {
+  const fingerprint = certificate?.fingerprint || '';
+  const key = `${host}|${fingerprint}`;
+  if (_certQuestions.has(key)) return _certQuestions.get(key);
+  const previous = trustedCertificates()[host];
+  const lines = [changed ? t('cert.changedDetail') : t('cert.unknownDetail'), '', t('cert.fingerprint', { value: fingerprint })];
+  if (changed && previous) lines.push(t('cert.previousFingerprint', { value: previous }));
+  if (certificate?.issuerName) lines.push(t('cert.issuer', { value: certificate.issuerName }));
+  if (certificate?.validExpiry) lines.push(t('cert.expires', { value: new Date(certificate.validExpiry * 1000).toLocaleDateString() }));
+  const options = {
+    type: 'warning',
+    title: t('cert.title'),
+    message: changed ? t('cert.changedMessage', { host }) : t('cert.unknownMessage', { host }),
+    detail: lines.join('\n'),
+    buttons: [t('dialog.cancel'), changed ? t('cert.trustNew') : t('cert.trust')],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const parent = [BrowserWindow.getFocusedWindow(), mainWindow, welcomeWindow].find(w => w && !w.isDestroyed());
+  const answer = (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response }) => {
+      if (response !== 1) return false;
+      rememberCertificate(host, fingerprint);
+      // A slow answer can outlast the connection, which then gave up and
+      // showed the error page; try that server again now.
+      setTimeout(() => retryAfterTrust(host), 500);
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => _certQuestions.delete(key));
+  _certQuestions.set(key, answer);
+  return answer;
+}
+
+function retryAfterTrust(host) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const current = mainWindow.webContents.getURL();
+    if (!current.includes('connection-error.html')) return;
+    const failed = new URL(current).searchParams.get('url');
+    if (failed && normalizeHost(new URL(failed).hostname) === host) createAppWindow(failed);
+  } catch { /* nothing to retry */ }
+}
+
 app.on('ready', () => {
-  session.defaultSession.setCertificateVerifyProc((_request, callback) => {
-    callback(0); // 0 = chromium net::OK — accept the certificate
+  // Servers the user had already connected to before certificates were
+  // checked are trusted on their next connection, instead of a burst of
+  // questions after the update. After that they are remembered like any
+  // other.
+  if (!store.get('certTrustMigrated')) {
+    const hosts = new Set();
+    const urls = (store.get('serverHistory') || []).map(e => e && e.url);
+    urls.push(store.get('userPrefs.serverUrl'));
+    for (const url of urls) {
+      try {
+        const host = normalizeHost(new URL(url).hostname);
+        if (host && !isLocalHost(host)) hosts.add(host);
+      } catch { /* not a URL */ }
+    }
+    store.set('certTrustGrandfathered', [...hosts]);
+    store.set('certTrustMigrated', true);
+  }
+
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    const host = normalizeHost(request.hostname);
+    const fingerprint = request.certificate?.fingerprint || '';
+    const verdict = certDecision(
+      { hostname: host, errorCode: request.errorCode, fingerprint },
+      { pins: trustedCertificates(), grandfathered: store.get('certTrustGrandfathered') || [] }
+    );
+    if (verdict === 'system') return callback(-3); // Chromium's own verdict
+    if (verdict === 'local' || verdict === 'pinned') return callback(0);
+    if (verdict === 'grandfathered') {
+      rememberCertificate(host, fingerprint);
+      return callback(0);
+    }
+    if (verdict === 'unknown' && !isServerHost(host)) return callback(-3);
+    askToTrustCertificate(host, request.certificate, verdict === 'changed')
+      .then(ok => callback(ok ? 0 : -2));
   });
 });
 
@@ -1456,7 +1573,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       }
     });
     setTimeout(() => {
-      if (loadResolved || !mainWindow) return;
+      // A certificate question holds the load open; the answer settles it.
+      if (loadResolved || !mainWindow || certQuestionPending(url)) return;
       // Check if the page actually has content (async — never blocks renderer or main)
       view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
