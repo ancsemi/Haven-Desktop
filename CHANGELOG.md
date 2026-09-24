@@ -1,5 +1,23 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Security
+- **Server certificates are checked.** The app accepted every certificate from
+  every server, so someone on the same network could pose as a remote server
+  and read what you sent it. A certificate your system trusts works as before,
+  and this computer and your local network stay automatic. A remote server
+  with a certificate of its own (Haven makes one when it has none) asks once
+  whether to trust it and remembers your answer; if that certificate later
+  changes, the app says so and asks again. Servers you had already used are
+  trusted on their next connection without asking.
+- **Server pages can no longer capture another app's sound on their own.** A
+  page could list the apps playing sound and start capturing one with nothing
+  on screen to say so. App audio is only captured from the screen-share picker
+  now.
+
+---
+
 ## v1.4.36
 
 ### Security
