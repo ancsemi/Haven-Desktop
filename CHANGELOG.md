@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.4.36
 
 ### Security
 Update soon. A server you connect to, or a script injected into one, could
