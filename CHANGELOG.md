@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.4.37
 
 ### Security
 - **Server certificates are checked.** The app accepted every certificate from
