@@ -1583,13 +1583,19 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       'https://www.youtube-nocookie.com',
     ];
     view.webContents.on('will-navigate', (event, navUrl) => {
+      let parsed = null;
+      try { parsed = new URL(navUrl); } catch {}
       try {
-        const navOrigin = new URL(navUrl).origin;
-        if (navOrigin === new URL(url).origin) return;
-        if (EMBED_ORIGINS.includes(navOrigin)) return;
-        event.preventDefault();
-        shell.openExternal(navUrl);
+        if (parsed && parsed.origin === new URL(url).origin) return;
+        if (parsed && EMBED_ORIGINS.includes(parsed.origin)) return;
       } catch {}
+      event.preventDefault();
+      // Only web links go to the system browser. Anything else handed to the
+      // OS shell can run code on Windows (ms-msdt:, search-ms:, file: and
+      // network shares), and a server page can navigate wherever it likes.
+      if (parsed && (parsed.protocol === 'https:' || parsed.protocol === 'http:')) {
+        shell.openExternal(parsed.href).catch(() => {});
+      }
     });
 
     // Intercept window.open → switch servers or open external.
