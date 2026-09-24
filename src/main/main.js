@@ -2696,22 +2696,10 @@ function registerIPC() {
   });
 
   // ── Audio Capture ─────────────────────────────────────
-  ipcMain.handle('audio:get-apps',      () => { try { return audioCapture.getAudioApplications(); } catch { return []; } });
-  ipcMain.handle('audio:start-capture',  (_e, pid) => {
-    try {
-      return audioCapture.startCapture(pid, {
-        mode: 'include',
-        onData: pcm => {
-          try {
-            if (!pcm || !pcm.buffer) return;
-            const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
-            safeSend(getActiveContents(), 'audio:capture-data', ab);
-          } catch { /* non-critical */ }
-        },
-        onStatus: s => safeSend(getActiveContents(), 'audio:capture-status', s),
-      });
-    } catch (e) { console.error('[AudioCapture] start-capture IPC failed:', e.message); return false; }
-  });
+  // Capture only ever starts from the screen-share picker (the display-media
+  // handler above). Server pages could once list every app playing sound and
+  // start recording any of them, with nothing on screen to say so; Haven
+  // never used that, so it is gone.
   ipcMain.handle('audio:stop-capture',   () => { try { audioCapture.stopCapture(); } catch {} });
   ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());

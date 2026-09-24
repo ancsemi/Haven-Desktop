@@ -1564,9 +1564,8 @@ window.havenDesktop = {
     install:  () => ipcRenderer.send('update:install'),
   },
 
+  // Starting a capture is the share picker's job (see main.js).
   audio: {
-    getApplications: () => ipcRenderer.invoke('audio:get-apps'),
-    startCapture:    (pid) => ipcRenderer.invoke('audio:start-capture', pid),
     stopCapture:     ()    => { teardownAudioPipeline(); return ipcRenderer.invoke('audio:stop-capture'); },
     isSupported:     ()    => ipcRenderer.invoke('audio:is-supported'),
     optOutOfDucking: ()    => ipcRenderer.invoke('audio:opt-out-ducking'),
