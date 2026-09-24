@@ -454,8 +454,10 @@ app.whenReady().then(async () => {
     }, 50);
   });
 
-  // Auto-grant camera, mic, screen-share, fullscreen, and PiP permissions for all server views
-  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture', 'clipboard-write', 'clipboard-read'];
+  // Auto-grant camera, mic, screen-share, fullscreen, and PiP permissions for all server views.
+  // Not clipboard-read: Haven never reads the clipboard, and granting it let
+  // any server read whatever was copied, passwords included, without asking.
+  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture', 'clipboard-write'];
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(ALLOWED_PERMS.includes(permission));
   });
