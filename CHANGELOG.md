@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.4.38
 
 ### Fixed
 - **The taskbar kept flashing (Haven #5693).** It flashed whenever any
