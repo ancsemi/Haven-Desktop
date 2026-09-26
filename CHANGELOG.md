@@ -1,5 +1,19 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Fixed
+- **The taskbar kept flashing (Haven #5693).** It flashed whenever any
+  server you are signed into had something unread, including channels you
+  had muted and with pop-ups set to Never. It flashes when a notification
+  actually shows now, and stops when you click into the app.
+- **No notification for the open chat while the app was minimised or in the
+  background (#58).** Returning to the window now hands focus to the page, so
+  Haven can tell whether you are looking at the chat. Needs the next Haven
+  server update too.
+
+---
+
 ## v1.4.37
 
 ### Security
