@@ -11,6 +11,11 @@
   background (#58).** Returning to the window now hands focus to the page, so
   Haven can tell whether you are looking at the chat. Needs the next Haven
   server update too.
+- **A slow connection ended in "Connection Problem".** The app gave up on a
+  server whose page had not finished loading within 15 seconds, even while it
+  was still arriving, so a slow route to the server looked like a dead one.
+  It keeps waiting while the page loads, up to 90 seconds, the way a browser
+  does.
 
 ---
 

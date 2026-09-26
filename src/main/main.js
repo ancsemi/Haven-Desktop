@@ -1580,9 +1580,19 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         }
       }
     });
-    setTimeout(() => {
+    // A page that is still arriving is left to finish, the way a browser
+    // would, for up to 90 s. Giving up at 15 s turned a slow route to the
+    // server into "Connection Problem" while the page was still loading.
+    const loadStartedAt = Date.now();
+    const checkLoad = () => {
       // A certificate question holds the load open; the answer settles it.
       if (loadResolved || !mainWindow || certQuestionPending(url)) return;
+      try {
+        if (view.webContents.isLoading() && Date.now() - loadStartedAt < 90000) {
+          setTimeout(checkLoad, 15000);
+          return;
+        }
+      } catch { return; } // view already torn down
       // Check if the page actually has content (async — never blocks renderer or main)
       view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
@@ -1620,7 +1630,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           showConnectionError(url);
         }
       }).catch(() => {});
-    }, 15000);
+    };
+    setTimeout(checkLoad, 15000);
 
     // ── Handle load failures — only reset to welcome for the primary server ──
     // Retry briefly on transient errors (server restart, brief outage) before
