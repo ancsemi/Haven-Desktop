@@ -1151,6 +1151,14 @@ function createAppWindow(serverUrl) {
     // blinking ends. (Haven #5683)
     mainWindow.on('focus', () => {
       try { mainWindow.flashFrame(false); } catch {}
+      // Back from another window, focus goes to the server page, not the
+      // window's own frame: keys land in the page, and the page can tell it
+      // is being looked at, which decides whether the open chat notifies.
+      // (Haven-Desktop #58)
+      try {
+        const view = activeServerUrl && serverViews.get(activeServerUrl);
+        if (view && !view.webContents.isDestroyed()) view.webContents.focus();
+      } catch {}
     });
 
     // ── Minimize-to-tray: intercept close if enabled ──

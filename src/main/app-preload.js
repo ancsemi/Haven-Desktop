@@ -1544,6 +1544,10 @@ ipcRenderer.on('app:navigate-deep-link', (_e, { code, messageId, url } = {}) => 
 window.havenDesktop = {
   platform:     process.platform,
   isDesktopApp: true,
+  // The page has focus exactly when the window does (main.js hands focus to
+  // the active server view), so document.hasFocus() can stand in for the
+  // page being seen: pages here never become hidden. (#58)
+  pageFocusFollowsWindow: true,
 
   i18n: {
     getState: () => ({ ...i18nState }),
