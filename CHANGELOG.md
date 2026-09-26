@@ -1,5 +1,16 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Fixed
+- **A server that opens in a second in a browser sat on "connecting" in the
+  app.** The app kept the loading screen up until every picture and script
+  on the page had arrived, so one slow outside image (a blocked avatar
+  host, say) held the whole server back. It shows the page as soon as it is
+  ready now, the way a browser does, and the rest fills in after.
+
+---
+
 ## v1.4.38
 
 ### Fixed

@@ -1260,9 +1260,9 @@ function syncAllServerViewBounds() {
     const isActive = url === activeServerUrl;
     try {
       if (isActive) {
-        // Don't expand over the splash while the active view is still loading
-        // its first paint — did-finish-load will expand it.
-        if (view.webContents.isLoading?.() && view.getBounds().width === 0) {
+        // Don't expand over the splash before the active view's page is
+        // ready — its dom-ready handler will expand it.
+        if (!view._havenPageReady && view.getBounds().width === 0) {
           view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
           continue;
         }
@@ -1311,9 +1311,9 @@ function switchToServer(serverUrl) {
     const [cw, ch] = mainWindow.getContentSize();
     const b = view.getBounds();
     if (b.width !== cw || b.height !== ch) {
-      // Only expand if the view has already finished loading — otherwise let
-      // the per-view did-finish-load handler do it so the splash stays up.
-      if (!view.webContents.isLoading()) {
+      // Only expand once the view's page is ready; otherwise its dom-ready
+      // handler does it, so the splash stays up until there is a page.
+      if (view._havenPageReady) {
         view.setBounds({ x: 0, y: 0, width: cw, height: ch });
         view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
       }
@@ -1413,7 +1413,12 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         }
       } catch {}
     };
-    view.webContents.once('did-finish-load', () => { clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
+    // The page shows as soon as it is ready (dom-ready), the way a browser
+    // shows it, not when every picture on it has arrived (did-finish-load).
+    // Waiting for the load event kept the splash up for as long as one slow
+    // outside image or script took, so a server that opened in a second in a
+    // browser sat on "connecting" in the app.
+    view.webContents.once('dom-ready',       () => { view._havenPageReady = true; clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
     view.webContents.once('did-fail-load',   () => { clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
     // Each subsequent in-page navigation (e.g. login → app, channel switch)
     // also gets reflected in the window title once the view is the active one.
@@ -1529,6 +1534,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // If they fail to load, they're cleaned up quietly so unread-badge
     // pre-loading doesn't surface as a scary popup on launch.
     let loadResolved = false;
+    // A page that is up counts as loaded, even while slow pictures finish.
+    view.webContents.once('dom-ready', () => { loadResolved = true; });
     view.webContents.once('did-finish-load', async () => {
       loadResolved = true;
       // Check that the page is actually a Haven server by looking for a
