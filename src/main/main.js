@@ -2140,8 +2140,11 @@ function setNotificationBadge() {
   // the user may be in a different channel and hasn't seen the new message yet).
   if (process.platform === 'win32' && badgeIcon) mainWindow.setOverlayIcon(badgeIcon, t('badge.newMessages'));
   if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(1);
-  // Taskbar flash: only when the window is not already in focus (avoids annoying flicker).
-  if (!mainWindow.isFocused()) mainWindow.flashFrame(true);
+  // No flash here. Every server view re-reports its unread state as things
+  // change, so flashing on it kept the taskbar blinking for unreads nobody
+  // meant to read, even with pop-ups set to Never. The flash comes with a
+  // notification instead (see 'notify'), which already honours mutes, the
+  // DM and mention switches and the pop-up limit. (Haven #5693)
 }
 
 function clearNotificationBadge() {
@@ -2872,6 +2875,9 @@ function registerIPC() {
     // Badge is managed exclusively by the renderer via 'notification-badge' IPC.
     // Setting it here caused a race: the renderer would clear the badge (unreads=0)
     // right before notify() re-set it, leaving a phantom taskbar badge forever.
+    // The taskbar flash does belong here: it goes with a notification, and
+    // focusing the window stops it. (Haven #5693)
+    try { if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true); } catch {}
     return true;
   });
 
