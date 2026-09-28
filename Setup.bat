@@ -88,23 +88,15 @@ if %ERRORLEVEL% neq 0 (
     echo        install-app-deps complete.
 )
 
-:: ─── Build native media components ─────────────────────
+:: ─── Build native audio addon ─────────────────────
 echo.
-echo [4/4] Building native media components...
-echo        (Requires Visual Studio Build Tools and the GStreamer SDK^)
+echo [4/4] Building native audio addon...
+echo        (Requires Visual Studio Build Tools^)
 echo.
 
 :: Builds against Electron's headers first (the installed Node's own headers
 :: break the link step on Node 26), then falls back to a plain node-gyp build.
 node "./scripts/build-native.js"
-
-if exist "native\build\Release\haven_screen_share.exe" (
-    call npm run stage:native-runtime
-    if errorlevel 1 (
-        echo        WARNING: GStreamer runtime staging failed.
-        echo        Native GPU screen sharing will be unavailable in dev mode.
-    )
-)
 
 :: node-gyp sends info to stderr so exit code can be wrong — check the file
 if exist "native\build\Release\haven_audio.node" (

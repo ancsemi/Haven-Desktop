@@ -42,14 +42,13 @@ picker.onData(data => {
   const audioApps = Array.isArray(data.audioApps) ? data.audioApps : [];
   const audioCapabilities = data.audioCapabilities || {};
   const encoder = data.videoEncoder || {};
-  const nativeMode = data.nativeMode === true;
   const portalOnly = data.portalOnly === true && sources.length === 1;
 
   document.documentElement.lang = data.locale || 'en';
   document.documentElement.dir = data.direction === 'rtl' ? 'rtl' : 'ltr';
   document.title = copy.title || document.title;
   setText('picker-title', copy.title);
-  setText('picker-subtitle', portalOnly ? copy.portalSubtitle : nativeMode ? copy.nativeSubtitle : copy.subtitle);
+  setText('picker-subtitle', portalOnly ? copy.portalSubtitle : copy.subtitle);
   setText('screens-title', copy.screens);
   setText('windows-title', copy.windows);
   setText('video-title', copy.videoEncoder);
@@ -110,19 +109,7 @@ picker.onData(data => {
   document.getElementById('screens-section').hidden = portalOnly || screens.children.length === 0;
   document.getElementById('windows-section').hidden = portalOnly || windows.children.length === 0;
 
-  const nativeCodecs = new Set((Array.isArray(encoder.codecs) ? encoder.codecs : [])
-    .map(codec => String(codec?.name || codec).toLowerCase()));
-  const availability = nativeMode
-    ? {
-        auto: nativeCodecs.has('h264'),
-        hardware: false,
-        h264: nativeCodecs.has('h264'),
-        vp8: false,
-        vp9: false,
-        av1: nativeCodecs.has('av1'),
-        h265: nativeCodecs.has('h265'),
-      }
-    : browserEncoderAvailability(encoder.hardwareAvailable === true);
+  const availability = browserEncoderAvailability(encoder.hardwareAvailable === true);
   const encoderOptions = [
     ['hardware', copy.hardwareH264],
     ['auto', copy.automaticEncoder],
@@ -134,7 +121,6 @@ picker.onData(data => {
   ];
   const select = document.getElementById('video-encoder');
   for (const [value, label] of encoderOptions) {
-    if (nativeMode && value === 'hardware') continue;
     if (value !== 'hardware' && !availability[value]) continue;
     const option = document.createElement('option');
     option.value = value;
@@ -148,13 +134,9 @@ picker.onData(data => {
   select.value = selectedEncoder;
   select.addEventListener('change', () => { selectedEncoder = normalizePreference(select.value); });
 
-  const nativeEncoders = (Array.isArray(encoder.codecs) ? encoder.codecs : [])
-    .map(codec => `${codec.name} (${codec.encoder})`).join(', ');
-  const encoderNote = nativeMode
-    ? String(copy.nativeEncodingAvailable || '').replace('{encoders}', nativeEncoders)
-    : encoder.hardwareAvailable === true
-      ? copy.hardwareEncodingAvailable
-      : String(copy.hardwareEncodingUnavailable || '').replace('{status}', encoder.hardwareStatus || 'unavailable');
+  const encoderNote = encoder.hardwareAvailable === true
+    ? copy.hardwareEncodingAvailable
+    : String(copy.hardwareEncodingUnavailable || '').replace('{status}', encoder.hardwareStatus || 'unavailable');
   setText('video-note', `${encoderNote || ''} ${availability.h265 ? copy.h265Available : copy.h265Unavailable}`.trim());
 
   const modes = document.getElementById('audio-modes');

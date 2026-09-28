@@ -65,7 +65,6 @@ module.exports = {
 
   'screenPicker.title': 'Compartilhar sua tela',
   'screenPicker.subtitle': 'Escolha uma janela ou tela e, se desejar, um aplicativo cujo áudio será compartilhado.',
-  'screenPicker.nativeSubtitle': 'Escolha uma fonte, o áudio isolado e um codec nativo. O hardware tem prioridade e o Chromium continua sendo a alternativa.',
   'screenPicker.portalSubtitle': 'Escolha as opções de áudio e codificação. O sistema fará a seleção da janela ou tela.',
   'screenPicker.systemPortal': 'Seletor de tela do sistema',
   'screenPicker.screens': 'Telas',
@@ -80,7 +79,6 @@ module.exports = {
   'screenPicker.automaticEncoder': 'Automático (padrão do navegador)',
   'screenPicker.unavailable': 'indisponível',
   'screenPicker.hardwareEncodingAvailable': 'O Chromium informa que a codificação por hardware está disponível. O uso real da GPU é confirmado após o início da transmissão.',
-  'screenPicker.nativeEncodingAvailable': 'Codificadores nativos: {encoders}. O hardware tem prioridade; H.264 por software é a última alternativa.',
   'screenPicker.hardwareEncodingUnavailable': 'A codificação por hardware não está disponível no momento ({status}).',
   'screenPicker.h265Available': 'H.265 está disponível nesta versão do Chromium.',
   'screenPicker.h265Unavailable': 'H.265 não é exposto por esta versão do Chromium/WebRTC.',

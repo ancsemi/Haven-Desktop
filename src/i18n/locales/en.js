@@ -65,7 +65,6 @@ module.exports = {
 
   'screenPicker.title': 'Share Your Screen',
   'screenPicker.subtitle': 'Choose a window or screen, then optionally pick an application whose audio to share.',
-  'screenPicker.nativeSubtitle': 'Choose a source, isolated audio, and a native codec. Hardware is preferred and Chromium remains the fallback.',
   'screenPicker.portalSubtitle': 'Choose audio and encoding options. Your system handles window or screen selection.',
   'screenPicker.systemPortal': 'System screen picker',
   'screenPicker.screens': 'Screens',
@@ -80,7 +79,6 @@ module.exports = {
   'screenPicker.automaticEncoder': 'Automatic (browser default)',
   'screenPicker.unavailable': 'unavailable',
   'screenPicker.hardwareEncodingAvailable': 'Chromium reports hardware video encoding available. Actual GPU use is confirmed after streaming starts.',
-  'screenPicker.nativeEncodingAvailable': 'Native encoders: {encoders}. Hardware is preferred; H.264 software is the last fallback.',
   'screenPicker.hardwareEncodingUnavailable': 'Hardware encoding is not currently available ({status}).',
   'screenPicker.h265Available': 'H.265 is available in this Chromium build.',
   'screenPicker.h265Unavailable': 'H.265 is not exposed by this Chromium/WebRTC build.',

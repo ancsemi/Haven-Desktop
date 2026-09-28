@@ -30,8 +30,15 @@ const {
 } = require('./screen-share-audio');
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { getPhysicalDisplayBounds, resolveRefreshedSource } = require('./screen-source');
-const { NativeScreenManager, isWaylandSession } = require('./native-screen');
 const { isTrustedMainFrame } = require('./ipc-security');
+
+function isWaylandSession(platform = process.platform, env = process.env) {
+  if (platform !== 'linux') return false;
+  const sessionType = String(env?.XDG_SESSION_TYPE || '').toLowerCase();
+  if (sessionType === 'wayland') return true;
+  if (sessionType === 'x11') return false;
+  return Boolean(env?.WAYLAND_DISPLAY);
+}
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
@@ -284,7 +291,6 @@ app.on('gpu-info-update', () => {
   );
   hardwareVideoEncodingAvailable = hardwareVideoEncodingStatus.startsWith('enabled');
 });
-let nativeScreen    = null;
 let serverViews     = new Map();  // serverUrl → BrowserView
 let activeServerUrl = null;
 let primaryServerUrl = null;       // the server the user actually chose to connect to
@@ -557,44 +563,6 @@ app.whenReady().then(async () => {
   refreshLocale();
   serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV, t });
   audioCapture  = new AudioCaptureManager(null, () => pipeWireStreamRouter?.stop(), t);
-  nativeScreen  = new NativeScreenManager({
-    selectSource: selectNativeScreenSource,
-    isOwnerActive: owner => owner === getActiveContents(),
-    registryPath: path.join(app.getPath('userData'), 'gstreamer-registry.bin'),
-    getAudioCapabilities: () => {
-      const supported = !!audioCapture?.isSupported();
-      return {
-        supported,
-        modes: supported ? ['application', 'system'] : [],
-      };
-    },
-    startAudioCapture: (selection, onData, onStatus) => {
-      if (audioCaptureController.hasActive()) return false;
-      const captureId = `native:${selection.sessionId}`;
-      audioCaptureController.start(captureId, selection.owner);
-      const started = audioCapture.startCapture(selection.pid, {
-        mode: selection.mode,
-        identity: selection.identity,
-        onData,
-        onStatus: status => {
-          if (selection.mode === 'exclude' && process.platform === 'linux') {
-            if (status?.kind === 'started') {
-              pipeWireStreamRouter?.start(`HavenCombined_${process.pid}`, process.pid);
-            } else if (status?.kind === 'failed' || status?.kind === 'stopped') {
-              pipeWireStreamRouter?.stop();
-            }
-          }
-          onStatus(status);
-        },
-      });
-      if (!started) audioCaptureController.stop(captureId, selection.owner.id);
-      return started;
-    },
-    stopAudioCapture: selection => audioCaptureController.stop(
-      `native:${selection.sessionId}`,
-      selection.owner.id
-    ),
-  });
   badgeIcon     = createBadgeIcon();
 
   // ── Sync start-on-login with OS ──────────────────────
@@ -1118,7 +1086,6 @@ app.on('before-quit', () => {
   serverManager?.stopServer();
   pipeWireStreamRouter?.stop();
   audioCapture?.cleanup();
-  nativeScreen?.cleanup();
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -1514,8 +1481,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // a [Haven Perf] prefix.  Capture those here so they appear in the
     // server console panel and Electron's stdout for post-mortem analysis.
     view.webContents.on('console-message', (_e, level, message) => {
-      if (message.startsWith('[Haven Perf') || message.startsWith('[NativeScreen]') ||
-          message.startsWith('[ScreenShare]')) {
+      if (message.startsWith('[Haven Perf') || message.startsWith('[ScreenShare]')) {
         // level: 0=verbose, 1=info, 2=warning, 3=error
         if (level >= 2) console.warn('[Renderer]', message);
         else            console.log('[Renderer]', message);
@@ -2525,11 +2491,11 @@ function getScreenAudioPickerData() {
 
 function getScreenPickerCopy() {
   const keys = [
-    'title', 'subtitle', 'nativeSubtitle', 'portalSubtitle', 'screens', 'windows',
+    'title', 'subtitle', 'portalSubtitle', 'screens', 'windows',
     'audio', 'noAudio', 'systemAudio', 'applicationAudio', 'noApplications',
     'systemUnavailable', 'applicationUnavailable', 'videoEncoder', 'hardwareH264',
     'automaticEncoder', 'unavailable', 'hardwareEncodingAvailable',
-    'nativeEncodingAvailable', 'hardwareEncodingUnavailable', 'h265Available',
+    'hardwareEncodingUnavailable', 'h265Available',
     'h265Unavailable', 'silent', 'silentDescription', 'noPreview', 'cancel',
     'share', 'continue',
   ];
@@ -2683,179 +2649,6 @@ function prepareStandardScreenShare(targetContents, requestFrame, data) {
       ownerGone();
     }
   });
-}
-
-async function selectNativeScreenSource(targetContents, capabilities = {}, signal, options = {}) {
-  if (!targetContents || targetContents.isDestroyed()) return null;
-
-  const wayland = isWaylandSession();
-  const usePortal = process.platform === 'linux' &&
-    capabilities.captureBackends?.includes('pipewire-portal') &&
-    (wayland || !capabilities.captureBackends.includes('x11'));
-
-  let sources;
-  if (usePortal) {
-    sources = [{
-      id: 'portal:screen',
-      name: t('screenPicker.systemPortal'),
-      thumbnail: null,
-      appIcon: null,
-      display_id: null,
-    }];
-  } else try {
-    sources = await desktopCapturer.getSources({
-      types: ['window', 'screen'],
-      thumbnailSize: { width: 320, height: 180 },
-      fetchWindowIcons: true,
-    });
-  } catch (err) {
-    console.warn(`[NativeScreen] source enumeration with previews failed: ${err.message}`);
-    sources = await desktopCapturer.getSources({
-      types: ['window', 'screen'],
-      thumbnailSize: { width: 0, height: 0 },
-      fetchWindowIcons: false,
-    });
-  }
-
-  if (signal?.aborted) return null;
-  const hostAudio = getScreenAudioPickerData();
-  const nativeAudioModes = new Set(capabilities.audio?.supported === true
-    ? capabilities.audio.modes || []
-    : []);
-  const audioApps = nativeAudioModes.has('application') ? hostAudio.audioApps : [];
-  const audioCapabilities = {
-    application: nativeAudioModes.has('application') && hostAudio.audioCapabilities.application,
-    systemNative: nativeAudioModes.has('system') && hostAudio.audioCapabilities.systemNative,
-    system: nativeAudioModes.has('system') && hostAudio.audioCapabilities.system,
-  };
-  const allowedCodecs = new Set((Array.isArray(options.codecs) ? options.codecs : [])
-    .map(codec => String(codec).toUpperCase()));
-  const codecs = (capabilities.codecs || []).filter(codec =>
-    allowedCodecs.size === 0 || allowedCodecs.has(codec.name)
-  );
-  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const result = await requestScreenPicker(targetContents, {
-    requestId,
-    sources: sources.map(source => ({
-      id: source.id,
-      name: source.name,
-      thumbnail: source.thumbnail && !source.thumbnail.isEmpty?.()
-        ? source.thumbnail.toDataURL()
-        : source.thumbnail || null,
-      appIcon: source.appIcon && !source.appIcon.isEmpty?.()
-        ? source.appIcon.toDataURL()
-        : source.appIcon || null,
-      display_id: source.display_id,
-    })),
-    audioApps,
-    audioCapabilities,
-    nativeMode: true,
-    portalOnly: usePortal,
-    videoEncoder: {
-      native: true,
-      preference: 'auto',
-      hardwareAvailable: true,
-      hardwareStatus: codecs.map(codec => codec.encoder).join(', '),
-      codecs,
-      platform: process.platform,
-    },
-  }, { signal });
-  if (!result || result.cancelled || signal?.aborted) return null;
-  const chosenSource = sources.find(source => source.id === result.sourceId);
-  if (!chosenSource) return null;
-
-  const selectedAudio = resolveAudioSelection(result.audioAppPid, audioApps, audioCapabilities);
-  let audio = null;
-  if (selectedAudio.app) {
-    audio = {
-      mode: 'include',
-      pid: selectedAudio.app.pid,
-      identity: selectedAudio.app.identity,
-    };
-  } else if (selectedAudio.type === 'system') {
-    audio = { mode: 'exclude', pid: process.pid };
-  }
-  const requestedCodec = String(result.videoEncoderPreference || 'auto').toUpperCase();
-  const codecPreference = requestedCodec === 'AUTO' || codecs.some(codec => codec.name === requestedCodec)
-    ? requestedCodec
-    : 'AUTO';
-
-  if (usePortal) {
-    return { kind: 'linux-pipewire', handle: '', audio, codecPreference };
-  }
-  const freshSources = await desktopCapturer.getSources({
-    types: ['window', 'screen'],
-    thumbnailSize: { width: 0, height: 0 },
-    fetchWindowIcons: false,
-  });
-  const selected = resolveRefreshedSource(sources, freshSources, result.sourceId);
-  if (!selected) return null;
-
-  const idMatch = /^(screen|window):([^:]+):/.exec(selected.id);
-  if (!idMatch) throw new Error(`Unsupported screen source identifier: ${selected.id}`);
-  const sourceType = idMatch[1];
-  const sourceHandle = idMatch[2];
-
-  if (process.platform === 'win32') {
-    const displays = screen.getAllDisplays();
-    const display = sourceType === 'screen'
-      ? displays.find(item => String(item.id) === String(selected.display_id))
-      : null;
-    if (sourceType === 'screen' && !display) return null;
-    const monitorPoint = display ? screen.dipToScreenPoint({
-      x: Math.round(display.bounds.x + display.bounds.width / 2),
-      y: Math.round(display.bounds.y + display.bounds.height / 2),
-    }) : { x: 0, y: 0 };
-    return {
-      kind: sourceType === 'window' ? 'windows-window' : 'windows-monitor',
-      handle: sourceType === 'window'
-        ? sourceHandle
-        : '',
-      x: monitorPoint.x,
-      y: monitorPoint.y,
-      width: display ? Math.round(display.bounds.width * (display.scaleFactor || 1)) : 0,
-      height: display ? Math.round(display.bounds.height * (display.scaleFactor || 1)) : 0,
-      audio,
-      codecPreference,
-    };
-  }
-
-  if (process.platform === 'linux') {
-    if (sourceType === 'window') {
-      return {
-        kind: 'linux-x11-window',
-        handle: sourceHandle,
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        audio,
-        codecPreference,
-      };
-    }
-    const displays = screen.getAllDisplays();
-    const display = displays.find(item => String(item.id) === String(selected.display_id));
-    if (!display) return null;
-    const physicalDisplays = displays.map(item => ({
-      id: item.id,
-      bounds: getPhysicalDisplayBounds(item, point => screen.dipToScreenPoint(point)),
-    }));
-    const physicalDisplay = physicalDisplays.find(item => String(item.id) === String(display.id));
-    const minX = Math.min(...physicalDisplays.map(item => item.bounds.x));
-    const minY = Math.min(...physicalDisplays.map(item => item.bounds.y));
-    return {
-      kind: 'linux-x11-screen',
-      handle: sourceHandle,
-      x: physicalDisplay.bounds.x - minX,
-      y: physicalDisplay.bounds.y - minY,
-      width: physicalDisplay.bounds.width,
-      height: physicalDisplay.bounds.height,
-      audio,
-      codecPreference,
-    };
-  }
-
-  throw new Error('Native screen sharing is unavailable on this platform');
 }
 
 function registerScreenShareHandler() {
@@ -3398,48 +3191,6 @@ function registerIPC() {
     platform: process.platform,
   }));
 
-  // ── Native Screen Share ───────────────────────────────
-  ipcMain.handle('native-screen:get-capabilities', event => {
-    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
-      return { supported: false, reason: 'untrusted-frame' };
-    }
-    return nativeScreen.getCapabilities();
-  });
-  ipcMain.handle('native-screen:start', (event, options) => {
-    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame, { active: true })) {
-      return { started: false, reason: 'untrusted-frame' };
-    }
-    return nativeScreen.start(event.sender, options);
-  });
-  ipcMain.handle('native-screen:stop', (event, data) => {
-    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) return false;
-    return nativeScreen.stop(event.sender, false, data?.sessionId || null);
-  });
-  ipcMain.handle('native-screen:add-peer', (event, data) => {
-    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
-      throw new Error('Untrusted native screen frame');
-    }
-    return nativeScreen.addPeer(event.sender, data);
-  });
-  ipcMain.handle('native-screen:remove-peer', (event, data) => {
-    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
-      throw new Error('Untrusted native screen frame');
-    }
-    return nativeScreen.removePeer(event.sender, data);
-  });
-  ipcMain.handle('native-screen:set-remote-description', (event, data) => {
-    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
-      throw new Error('Untrusted native screen frame');
-    }
-    return nativeScreen.setRemoteDescription(event.sender, data);
-  });
-  ipcMain.handle('native-screen:add-ice-candidate', (event, data) => {
-    if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame)) {
-      throw new Error('Untrusted native screen frame');
-    }
-    return nativeScreen.addIceCandidate(event.sender, data);
-  });
-
   // ── Audio Devices ─────────────────────────────────────
   ipcMain.handle('devices:get-inputs', async () => {
     const wc = getActiveContents();
@@ -3591,7 +3342,7 @@ function registerIPC() {
     'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
     'disableGpuVsync', 'unlimitFrameRate', 'videoEncoderPreference'
   ]);
-<  // Only Haven Desktop's own screens (welcome, splash, the error page) use
+  // Only Haven Desktop's own screens (welcome, splash, the error page) use
   // the generic store; they load from local files. A server page must never
   // reach it: it could point the "host a server" folder at a network share it
   // controls, and the next launch would run whatever server.js it found there.

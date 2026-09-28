@@ -207,16 +207,13 @@ Your server data (messages, uploads, config) is stored separately in the Haven d
 - **C++ Build Tools:**
   - **Windows:** Visual Studio Build Tools 2019+ with "Desktop development with C++"
   - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
-- **GStreamer:**
-  - **Windows:** MSVC x86-64 runtime and development packages under `C:\gstreamer\1.0\msvc_x86_64`, or set `GSTREAMER_1_0_ROOT_MSVC_X86_64`
-  - **Linux:** `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-plugins-bad1.0-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-ugly`, `gstreamer1.0-nice`, `gstreamer1.0-pipewire`, `gstreamer1.0-vaapi`
 
 ### Windows — No Terminal
 
 1. Install the Windows prerequisites listed above
 2. Double-click **`Setup.bat`** — installs Node dependencies and builds the native components
 3. Double-click **`Start Haven Desktop.bat`** — launches the app in dev mode
-4. Double-click **`Build Installer.bat`** — stages GStreamer and creates a distributable `.exe` in `dist/`
+4. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
 
 ### Terminal
 
@@ -227,11 +224,8 @@ cd Haven-Desktop
 # Install dependencies
 npm install
 
-# Build the native audio addon and screen-share helper
+# Build the native audio addon
 npm run build:native
-
-# Stage the GStreamer runtime used by the native helper
-npm run stage:native-runtime
 
 # Run in dev mode
 npm run dev
@@ -273,7 +267,7 @@ GitHub Actions builds the Windows `.exe` and Linux `.AppImage` / `.deb`, then pu
 | No sound from per-app capture | Make sure the target app is actually producing audio. Try selecting a different application. |
 | App opens to blank screen | Check that the server is running and reachable at the configured URL. Try clearing settings by deleting the config file (see Configuration above). |
 | Tray icon missing (Linux) | Some desktop environments need an app indicator extension. On GNOME, install `gnome-shell-extension-appindicator`. |
-| Can't build native module | Install the C++ and GStreamer development prerequisites from the build section above. |
+| Can't build native module | Install the C++ development prerequisites from the build section above. |
 
 ---
 
