@@ -3180,7 +3180,14 @@ function registerIPC() {
   // handler above). Server pages could once list every app playing sound and
   // start recording any of them, with nothing on screen to say so; Haven
   // never used that, so it is gone.
-  ipcMain.handle('audio:stop-capture',   () => { try { audioCapture.stopCapture(); } catch {} });
+  // Stop goes through the controller so the registry entry is detached
+  // together with the C++ capture. Stopping the addon directly leaves
+  // hasActive() true, and the next share would start without audio
+  // (captureBusy); it also lets a stale request kill a newer capture.
+  ipcMain.handle('audio:stop-capture', (event, { captureId } = {}) => {
+    if (typeof captureId !== 'string') return false;
+    return audioCaptureController.stop(captureId, event.sender.id);
+  });
   ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
 
