@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.4.39
 
 ### Fixed
 - **A server that opens in a second in a browser sat on "connecting" in the
