@@ -519,6 +519,50 @@ if (document.documentElement) {
     document.documentElement.setAttribute('data-desktop-app', '1');
   }, { once: true });
 }
+
+// Paint the native window from the page palette so Matrix, Braid, Compact
+// and the rest match the chrome, not only the webview.
+let lastTheme = '';
+function syncTheme() {
+  try {
+    const root = document.documentElement;
+    let theme = root.getAttribute('data-theme') || '';
+    const saved = localStorage.getItem('haven-theme') || localStorage.getItem('haven_theme') || '';
+    if (saved.startsWith('file:')) theme = saved.slice(5).replace(/\.css$/i, '');
+    const cs = getComputedStyle(root);
+    const bg = (cs.getPropertyValue('--bg-primary') || '').trim();
+    const accent = (cs.getPropertyValue('--accent') || '').trim();
+    const key = theme + '|' + bg + '|' + accent;
+    if (key === lastTheme) return;
+    lastTheme = key;
+    ipcRenderer.send('theme:colors', { theme, bg, accent });
+  } catch {}
+}
+function watchTheme() {
+  const root = document.documentElement;
+  if (!root) return false;
+  new MutationObserver(syncTheme).observe(root, { attributes: true, attributeFilter: ['data-theme', 'class', 'style'] });
+  syncTheme();
+  return true;
+}
+if (!watchTheme()) window.addEventListener('DOMContentLoaded', watchTheme, { once: true });
+window.addEventListener('load', () => { syncTheme(); setTimeout(syncTheme, 1500); });
+window.addEventListener('storage', syncTheme);
+
+function injectBraidDesktopCss() {
+  if (document.getElementById('haven-desktop-braid-gap')) return;
+  const el = document.createElement('style');
+  el.id = 'haven-desktop-braid-gap';
+  el.textContent = 'html[data-braid-layout="1"][data-desktop-app]{--thread-footer-offset:0px}'
+    + 'html[data-braid-layout="1"][data-desktop-app] .status-bar,'
+    + 'html[data-braid-layout="1"][data-desktop-app] #status-bar{display:none!important;height:0!important;min-height:0!important;padding:0!important;border:0!important;overflow:hidden!important}'
+    + 'html[data-braid-layout="1"].braid-status-open[data-desktop-app] .status-bar,'
+    + 'html[data-braid-layout="1"].braid-status-open[data-desktop-app] #status-bar{display:flex!important;height:auto!important;min-height:1.75rem!important;padding:.3125rem 1rem!important;overflow:visible!important}'
+    + 'html[data-braid-layout="1"] #app-body{flex:1 1 auto!important;height:auto!important;min-height:0}';
+  (document.head || document.documentElement).appendChild(el);
+}
+if (document.head) injectBraidDesktopCss();
+else window.addEventListener('DOMContentLoaded', injectBraidDesktopCss, { once: true });
 // ═══════════════════════════════════════════════════════════
 // JavaScript Dialog Overrides for BrowserView (issue #6)
 //
@@ -2001,6 +2045,10 @@ ipcRenderer.on('app:navigate-deep-link', (_e, { code, messageId, url } = {}) => 
 window.havenDesktop = {
   platform:     process.platform,
   isDesktopApp: true,
+  // The page has focus exactly when the window does (main.js hands focus to
+  // the active server view), so document.hasFocus() can stand in for the
+  // page being seen: pages here never become hidden. (#58)
+  pageFocusFollowsWindow: true,
 
   i18n: {
     getState: () => ({ ...i18nState }),
@@ -2021,7 +2069,9 @@ window.havenDesktop = {
     install:  () => ipcRenderer.send('update:install'),
   },
 
+  // Starting a capture is the share picker's job (see main.js).
   audio: {
+    stopCapture:     ()    => { teardownAudioPipeline(); return ipcRenderer.invoke('audio:stop-capture'); },
     isSupported:     ()    => ipcRenderer.invoke('audio:is-supported'),
     optOutOfDucking: ()    => ipcRenderer.invoke('audio:opt-out-ducking'),
   },
@@ -2065,11 +2115,6 @@ window.havenDesktop = {
 
   /** Signal the taskbar/dock badge (no native notification needed) */
   setUnreadBadge: (hasUnread) => ipcRenderer.send('notification-badge', hasUnread),
-
-  settings: {
-    get: (key)       => ipcRenderer.invoke('settings:get', key),
-    set: (key, val)  => ipcRenderer.invoke('settings:set', key, val),
-  },
 
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),

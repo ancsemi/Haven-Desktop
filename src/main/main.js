@@ -18,6 +18,7 @@ const { pathToFileURL } = require('url');
 const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
+const { normalizeHost, isLocalHost, certDecision } = require('./cert-trust');
 const {
   DEFAULT_LOCALE, SYSTEM_LANGUAGE, SUPPORTED_LOCALES, normalizeLocale,
   resolveLocale, translate, getLocaleMetadata,
@@ -202,6 +203,16 @@ if (store.get('unlimitFrameRate')) {
 // NOTE: there is exactly ONE --disable-features switch below. Chromium keeps
 // only the last occurrence of a switch, so appending it a second time
 // somewhere else silently throws away everything in the first one.
+
+// ── Windows app identity ────────────────────────────────────
+// Without an explicit AppUserModelID, Windows files a copy run from source
+// under electron.exe and shows Electron's logo on the taskbar instead of the
+// window's Haven icon. The id matches electron-builder's appId, which is what
+// the installer's shortcuts carry, so an installed copy keeps one taskbar
+// entry and its notifications keep their name.
+if (process.platform === 'win32') {
+  try { app.setAppUserModelId('com.haven.desktop'); } catch {}
+}
 
 // ── Suppress Chromium stderr noise (WGC ProcessFrame spam, GPU errors, etc.) ──
 // disable-logging shuts down Chromium's logging system across ALL subprocesses
@@ -389,36 +400,152 @@ if (!gotLock) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Self-Signed Certificate Handling
+// Certificate Trust
 //
-// Haven servers often use self-signed certs for localhost.
-// Accept them for local connections so the app can load.
+// Haven servers often use a certificate they made themselves. The app used
+// to accept every certificate from every host, so someone on the same
+// network could pose as a remote server. The rules are in cert-trust.js: a
+// certificate the system trusts is fine, this computer and the local
+// network stay automatic, and any other host's own certificate is accepted
+// once the user trusts it, then remembered by fingerprint.
+//
+// setCertificateVerifyProc sees every connection (pages, scripts and the
+// Socket.IO reconnect storms that used to exhaust the renderer when TLS
+// errors piled up). The question is asked while the connection waits, and
+// the answer goes straight to its callback, so the page loads as soon as
+// the certificate is trusted.
 // ═══════════════════════════════════════════════════════════
 
-app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
-  // Haven servers commonly use self-signed certs.
-  // Accept them so users can connect to LAN / remote servers without a blank screen.
-  event.preventDefault();
-  callback(true);
+const _certQuestions = new Map(); // "host|fingerprint" -> Promise<boolean>
+
+// Chromium caches the verify proc's answers, and a question left open for
+// about 30 seconds times the connection out and leaves a refusal in that
+// cache. A certificate trusted after that is still turned away there and
+// lands here instead, so the same rules decide.
+app.on('certificate-error', (event, _webContents, url, _error, certificate, callback) => {
+  let host = '';
+  try { host = normalizeHost(new URL(url).hostname); } catch { /* not a URL */ }
+  const verdict = certDecision(
+    { hostname: host, errorCode: -1, fingerprint: certificate?.fingerprint || '' },
+    { pins: trustedCertificates() }
+  );
+  if (verdict === 'local' || verdict === 'pinned') {
+    event.preventDefault();
+    callback(true);
+    return;
+  }
+  callback(false);
 });
 
-// ═══════════════════════════════════════════════════════════
-// Session-Level Certificate Bypass
-//
-// The 'certificate-error' event above only fires for navigation
-// (page loads).  WebSocket, fetch, and XHR connections go through
-// Chromium's network stack directly, where self-signed cert
-// failures flood ssl_client_socket_impl with rapid-fire errors.
-// Each error allocates renderer-heap objects; in a Socket.IO
-// reconnection storm the renderer OOMs and the screen goes blank.
-//
-// setCertificateVerifyProc handles ALL connections — navigation
-// *and* sub-resources — at a level above the C++ TLS code, so
-// the handshake never fails and no error objects accumulate.
-// ═══════════════════════════════════════════════════════════
+function trustedCertificates() {
+  return store.get('trustedCertificates') || {};
+}
+
+function rememberCertificate(host, fingerprint) {
+  store.set('trustedCertificates', { ...trustedCertificates(), [host]: fingerprint });
+  const waiting = store.get('certTrustGrandfathered') || [];
+  if (waiting.includes(host)) store.set('certTrustGrandfathered', waiting.filter(h => h !== host));
+}
+
+/** A host the user is opening as a Haven server. Only these are asked about;
+ *  a picture in a message from some other host with its own certificate is
+ *  refused quietly, the way a browser would. */
+function isServerHost(host) {
+  const urls = [primaryServerUrl, activeServerUrl, ...serverViews.keys(), store.get('userPrefs.serverUrl'),
+    ...(store.get('serverHistory') || []).map(e => e && e.url)];
+  return urls.some((u) => {
+    try { return normalizeHost(new URL(u).hostname) === host; } catch { return false; }
+  });
+}
+
+/** True while the user is being asked about the certificate of url's host. */
+function certQuestionPending(url) {
+  let host = '';
+  try { host = normalizeHost(new URL(url).hostname); } catch { return false; }
+  for (const key of _certQuestions.keys()) if (key.startsWith(`${host}|`)) return true;
+  return false;
+}
+
+function askToTrustCertificate(host, certificate, changed) {
+  const fingerprint = certificate?.fingerprint || '';
+  const key = `${host}|${fingerprint}`;
+  if (_certQuestions.has(key)) return _certQuestions.get(key);
+  const previous = trustedCertificates()[host];
+  const lines = [changed ? t('cert.changedDetail') : t('cert.unknownDetail'), '', t('cert.fingerprint', { value: fingerprint })];
+  if (changed && previous) lines.push(t('cert.previousFingerprint', { value: previous }));
+  if (certificate?.issuerName) lines.push(t('cert.issuer', { value: certificate.issuerName }));
+  if (certificate?.validExpiry) lines.push(t('cert.expires', { value: new Date(certificate.validExpiry * 1000).toLocaleDateString() }));
+  const options = {
+    type: 'warning',
+    title: t('cert.title'),
+    message: changed ? t('cert.changedMessage', { host }) : t('cert.unknownMessage', { host }),
+    detail: lines.join('\n'),
+    buttons: [t('dialog.cancel'), changed ? t('cert.trustNew') : t('cert.trust')],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const parent = [BrowserWindow.getFocusedWindow(), mainWindow, welcomeWindow].find(w => w && !w.isDestroyed());
+  const answer = (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response }) => {
+      if (response !== 1) return false;
+      rememberCertificate(host, fingerprint);
+      // A slow answer can outlast the connection, which then gave up and
+      // showed the error page; try that server again now.
+      setTimeout(() => retryAfterTrust(host), 500);
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => _certQuestions.delete(key));
+  _certQuestions.set(key, answer);
+  return answer;
+}
+
+function retryAfterTrust(host) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const current = mainWindow.webContents.getURL();
+    if (!current.includes('connection-error.html')) return;
+    const failed = new URL(current).searchParams.get('url');
+    if (failed && normalizeHost(new URL(failed).hostname) === host) createAppWindow(failed);
+  } catch { /* nothing to retry */ }
+}
+
 app.on('ready', () => {
-  session.defaultSession.setCertificateVerifyProc((_request, callback) => {
-    callback(0); // 0 = chromium net::OK — accept the certificate
+  // Servers the user had already connected to before certificates were
+  // checked are trusted on their next connection, instead of a burst of
+  // questions after the update. After that they are remembered like any
+  // other.
+  if (!store.get('certTrustMigrated')) {
+    const hosts = new Set();
+    const urls = (store.get('serverHistory') || []).map(e => e && e.url);
+    urls.push(store.get('userPrefs.serverUrl'));
+    for (const url of urls) {
+      try {
+        const host = normalizeHost(new URL(url).hostname);
+        if (host && !isLocalHost(host)) hosts.add(host);
+      } catch { /* not a URL */ }
+    }
+    store.set('certTrustGrandfathered', [...hosts]);
+    store.set('certTrustMigrated', true);
+  }
+
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    const host = normalizeHost(request.hostname);
+    const fingerprint = request.certificate?.fingerprint || '';
+    const verdict = certDecision(
+      { hostname: host, errorCode: request.errorCode, fingerprint },
+      { pins: trustedCertificates(), grandfathered: store.get('certTrustGrandfathered') || [] }
+    );
+    if (verdict === 'system') return callback(-3); // Chromium's own verdict
+    if (verdict === 'local' || verdict === 'pinned') return callback(0);
+    if (verdict === 'grandfathered') {
+      rememberCertificate(host, fingerprint);
+      return callback(0);
+    }
+    if (verdict === 'unknown' && !isServerHost(host)) return callback(-3);
+    askToTrustCertificate(host, request.certificate, verdict === 'changed')
+      .then(ok => callback(ok ? 0 : -2));
   });
 });
 
@@ -525,8 +652,10 @@ app.whenReady().then(async () => {
     }, 50);
   });
 
-  // Auto-grant camera, mic, screen-share, fullscreen, and PiP permissions for all server views
-  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture', 'clipboard-write', 'clipboard-read'];
+  // Auto-grant camera, mic, screen-share, fullscreen, and PiP permissions for all server views.
+  // Not clipboard-read: Haven never reads the clipboard, and granting it let
+  // any server read whatever was copied, passwords included, without asking.
+  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture', 'clipboard-write'];
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(ALLOWED_PERMS.includes(permission));
   });
@@ -885,26 +1014,46 @@ function registerVoiceShortcuts() {
     // on every repeat while the key was held (Dispencer2, NumLock on Windows).
     // Hold is emulated instead: talk on the first press, release 350 ms after
     // the repeats stop.
-    try {
-      globalShortcut.register(b.accel, () => {
-        if (b.event === 'voice:ptt' && b.mode === 'hold') {
-          const stateKey = 'g:voice:ptt';
-          if (!_uiohookDownState.has(stateKey)) {
-            _uiohookDownState.add(stateKey);
-            safeSend(getActiveContents(), 'voice:ptt-down');
-          }
-          if (_gsPttTimer) clearTimeout(_gsPttTimer);
-          _gsPttTimer = setTimeout(() => {
-            _gsPttTimer = null;
-            _uiohookDownState.delete(stateKey);
-            safeSend(getActiveContents(), 'voice:ptt-up');
-          }, 350);
-          return;
+    const fire = () => {
+      if (b.event === 'voice:ptt' && b.mode === 'hold') {
+        const stateKey = 'g:voice:ptt';
+        if (!_uiohookDownState.has(stateKey)) {
+          _uiohookDownState.add(stateKey);
+          safeSend(getActiveContents(), 'voice:ptt-down');
         }
-        safeSend(getActiveContents(), b.event === 'voice:ptt' ? 'voice:ptt-toggle' : b.event);
-      });
+        if (_gsPttTimer) clearTimeout(_gsPttTimer);
+        _gsPttTimer = setTimeout(() => {
+          _gsPttTimer = null;
+          _uiohookDownState.delete(stateKey);
+          safeSend(getActiveContents(), 'voice:ptt-up');
+        }, 350);
+        return;
+      }
+      safeSend(getActiveContents(), b.event === 'voice:ptt' ? 'voice:ptt-toggle' : b.event);
+    };
+    let registered = false;
+    try {
+      registered = !!globalShortcut.register(b.accel, fire);
     } catch (e) {
       console.warn(`[Shortcuts] Failed to register ${b.accel}:`, e.message);
+    }
+    if (registered) continue;
+
+    // Electron will not take some keys on their own as a global shortcut
+    // (Tab, Caps Lock, the backtick key on some layouts). The input hook
+    // can, in either mode, so a binding Electron refused goes through it
+    // when it is available. (#38)
+    const combo = tryLoadUiohook() ? _accelToUiohookCombo(b.accel) : null;
+    if (combo) {
+      needUiohook = true;
+      _uiohookKeyBindings.set(b.accel + '|' + b.event, {
+        keycodes: combo.keycodes,
+        mods:     combo.mods,
+        event:    b.event,
+        mode:     b.mode,
+      });
+    } else {
+      console.warn(`[Shortcuts] Could not register ${b.accel} through Electron or the input hook`);
     }
   }
 
@@ -991,7 +1140,7 @@ function createWelcomeWindow() {
     minWidth: 620, minHeight: 480,
     resizable: false,
     frame: false,
-    backgroundColor: '#0d0d1a',
+    backgroundColor: store.get('themeColors.bg') || '#0d0d1a',
     icon: ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1018,7 +1167,7 @@ function createAppWindow(serverUrl) {
       minWidth: 800, minHeight: 600,
       frame: true,
       autoHideMenuBar: !!store.get('hideMenuBar'),
-      backgroundColor: '#0d0d1a',
+      backgroundColor: store.get('themeColors.bg') || '#0d0d1a',
       icon: ICON_PATH,
       show: false,
       // The BrowserView per-server already disables backgroundThrottling, but
@@ -1076,6 +1225,24 @@ function createAppWindow(serverUrl) {
     mainWindow.on('unmaximize', syncViewBounds);
     mainWindow.on('enter-full-screen', syncViewBounds);
     mainWindow.on('leave-full-screen', syncViewBounds);
+
+    // The taskbar flash says "look over here", and looking is what stops it.
+    // Windows keeps a flashFrame(true) going until it is told to stop, and
+    // the only stop was every unread being read, so one unread the person
+    // could not or would not open (a muted server, a hidden channel) left
+    // the taskbar button blinking for good. The unread badge stays; only the
+    // blinking ends. (Haven #5683)
+    mainWindow.on('focus', () => {
+      try { mainWindow.flashFrame(false); } catch {}
+      // Back from another window, focus goes to the server page, not the
+      // window's own frame: keys land in the page, and the page can tell it
+      // is being looked at, which decides whether the open chat notifies.
+      // (Haven-Desktop #58)
+      try {
+        const view = activeServerUrl && serverViews.get(activeServerUrl);
+        if (view && !view.webContents.isDestroyed()) view.webContents.focus();
+      } catch {}
+    });
 
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
@@ -1176,9 +1343,9 @@ function syncAllServerViewBounds() {
     const isActive = url === activeServerUrl;
     try {
       if (isActive) {
-        // Don't expand over the splash while the active view is still loading
-        // its first paint — did-finish-load will expand it.
-        if (view.webContents.isLoading?.() && view.getBounds().width === 0) {
+        // Don't expand over the splash before the active view's page is
+        // ready — its dom-ready handler will expand it.
+        if (!view._havenPageReady && view.getBounds().width === 0) {
           view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
           continue;
         }
@@ -1227,9 +1394,9 @@ function switchToServer(serverUrl) {
     const [cw, ch] = mainWindow.getContentSize();
     const b = view.getBounds();
     if (b.width !== cw || b.height !== ch) {
-      // Only expand if the view has already finished loading — otherwise let
-      // the per-view did-finish-load handler do it so the splash stays up.
-      if (!view.webContents.isLoading()) {
+      // Only expand once the view's page is ready; otherwise its dom-ready
+      // handler does it, so the splash stays up until there is a page.
+      if (view._havenPageReady) {
         view.setBounds({ x: 0, y: 0, width: cw, height: ch });
         view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
       }
@@ -1329,7 +1496,12 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         }
       } catch {}
     };
-    view.webContents.once('did-finish-load', () => { clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
+    // The page shows as soon as it is ready (dom-ready), the way a browser
+    // shows it, not when every picture on it has arrived (did-finish-load).
+    // Waiting for the load event kept the splash up for as long as one slow
+    // outside image or script took, so a server that opened in a second in a
+    // browser sat on "connecting" in the app.
+    view.webContents.once('dom-ready',       () => { view._havenPageReady = true; clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
     view.webContents.once('did-fail-load',   () => { clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
     // Each subsequent in-page navigation (e.g. login → app, channel switch)
     // also gets reflected in the window title once the view is the active one.
@@ -1446,6 +1618,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // If they fail to load, they're cleaned up quietly so unread-badge
     // pre-loading doesn't surface as a scary popup on launch.
     let loadResolved = false;
+    // A page that is up counts as loaded, even while slow pictures finish.
+    view.webContents.once('dom-ready', () => { loadResolved = true; });
     view.webContents.once('did-finish-load', async () => {
       loadResolved = true;
       // Check that the page is actually a Haven server by looking for a
@@ -1497,8 +1671,19 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         }
       }
     });
-    setTimeout(() => {
-      if (loadResolved || !mainWindow) return;
+    // A page that is still arriving is left to finish, the way a browser
+    // would, for up to 90 s. Giving up at 15 s turned a slow route to the
+    // server into "Connection Problem" while the page was still loading.
+    const loadStartedAt = Date.now();
+    const checkLoad = () => {
+      // A certificate question holds the load open; the answer settles it.
+      if (loadResolved || !mainWindow || certQuestionPending(url)) return;
+      try {
+        if (view.webContents.isLoading() && Date.now() - loadStartedAt < 90000) {
+          setTimeout(checkLoad, 15000);
+          return;
+        }
+      } catch { return; } // view already torn down
       // Check if the page actually has content (async — never blocks renderer or main)
       view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
@@ -1536,7 +1721,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           showConnectionError(url);
         }
       }).catch(() => {});
-    }, 15000);
+    };
+    setTimeout(checkLoad, 15000);
 
     // ── Handle load failures — only reset to welcome for the primary server ──
     // Retry briefly on transient errors (server restart, brief outage) before
@@ -1627,13 +1813,19 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       'https://www.youtube-nocookie.com',
     ];
     view.webContents.on('will-navigate', (event, navUrl) => {
+      let parsed = null;
+      try { parsed = new URL(navUrl); } catch {}
       try {
-        const navOrigin = new URL(navUrl).origin;
-        if (navOrigin === new URL(url).origin) return;
-        if (EMBED_ORIGINS.includes(navOrigin)) return;
-        event.preventDefault();
-        shell.openExternal(navUrl);
+        if (parsed && parsed.origin === new URL(url).origin) return;
+        if (parsed && EMBED_ORIGINS.includes(parsed.origin)) return;
       } catch {}
+      event.preventDefault();
+      // Only web links go to the system browser. Anything else handed to the
+      // OS shell can run code on Windows (ms-msdt:, search-ms:, file: and
+      // network shares), and a server page can navigate wherever it likes.
+      if (parsed && (parsed.protocol === 'https:' || parsed.protocol === 'http:')) {
+        shell.openExternal(parsed.href).catch(() => {});
+      }
     });
 
     // Intercept window.open → switch servers or open external.
@@ -2060,8 +2252,11 @@ function setNotificationBadge() {
   // the user may be in a different channel and hasn't seen the new message yet).
   if (process.platform === 'win32' && badgeIcon) mainWindow.setOverlayIcon(badgeIcon, t('badge.newMessages'));
   if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(1);
-  // Taskbar flash: only when the window is not already in focus (avoids annoying flicker).
-  if (!mainWindow.isFocused()) mainWindow.flashFrame(true);
+  // No flash here. Every server view re-reports its unread state as things
+  // change, so flashing on it kept the taskbar blinking for unreads nobody
+  // meant to read, even with pop-ups set to Never. The flash comes with a
+  // notification instead (see 'notify'), which already honours mutes, the
+  // DM and mention switches and the pop-up limit. (Haven #5693)
 }
 
 function clearNotificationBadge() {
@@ -3079,7 +3274,33 @@ function registerScreenShareHandler() {
 // IPC Handlers
 // ═══════════════════════════════════════════════════════════
 
+function cssColorToHex(s) {
+  if (!s || typeof s !== 'string') return null;
+  const v = s.trim();
+  if (/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) {
+    const h = v.slice(1);
+    if (h.length === 3 || h.length === 4) return `#${[...h.slice(0, 3)].map((c) => c + c).join('')}`;
+    return `#${h.slice(0, 6)}`;
+  }
+  const m = v.match(/rgba?\(\s*([\d.]+)\s*[, ]+\s*([\d.]+)\s*[, ]+\s*([\d.]+)/i);
+  if (!m) return null;
+  // The value comes from the server's page, so a channel is held to 0-255;
+  // rgb(999, 0, 0) would otherwise build a seven digit color.
+  const hex = (n) => Math.max(0, Math.min(255, Math.round(Number(n)) || 0)).toString(16).padStart(2, '0');
+  return `#${hex(m[1])}${hex(m[2])}${hex(m[3])}`;
+}
+
+function applyWindowTheme({ bg, accent } = {}) {
+  const color = cssColorToHex(bg) || store.get('themeColors.bg') || '#0d0d1a';
+  store.set('themeColors', { bg: color, accent: cssColorToHex(accent) || store.get('themeColors.accent') || '#7c5cfc' });
+  for (const win of [mainWindow, welcomeWindow]) {
+    if (win && !win.isDestroyed()) win.setBackgroundColor(color);
+  }
+}
+
 function registerIPC() {
+
+  ipcMain.on('theme:colors', (_e, payload) => applyWindowTheme(payload || {}));
 
   // ── Internationalization ──────────────────────────────
   ipcMain.on('i18n:get-state-sync', (event) => {
@@ -3162,10 +3383,11 @@ function registerIPC() {
   });
 
   // ── Audio Capture ─────────────────────────────────────
-  ipcMain.handle('audio:stop-capture', (event, { captureId } = {}) => {
-    if (typeof captureId !== 'string') return false;
-    return audioCaptureController.stop(captureId, event.sender.id);
-  });
+  // Capture only ever starts from the screen-share picker (the display-media
+  // handler above). Server pages could once list every app playing sound and
+  // start recording any of them, with nothing on screen to say so; Haven
+  // never used that, so it is gone.
+  ipcMain.handle('audio:stop-capture',   () => { try { audioCapture.stopCapture(); } catch {} });
   ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
 
@@ -3260,6 +3482,9 @@ function registerIPC() {
     // Badge is managed exclusively by the renderer via 'notification-badge' IPC.
     // Setting it here caused a race: the renderer would clear the badge (unreads=0)
     // right before notify() re-set it, leaving a phantom taskbar badge forever.
+    // The taskbar flash does belong here: it goes with a notification, and
+    // focusing the window stops it. (Haven #5693)
+    try { if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true); } catch {}
     return true;
   });
 
@@ -3366,15 +3591,21 @@ function registerIPC() {
     'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
     'disableGpuVsync', 'unlimitFrameRate', 'videoEncoderPreference'
   ]);
-  ipcMain.handle('settings:get', (_e, key)        => store.get(key));
-  ipcMain.handle('settings:set', (_e, key, value)  => {
-    if (!ALLOWED_SETTINGS_KEYS.has(key)) return false;
-    store.set(
-      key,
-      key === 'videoEncoderPreference'
-        ? normalizeVideoEncoderPreference(value)
-        : value
-    );
+<  // Only Haven Desktop's own screens (welcome, splash, the error page) use
+  // the generic store; they load from local files. A server page must never
+  // reach it: it could point the "host a server" folder at a network share it
+  // controls, and the next launch would run whatever server.js it found there.
+  // Server pages have their own narrow calls (prefs, shortcuts, history).
+  const fromLocalPage = (e) => {
+    try { return String(e.senderFrame?.url || '').startsWith('file://'); } catch { return false; }
+  };
+  ipcMain.handle('settings:get', (e, key) => {
+    if (!fromLocalPage(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return undefined;
+    return store.get(key);
+  });
+  ipcMain.handle('settings:set', (e, key, value)  => {
+    if (!fromLocalPage(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return false;
+    store.set(key, value);
     return true;
   });
 
@@ -3586,6 +3817,16 @@ function registerIPC() {
     Object.entries(cfg).forEach(([k, v]) => {
       if (k === 'pttMode') { result[k] = { ok: true, reason: 'ok' }; return; }
       if (!v)              { result[k] = { ok: true, reason: 'ok' }; return; }
+      // A key the input hook took (hold mode, or one Electron refused) is
+      // not in globalShortcut, so asking it would call the binding a
+      // conflict and the settings page would throw the key away. (#38)
+      const viaHook = [..._uiohookKeyBindings.keys(), ..._uiohookMouseBindings.keys()].some(key => key.startsWith(v + '|'));
+      if (viaHook) {
+        result[k] = uiohookOk
+          ? { ok: true,  reason: 'ok' }
+          : { ok: false, reason: 'uiohook-unavailable', accel: v };
+        return;
+      }
       if (_isUiohookAccel(v)) {
         result[k] = uiohookOk
           ? { ok: true,  reason: 'ok' }

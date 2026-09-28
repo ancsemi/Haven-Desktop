@@ -1,6 +1,6 @@
 {
   "name": "haven-desktop",
-  "version": "1.4.33",
+  "version": "1.4.38",
   "description": "Haven Desktop — Private chat, reimagined for your desktop",
   "main": "src/main/main.js",
   "author": {
@@ -19,13 +19,11 @@
     "test": "node --test test/*.test.js",
     "i18n:check": "node scripts/check-i18n.js && node scripts/check-language-sync.js",
     "smoke:electron": "electron scripts/smoke-electron.js",
-    "build": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder",
-    "build:win": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder --win",
-    "build:linux": "npm run i18n:check && npm run build:native && npm run stage:native-runtime && electron-builder --linux",
+    "build": "npm run i18n:check && npm run build:native && electron-builder",
+    "build:win": "npm run i18n:check && npm run build:native && electron-builder --win",
+    "build:linux": "npm run i18n:check && npm run build:native && electron-builder --linux",
     "build:native": "node ./node_modules/node-gyp/bin/node-gyp.js rebuild --directory=native",
-    "stage:native-runtime": "node scripts/stage-gstreamer.js",
-    "smoke:native-screen": "node scripts/smoke-native-screen.js",
-    "smoke:native-media": "node scripts/smoke-native-media.js",
+    "build:native:local": "node ./scripts/build-native.js",
     "rebuild:electron": "electron-builder install-app-deps && npm run build:native",
     "postinstall": "electron-builder install-app-deps || echo electron-rebuild skipped"
   },

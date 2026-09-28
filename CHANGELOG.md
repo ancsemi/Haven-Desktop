@@ -1,5 +1,93 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Fixed
+- **A server that opens in a second in a browser sat on "connecting" in the
+  app.** The app kept the loading screen up until every picture and script
+  on the page had arrived, so one slow outside image (a blocked avatar
+  host, say) held the whole server back. It shows the page as soon as it is
+  ready now, the way a browser does, and the rest fills in after.
+
+---
+
+## v1.4.38
+
+### Fixed
+- **The taskbar kept flashing (Haven #5693).** It flashed whenever any
+  server you are signed into had something unread, including channels you
+  had muted and with pop-ups set to Never. It flashes when a notification
+  actually shows now, and stops when you click into the app.
+- **No notification for the open chat while the app was minimised or in the
+  background (#58).** Returning to the window now hands focus to the page, so
+  Haven can tell whether you are looking at the chat. Needs the next Haven
+  server update too.
+- **A slow connection ended in "Connection Problem".** The app gave up on a
+  server whose page had not finished loading within 15 seconds, even while it
+  was still arriving, so a slow route to the server looked like a dead one.
+  It keeps waiting while the page loads, up to 90 seconds, the way a browser
+  does.
+
+---
+
+## v1.4.37
+
+### Security
+- **Server certificates are checked.** The app accepted every certificate from
+  every server, so someone on the same network could pose as a remote server
+  and read what you sent it. A certificate your system trusts works as before,
+  and this computer and your local network stay automatic. A remote server
+  with a certificate of its own (Haven makes one when it has none) asks once
+  whether to trust it and remembers your answer; if that certificate later
+  changes, the app says so and asks again. Servers you had already used are
+  trusted on their next connection without asking.
+- **Server pages can no longer capture another app's sound on their own.** A
+  page could list the apps playing sound and start capturing one with nothing
+  on screen to say so. App audio is only captured from the screen-share picker
+  now.
+
+---
+
+## v1.4.36
+
+### Security
+Update soon. A server you connect to, or a script injected into one, could
+reach further into your computer than any web page should.
+
+- **Links a server page opened went to Windows unchecked.** Anything that was
+  not the server itself was handed to the system to open, including the kinds
+  of links Windows uses to run programs. Only web links go to your browser now.
+- **A server page could change the app's own settings**, including which
+  folder "host a server" starts from, so the next launch could run a program
+  from a place the server chose. Only the app's own screens can reach those
+  settings now.
+- **Every server could read your clipboard without asking.** Haven never needed
+  it, and the permission is gone. Copying into the clipboard still works.
+
+---
+
+## v1.4.35
+
+### Fixed
+- **The taskbar button could blink forever.** The flash only stopped once every unread was read, so an unread you could not or did not want to open kept the button blinking even with the app in front of you. Clicking into the app stops the blinking now; the unread badge stays until things are read. Reported by quakeman00. (Haven #5683)
+- **Running from source on Node 26 lost per-app audio.** Setup rebuilt the audio addon against the installed Node's headers, which on Node 26 add clang-only link flags that Visual Studio rejects, and because the rebuild cleans first, the working addon was deleted too. The share picker then only offered System Audio and No Audio. Setup now builds against Electron's headers and only falls back to the plain build. Installers were never affected: the release build runs on its own pinned Node and checks that the addon loads.
+- **Electron's logo on the Windows taskbar when run from source.** The app sets its Windows app id now, so the taskbar shows the Haven icon.
+
+---
+
+## v1.4.34
+
+### Added
+- **The native window follows the page palette.** Matrix, Braid, Compact and
+  the other themes update the Electron chrome background from `--bg-primary`
+  and `--accent`, so a layout overlay no longer leaves a leftover strip of
+  the previous color. By @Amnibro. (#53)
+
+### Fixed
+- **Tab, Caps Lock and the backtick key can be push-to-talk keys.** Electron refuses some keys on their own as a global shortcut, and a key the input hook had taken instead was reported back to the settings page as a conflict, so the page threw it away. A key Electron refuses now goes through the input hook, and a key the hook holds counts as registered. Reported by Constooli. (#38)
+
+---
+
 ## v1.4.33
 
 ### Added
