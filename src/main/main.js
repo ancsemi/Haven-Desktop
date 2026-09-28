@@ -57,7 +57,12 @@ if (process.platform === 'linux') {
     'UseOzonePlatform',
     'WaylandWindowDecorations',
     'AcceleratedVideoEncoder',
-    'VaapiOnNvidiaGPUs'
+    'VaapiOnNvidiaGPUs',
+    // Without this, Chromium's VA-API driver checks reject most real-world
+    // Linux drivers (Intel/AMD/NVIDIA all hit the blocklist in practice), so
+    // WebRTC screen shares silently fall back to software encoding: no GPU
+    // confirmation, black tiles until rejoin, and CPU-bound frame drops.
+    'VaapiIgnoreDriverChecks'
   );
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 }

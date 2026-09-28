@@ -254,6 +254,12 @@ const _screenShareTransceivers = new WeakMap();
 const _encoderStatsTimers = new WeakMap();
 const _encoderStatsGenerations = new WeakMap();
 let _activeDisplayVideoTrack = null;
+// Latch for the GPU-confirmed badge. Every viewer peer reports its own stats
+// on its own timer and they all write to the same badge (last-wins), so once
+// any negotiated report proves hardware encoding for the current screen track
+// the badge stays confirmed until the track ends — instead of flickering
+// between confirmed/software as competing peer reports land.
+let _gpuConfirmedTrack = null;
 let _videoEncoderConfig = {
   preference: 'hardware',
   hardwareAvailable: false,
@@ -292,10 +298,19 @@ function publishVideoEncoderStatus(status) {
     document.body.appendChild(badge);
   }
 
+  if (status.powerEfficientEncoder === true && status.track) {
+    _gpuConfirmedTrack = status.track;
+  }
+  const gpuLatched = !!_gpuConfirmedTrack &&
+    _gpuConfirmedTrack.readyState === 'live' &&
+    _gpuConfirmedTrack === _activeDisplayVideoTrack;
+  if (!gpuLatched && _gpuConfirmedTrack?.readyState !== 'live') _gpuConfirmedTrack = null;
   const codec = status.mimeType?.replace(/^video\//i, '').toUpperCase()
     || videoEncoderLabel(status.preference);
   let acceleration = t('screenEncoder.browserManaged');
-  if (status.powerEfficientEncoder === true) acceleration = t('screenEncoder.gpuConfirmed');
+  if (gpuLatched || status.powerEfficientEncoder === true) {
+    acceleration = t('screenEncoder.gpuConfirmed');
+  }
   else if (status.powerEfficientEncoder === false) acceleration = t('screenEncoder.software');
   else if (status.hardwareAvailable && codec.includes('H264')) {
     acceleration = t('screenEncoder.gpuPending');
@@ -314,6 +329,7 @@ function publishVideoEncoderStatus(status) {
 function clearVideoEncoderStatus() {
   document.getElementById('haven-video-encoder-status')?.remove();
   window.__havenShareVideoEncoder = null;
+  _gpuConfirmedTrack = null;
 }
 
 function configureScreenShareTransceiver(track, transceiver) {
@@ -391,6 +407,7 @@ async function reportNegotiatedScreenEncoder(peer) {
       publishVideoEncoderStatus({
         phase: 'negotiated',
         preference: encoderState.preference,
+        track,
         mimeType: codec.mimeType,
         sdpFmtpLine: codec.sdpFmtpLine || '',
         encoderImplementation: outbound.encoderImplementation || null,
