@@ -29,7 +29,7 @@ const {
   resolveAudioSelection,
 } = require('./screen-share-audio');
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
-const { getPhysicalDisplayBounds, resolveRefreshedSource } = require('./screen-source');
+const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame } = require('./ipc-security');
 
 function isWaylandSession(platform = process.platform, env = process.env) {
@@ -2491,7 +2491,7 @@ function getScreenAudioPickerData() {
 
 function getScreenPickerCopy() {
   const keys = [
-    'title', 'subtitle', 'portalSubtitle', 'screens', 'windows',
+    'title', 'subtitle', 'portalSubtitle', 'systemPortal', 'screens', 'windows',
     'audio', 'noAudio', 'systemAudio', 'applicationAudio', 'noApplications',
     'systemUnavailable', 'applicationUnavailable', 'videoEncoder', 'hardwareH264',
     'automaticEncoder', 'unavailable', 'hardwareEncodingAvailable',

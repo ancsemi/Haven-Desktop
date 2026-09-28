@@ -47,7 +47,7 @@ picker.onData(data => {
   document.documentElement.lang = data.locale || 'en';
   document.documentElement.dir = data.direction === 'rtl' ? 'rtl' : 'ltr';
   document.title = copy.title || document.title;
-  setText('picker-title', copy.title);
+  setText('picker-title', portalOnly ? copy.systemPortal : copy.title);
   setText('picker-subtitle', portalOnly ? copy.portalSubtitle : copy.subtitle);
   setText('screens-title', copy.screens);
   setText('windows-title', copy.windows);
