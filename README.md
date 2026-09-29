@@ -176,7 +176,7 @@ Haven Desktop is just the client. **You need a Haven server to connect to.**
 |---|---|
 | **Haven Server** | [github.com/ancsemi/Haven](https://github.com/ancsemi/Haven) |
 | **Setup Guide** | [GUIDE.md](https://github.com/ancsemi/Haven/blob/main/GUIDE.md) |
-| **Website** | [ancsemi.github.io/Haven](https://ancsemi.github.io/Haven/) |
+| **Website** | [haven-app.com](https://haven-app.com/) |
 
 ---
 
