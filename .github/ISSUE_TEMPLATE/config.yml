@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Feature ideas, questions and help
+    url: https://github.com/ancsemi/Haven/discussions
+    about: Ideas and questions for both the app and the server live in the main Haven repo.
+  - name: Setup guide
+    url: https://github.com/ancsemi/Haven/blob/main/GUIDE.md
+    about: Hosting, port forwarding, tunnels and every setting.

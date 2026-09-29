@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in the Haven Desktop app isn't working the way it should.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! A screenshot usually helps more than anything else.
+
+        Found a security problem? Please don't post it here. Email ancsemi@haven-app.com instead.
+
+        If the same problem happens in a browser too, it belongs on the [Haven issues](https://github.com/ancsemi/Haven/issues) page instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can we make it happen?
+      description: The steps that lead to the problem, if you know them.
+      placeholder: |
+        1. Join a voice channel
+        2. Click ...
+        3. See ...
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux (AppImage)
+        - Linux (.deb)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: desktop-version
+    attributes:
+      label: Haven Desktop version
+      description: Shown in Settings, under Desktop App. "Not sure" is fine.
+      placeholder: "1.4.39"
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: Haven server version
+      description: The server you're connecting to, if you know it.
+      placeholder: "4.15.0"
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or anything else
+      description: Drag images in here.
