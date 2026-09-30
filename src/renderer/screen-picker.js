@@ -60,8 +60,12 @@ picker.onData(data => {
   const screens = document.getElementById('screens');
   const windows = document.getElementById('windows');
   const share = document.getElementById('share');
+  // Default to System audio when the platform reports native support,
+  // matching the previous picker. Only fall back to None when system
+  // capture is unavailable.
+  const systemAvailable = audioCapabilities.system === true;
   let selectedSource = portalOnly ? sources[0].id : null;
-  let selectedAudio = 'none';
+  let selectedAudio = systemAvailable ? 'system' : 'none';
   let selectedEncoder = normalizePreference(encoder.preference);
   share.disabled = !selectedSource;
 
@@ -170,9 +174,9 @@ picker.onData(data => {
     return button;
   };
 
-  addAudioOption(modes, copy.noAudio, 'none', true);
+  addAudioOption(modes, copy.noAudio, 'none', selectedAudio === 'none');
   if (audioCapabilities.system === true) {
-    addAudioOption(modes, copy.systemAudio, 'system');
+    addAudioOption(modes, copy.systemAudio, 'system', selectedAudio === 'system');
   } else {
     const unavailable = document.createElement('span');
     unavailable.className = 'empty';

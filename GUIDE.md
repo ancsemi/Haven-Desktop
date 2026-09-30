@@ -95,7 +95,7 @@ Share audio from a **single application** during screen share — no other audio
 5. Click **Share** — your friends hear only that app's audio
 
 **Technical details:**
-- **Windows:** Uses WASAPI Process Loopback (same API as Discord) — requires Windows build 20348+
+- **Windows:** Uses WASAPI Process Loopback (same API as Discord) — requires Windows 10 build 19041+ (May 2020 Update)
 - **Linux:** Creates a PulseAudio virtual null sink, routes the target app's audio to it, and captures from the sink monitor
 
 > If you don't select a specific app, system audio is shared as usual.
@@ -262,7 +262,7 @@ GitHub Actions builds the Windows `.exe` and Linux `.AppImage` / `.deb`, then pu
 |---------|-----|
 | Server not detected | Make sure the folder contains both `server.js` and `package.json` with `"name": "haven"`. Use **Browse** to point Haven to the right directory. |
 | "node.exe not found" or server won't start | Node.js must be installed system-wide. Download from [nodejs.org](https://nodejs.org/) and restart. |
-| Per-app audio not available | The native module needs to be built (happens automatically for release builds). On Windows, requires build 20348+. On Linux, install `libpulse-dev` and rebuild. |
+| Per-app audio not available | The native module needs to be built (happens automatically for release builds). On Windows, requires build 19041+. On Linux, install `libpulse-dev` and rebuild. |
 | Certificate error connecting to server | Haven Desktop auto-accepts self-signed certs for `localhost` / `127.0.0.1`. For remote servers, accept the cert in a browser first, or install a trusted cert on the server. |
 | No sound from per-app capture | Make sure the target app is actually producing audio. Try selecting a different application. |
 | App opens to blank screen | Check that the server is running and reachable at the configured URL. Try clearing settings by deleting the config file (see Configuration above). |

@@ -49,7 +49,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 - **Windows 10** (build 19041+) / **Windows 11**
 - **Linux** (PulseAudio or PipeWire with `pipewire-pulse`)
 
-> Per-app audio on Windows requires build 20348+; earlier Windows 10 builds can still run Haven but cannot use process-isolated audio capture.
+> Per-app audio on Windows requires build 19041+ (Windows 10 version 2004, May 2020 Update).
 
 ---
 
@@ -149,7 +149,7 @@ Haven-Desktop/
 ### How Per-App Audio Works
 
 **Windows (WASAPI Process Loopback):**
-The app uses `ActivateAudioInterfaceAsync` with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` on Windows build 20348+ to capture audio exclusively from a target process. The native addon runs in a background thread, captures 48 kHz float32 PCM, and streams it to the renderer via IPC.
+The app uses the Windows 10 2004+ `ActivateAudioInterfaceAsync` API with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` to capture audio exclusively from a target process. The native addon runs in a background thread, captures 48 kHz float32 PCM, and streams it to the renderer via IPC.
 
 **Linux (PulseAudio):**
 The app creates a virtual null sink, moves the target application's audio stream to it, records from the sink's monitor, and loops the audio back to the default output so the user still hears it.

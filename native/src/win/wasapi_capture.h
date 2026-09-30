@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════
 // Haven Desktop — Windows WASAPI Per-Process Audio Capture
 //
-// Uses the Windows build 20348+ Process Loopback API
+// Uses the Windows build 19041+ Process Loopback API
 // to capture audio exclusively from a single process tree.
 //
 // Key API:

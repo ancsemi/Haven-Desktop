@@ -2,7 +2,7 @@
 // Haven Desktop — Windows WASAPI Per-Process Audio Capture
 //
 // Captures audio from a single process using the Windows
-// build 20348+ Process Loopback API.
+// build 19041+ Process Loopback API.
 //
 // Flow:
 //   1) ActivateAudioInterfaceAsync with process-loopback params
@@ -440,7 +440,8 @@ WasapiCapture::~WasapiCapture() {
 }
 
 // ── IsSupported ────────────────────────────────────────────
-// Process loopback activation is supported starting with build 20348.
+// Process loopback activation is supported starting with build 19041
+// (Windows 10 version 2004, May 2020 Update).
 bool WasapiCapture::IsSupported() const {
     OSVERSIONINFOEXW ovi = {};
     ovi.dwOSVersionInfoSize = sizeof(ovi);
@@ -449,9 +450,9 @@ bool WasapiCapture::IsSupported() const {
     auto RtlGetVersion = (RtlGetVersionFn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
     if (RtlGetVersion) {
         RtlGetVersion((PRTL_OSVERSIONINFOW)&ovi);
-        // Windows Server 2022 / Windows 11 generation.
+        // Windows 10 2004+ / Windows 11 generation.
         return (ovi.dwMajorVersion > 10) ||
-               (ovi.dwMajorVersion == 10 && ovi.dwBuildNumber >= 20348);
+               (ovi.dwMajorVersion == 10 && ovi.dwBuildNumber >= 19041);
     }
     return false;
 }

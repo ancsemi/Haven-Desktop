@@ -335,6 +335,11 @@ function clearVideoEncoderStatus() {
 function configureScreenShareTransceiver(track, transceiver) {
   if (!transceiver || transceiver.stopped) return;
 
+  // Only screen-share video transceivers are ever configured. Relay and
+  // voice transceivers share this prototype hook, so anything that is not a
+  // live display video track is left completely untouched.
+  if (track?.kind && track.kind !== 'video') return;
+
   if (!_displayVideoTracks.has(track) || track.readyState !== 'live') {
     if (_screenShareTransceivers.has(transceiver)) {
       try { transceiver.setCodecPreferences([]); } catch {}
@@ -465,9 +470,15 @@ function installScreenShareEncodingOverride() {
   const originalTrackStop = trackPrototype?.stop;
 
   function configureTransceivers(peer) {
-    peer.getTransceivers().forEach(transceiver => {
-      configureScreenShareTransceiver(transceiver.sender.track, transceiver);
-    });
+    // Scope the hook to transceivers carrying the live screen track. The
+    // override patches every RTCPeerConnection in the page, including the
+    // relay's, so iterating blindly would reset or re-preference
+    // transceivers that have nothing to do with screen sharing.
+    for (const transceiver of peer.getTransceivers()) {
+      const track = transceiver?.sender?.track;
+      if (!track || track.readyState !== 'live' || !_displayVideoTracks.has(track)) continue;
+      configureScreenShareTransceiver(track, transceiver);
+    }
   }
 
   peerPrototype.addTrack = function (track, ...streams) {
@@ -1764,6 +1775,7 @@ window.havenDesktop = {
     setHideMenuBar:   (v)     => ipcRenderer.invoke('desktop:set-hide-menu-bar', v),
     setDisableGpuVsync:  (v)  => ipcRenderer.invoke('desktop:set-disable-gpu-vsync', v),
     setUnlimitFrameRate: (v)  => ipcRenderer.invoke('desktop:set-unlimit-frame-rate', v),
+    setLinuxVaapiBypass:(v)  => ipcRenderer.invoke('desktop:set-linux-vaapi-bypass', v),
     setLanguage:         (v)  => ipcRenderer.invoke('i18n:set-language', v),
   },
 

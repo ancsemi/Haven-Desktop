@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 
 function createJsonArrayParser(onValue, onError = () => {}) {
   let current = '';
@@ -115,7 +115,9 @@ function metadataValue(value, type) {
 class PipeWireStreamRouter {
   constructor({
     spawnProcess = spawn,
-    runCommand = spawnSync,
+    // Optional synchronous injector (used by tests). When omitted,
+    // pw-metadata runs via an async spawn so the main thread never blocks.
+    runCommand = null,
     processExternal = isExternalProcess,
     logger = console,
   } = {}) {
@@ -129,6 +131,13 @@ class PipeWireStreamRouter {
     this._routes = new Map();
     this._routing = new Set();
     this._warnedMetadata = false;
+    // Async-session guards (see stop()): every start/stop bumps the
+    // generation so late pw-metadata completions from a previous session can
+    // neither publish routes nor clobber the new one, and every stop chains
+    // its restoration after the previous one so an old `pw-metadata -d`
+    // cannot wipe a route the new session just created.
+    this._generation = 0;
+    this._pendingRestore = Promise.resolve();
   }
 
   start(combinedSinkName, rootPid = process.pid) {
@@ -178,16 +187,39 @@ class PipeWireStreamRouter {
   }
 
   stop() {
+    this._generation++;
     const monitor = this._monitor;
     this._monitor = null;
     if (monitor) {
       try { monitor.kill(); } catch {}
     }
 
+    // Snapshot the routes before clearing: restoration runs asynchronously
+    // (pw-metadata via spawn) so the monitor detach above stays synchronous.
+    const routes = [...this._routes];
+    this._objects.clear();
+    this._metadataTargets.clear();
+    this._routes.clear();
+    this._routing.clear();
+    this._warnedMetadata = false;
+
+    // Chain after the previous stop's restoration: without this, an old
+    // session's `pw-metadata -d` (already spawned) could land after the new
+    // session's move and wipe a route that was just created.
+    const previous = this._pendingRestore;
+    const pending = previous.then(() => this._restoreAll(routes)).catch(() => false);
+    this._pendingRestore = pending;
+    // The chain link above already handles rejection; this extra guard keeps
+    // intermediate links from ever surfacing as unhandled rejections.
+    pending.catch(() => {});
+    return pending;
+  }
+
+  async _restoreAll(routes) {
     const failedRoutes = [];
-    for (const [nodeId, route] of this._routes) {
+    for (const [nodeId, route] of routes) {
       if (route.externallyChanged) continue;
-      if (!this._restoreRoute(nodeId, route) && !this._restoreRoute(nodeId, route)) {
+      if (!await this._restoreRoute(nodeId, route) && !await this._restoreRoute(nodeId, route)) {
         failedRoutes.push(nodeId);
       }
     }
@@ -196,25 +228,27 @@ class PipeWireStreamRouter {
         `[ScreenShare] Could not restore PipeWire stream route(s): ${failedRoutes.join(', ')}`
       );
     }
-    this._objects.clear();
-    this._metadataTargets.clear();
-    this._routes.clear();
-    this._routing.clear();
-    this._warnedMetadata = false;
+    return failedRoutes.length === 0;
   }
 
   _handleBatch(batch) {
     if (!Array.isArray(batch)) return;
 
+    const generation = this._generation;
     for (const update of batch) {
       if (!Number.isSafeInteger(update?.id)) continue;
       if (update.info === null) {
-        this._removeObject(update.id);
+        this._removeObject(update.id, generation);
         continue;
       }
       this._updateObject(update);
     }
-    this._routeEligibleStreams();
+    // Route asynchronously: pw-metadata must never run synchronously on the
+    // main thread (once per stream per pw-dump update would freeze the UI),
+    // so this is intentionally fire-and-forget. Per-stream guards in
+    // _routing keep overlapping updates from moving the same node twice, and
+    // the generation check drops work from sessions ended while waiting.
+    void this._routeEligibleStreams(generation).catch(() => false);
   }
 
   _updateObject(update) {
@@ -263,10 +297,15 @@ class PipeWireStreamRouter {
     }
   }
 
-  _removeObject(id) {
+  _removeObject(id, generation = this._generation) {
     const route = this._routes.get(id);
     if (route) {
-      this._runMetadata(['-n', 'default', '-d', String(id), 'target.object']);
+      // Best-effort cleanup of a removed node. Skipped when stale: after a
+      // stop/restart the same node id may belong to the new session, and our
+      // `-d` would wipe the route it just created.
+      if (generation === this._generation) {
+        void this._runMetadata(['-n', 'default', '-d', String(id), 'target.object']).catch(() => false);
+      }
       this._routes.delete(id);
     }
     this._routing.delete(id);
@@ -274,7 +313,12 @@ class PipeWireStreamRouter {
     this._objects.delete(id);
   }
 
-  _routeEligibleStreams() {
+  async _routeEligibleStreams(generation = this._generation) {
+    // Wait for any in-flight stop-restoration first: an old session's
+    // `pw-metadata -d` must land before this session's move, never after.
+    try { await this._pendingRestore; } catch {}
+    if (generation !== this._generation) return;
+
     const combinedSink = [...this._objects.values()].find(object =>
       object.type === 'PipeWire:Interface:Node' &&
       object.props['node.name'] === this._combinedSinkName
@@ -283,6 +327,7 @@ class PipeWireStreamRouter {
     if (!Number.isSafeInteger(combinedSerial) || combinedSerial <= 0) return;
 
     for (const [nodeId, node] of this._objects) {
+      if (generation !== this._generation) return;
       if (node.type !== 'PipeWire:Interface:Node' ||
           node.props['media.class'] !== 'Stream/Output/Audio' ||
           this._routes.has(nodeId) || this._routing.has(nodeId)) continue;
@@ -304,10 +349,18 @@ class PipeWireStreamRouter {
       let previousTarget = this._metadataTargets.get(nodeId) || null;
       if (Number(previousTarget?.value) === combinedSerial) previousTarget = null;
       this._routing.add(nodeId);
-      const moved = this._runMetadata([
-        '-n', 'default', String(nodeId), 'target.object', String(combinedSerial), 'Spa:Id',
-      ]);
-      this._routing.delete(nodeId);
+      let moved = false;
+      try {
+        moved = await this._runMetadata([
+          '-n', 'default', String(nodeId), 'target.object', String(combinedSerial), 'Spa:Id',
+        ]);
+      } finally {
+        this._routing.delete(nodeId);
+      }
+      // The session may have ended while pw-metadata was in flight. Never
+      // publish a route for a dead session: with no monitor left to restore
+      // it, the stream would stay hijacked.
+      if (generation !== this._generation) return;
       if (moved) this._routes.set(nodeId, {
         originalSerial,
         previousTarget,
@@ -342,12 +395,12 @@ class PipeWireStreamRouter {
       processIds.every(pid => this._processExternal(pid, this._rootPid));
   }
 
-  _restoreRoute(nodeId, route) {
+  async _restoreRoute(nodeId, route) {
     if (!route.previousTarget) {
-      const restored = this._runMetadata([
+      const restored = await this._runMetadata([
         '-n', 'default', String(nodeId), 'target.object', String(route.originalSerial), 'Spa:Id',
       ]);
-      const released = this._runMetadata(['-n', 'default', '-d', String(nodeId), 'target.object']);
+      const released = await this._runMetadata(['-n', 'default', '-d', String(nodeId), 'target.object']);
       return restored && released;
     }
 
@@ -357,26 +410,67 @@ class PipeWireStreamRouter {
     ]);
   }
 
-  _runMetadata(args) {
-    try {
-      const result = this._runCommand('pw-metadata', args, {
-        encoding: 'utf8',
-        timeout: 500,
-        windowsHide: true,
-      });
+  // Runs pw-metadata without ever blocking the main thread. Prefers the
+  // injected sync command when tests provide one; otherwise spawns the
+  // binary asynchronously with a short timeout.
+  async _runMetadata(args) {
+    if (typeof this._runCommand === 'function') {
+      let result;
+      try {
+        result = await this._runCommand('pw-metadata', args, {
+          encoding: 'utf8',
+          timeout: 500,
+          windowsHide: true,
+        });
+      } catch (err) {
+        this._warnMetadataOnce(err.message);
+        return false;
+      }
       if (!result?.error && (result?.status === 0 || result?.status === undefined)) return true;
-      if (!this._warnedMetadata) {
-        const detail = result?.error?.message || String(result?.stderr || '').trim() || 'command failed';
-        this._logger.warn(`[ScreenShare] Could not route native PipeWire audio: ${detail}`);
-        this._warnedMetadata = true;
-      }
-    } catch (err) {
-      if (!this._warnedMetadata) {
-        this._logger.warn(`[ScreenShare] Could not route native PipeWire audio: ${err.message}`);
-        this._warnedMetadata = true;
-      }
+      const detail = result?.error?.message || String(result?.stderr || '').trim() || 'command failed';
+      this._warnMetadataOnce(detail);
+      return false;
     }
-    return false;
+
+    return new Promise(resolve => {
+      let child;
+      try {
+        child = this._spawnProcess('pw-metadata', args, { windowsHide: true });
+      } catch (err) {
+        this._warnMetadataOnce(err.message);
+        resolve(false);
+        return;
+      }
+      if (!child?.once) {
+        this._warnMetadataOnce('command failed');
+        resolve(false);
+        return;
+      }
+      let settled = false;
+      const done = ok => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (!ok) this._warnMetadataOnce('command failed');
+        resolve(ok);
+      };
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch {}
+        done(false);
+      }, 500);
+      timer.unref?.();
+      child.once('error', err => {
+        this._warnMetadataOnce(err.message);
+        done(false);
+      });
+      child.once('close', code => done(code === 0));
+    });
+  }
+
+  _warnMetadataOnce(detail) {
+    if (this._warnedMetadata) return;
+    this._logger.warn(`[ScreenShare] Could not route native PipeWire audio: ${detail}`);
+    this._warnedMetadata = true;
   }
 }
 

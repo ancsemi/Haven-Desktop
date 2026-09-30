@@ -14,6 +14,10 @@ function createMonitor() {
   return monitor;
 }
 
+function flushAsyncWork() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
 function graph({ previousTarget = null } = {}) {
   const objects = [
     {
@@ -156,7 +160,7 @@ test('classifies only fully inspectable unrelated processes as external', () => 
   assert.equal(isExternalProcess(400, 100, readFileSync, readlinkSync), false);
 });
 
-test('routes native Flatpak audio but leaves pipewire-pulse streams alone', () => {
+test('routes native Flatpak audio but leaves pipewire-pulse streams alone', async () => {
   const monitor = createMonitor();
   const commands = [];
   const router = new PipeWireStreamRouter({
@@ -171,12 +175,13 @@ test('routes native Flatpak audio but leaves pipewire-pulse streams alone', () =
 
   assert.equal(router.start('HavenCombined_100', 100), true);
   monitor.stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
   assert.deepEqual(commands, [[
     'pw-metadata',
     ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
   ]]);
 
-  router.stop();
+  await router.stop();
   assert.equal(monitor.killed, true);
   assert.deepEqual(commands[1], [
     'pw-metadata',
@@ -188,7 +193,7 @@ test('routes native Flatpak audio but leaves pipewire-pulse streams alone', () =
   ]);
 });
 
-test('restores a native stream previous PipeWire target', () => {
+test('restores a native stream previous PipeWire target', async () => {
   const monitor = createMonitor();
   const commands = [];
   const router = new PipeWireStreamRouter({
@@ -203,7 +208,8 @@ test('restores a native stream previous PipeWire target', () => {
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(graph({ previousTarget: 2000 })));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
 
   assert.deepEqual(commands, [
     ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
@@ -211,7 +217,7 @@ test('restores a native stream previous PipeWire target', () => {
   ]);
 });
 
-test('does not overwrite an output target changed while sharing', () => {
+test('does not overwrite an output target changed while sharing', async () => {
   const monitor = createMonitor();
   const commands = [];
   const router = new PipeWireStreamRouter({
@@ -226,6 +232,7 @@ test('does not overwrite an output target changed while sharing', () => {
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(graph({ previousTarget: 2000 })));
+  await flushAsyncWork();
   monitor.stdout.emit('data', JSON.stringify([{
     id: 60,
     type: 'PipeWire:Interface:Metadata',
@@ -237,14 +244,15 @@ test('does not overwrite an output target changed while sharing', () => {
       value: 3000,
     }],
   }]));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
 
   assert.deepEqual(commands, [
     ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
   ]);
 });
 
-test('still restores after observing its own combined target update', () => {
+test('still restores after observing its own combined target update', async () => {
   const monitor = createMonitor();
   const commands = [];
   const router = new PipeWireStreamRouter({
@@ -259,6 +267,7 @@ test('still restores after observing its own combined target update', () => {
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(graph({ previousTarget: 2000 })));
+  await flushAsyncWork();
   monitor.stdout.emit('data', JSON.stringify([{
     id: 60,
     type: 'PipeWire:Interface:Metadata',
@@ -270,14 +279,15 @@ test('still restores after observing its own combined target update', () => {
       value: 1000,
     }],
   }]));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
 
   assert.deepEqual(commands.at(-1), [
     '-n', 'default', '40', 'target.object', '2000', 'Spa:Id',
   ]);
 });
 
-test('does not route native streams that are not proven external', () => {
+test('does not route native streams that are not proven external', async () => {
   const monitor = createMonitor();
   const commands = [];
   const objects = graph();
@@ -295,11 +305,12 @@ test('does not route native streams that are not proven external', () => {
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(objects));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
   assert.deepEqual(commands, []);
 });
 
-test('uses the host security PID to identify an owned Flatpak stream', () => {
+test('uses the host security PID to identify an owned Flatpak stream', async () => {
   const monitor = createMonitor();
   const commands = [];
   const objects = graph();
@@ -317,11 +328,12 @@ test('uses the host security PID to identify an owned Flatpak stream', () => {
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(objects));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
   assert.deepEqual(commands, []);
 });
 
-test('ignores a Flatpak namespace PID collision when the host PID is external', () => {
+test('ignores a Flatpak namespace PID collision when the host PID is external', async () => {
   const monitor = createMonitor();
   const commands = [];
   const objects = graph();
@@ -339,13 +351,14 @@ test('ignores a Flatpak namespace PID collision when the host PID is external', 
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(objects));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
 
   assert.equal(commands[0][2], '40');
   assert.equal(commands[0][4], '1000');
 });
 
-test('waits for a Flatpak host PID instead of routing by application name', () => {
+test('waits for a Flatpak host PID instead of routing by application name', async () => {
   const monitor = createMonitor();
   const commands = [];
   const objects = graph();
@@ -362,12 +375,13 @@ test('waits for a Flatpak host PID instead of routing by application name', () =
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(objects));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
 
   assert.deepEqual(commands, []);
 });
 
-test('retries and reports a failed route restoration', () => {
+test('retries and reports a failed route restoration', async () => {
   const monitor = createMonitor();
   const warnings = [];
   let calls = 0;
@@ -380,8 +394,131 @@ test('retries and reports a failed route restoration', () => {
 
   router.start('HavenCombined_100', 100);
   monitor.stdout.emit('data', JSON.stringify(graph()));
-  router.stop();
+  await flushAsyncWork();
+  await router.stop();
 
   assert.equal(calls, 5);
   assert.equal(warnings.some(message => message.endsWith(': 40')), true);
+});
+
+test('spawns pw-metadata asynchronously instead of blocking the main thread', async () => {
+  const monitor = createMonitor();
+  const spawned = [];
+  const metadataChild = new EventEmitter();
+  metadataChild.kill = () => {};
+  const router = new PipeWireStreamRouter({
+    spawnProcess: (command, args) => {
+      if (command === 'pw-metadata') {
+        spawned.push(args);
+        setImmediate(() => metadataChild.emit('close', 0));
+        return metadataChild;
+      }
+      return monitor;
+    },
+    processExternal: () => true,
+    logger: { warn() {} },
+  });
+
+  assert.equal(router.start('HavenCombined_100', 100), true);
+  monitor.stdout.emit('data', JSON.stringify(graph()));
+  // The route must be requested without any synchronous child_process call.
+  await flushAsyncWork();
+  assert.deepEqual(spawned, [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+  ]);
+  await router.stop();
+});
+
+test('does not publish a route when the session ends while pw-metadata is in flight', async () => {
+  const monitor = createMonitor();
+  let resolveMove;
+  const moveGate = new Promise(resolve => { resolveMove = resolve; });
+  const commands = [];
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitor,
+    runCommand: (_command, args) => {
+      commands.push(args);
+      if (args[2] === '40') return moveGate.then(() => ({ status: 0 }));
+      return { status: 0 };
+    },
+    processExternal: () => true,
+    logger: { warn() {} },
+  });
+
+  router.start('HavenCombined_100', 100);
+  monitor.stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+
+  // End the session while the move is still in flight: nothing was published
+  // yet, so there is nothing to restore.
+  assert.equal(await router.stop(), true);
+  resolveMove();
+  await flushAsyncWork();
+
+  assert.equal(router._routes.size, 0);
+  assert.equal(commands.length, 1);
+});
+
+test('serializes an old session restore before a new session move', async () => {
+  const monitors = [createMonitor(), createMonitor()];
+  let monitorIndex = 0;
+  const issued = [];
+  const gates = [];
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitors[monitorIndex],
+    runCommand: (_command, args) => {
+      issued.push(args);
+      let resolveGate;
+      const gate = new Promise(resolve => { resolveGate = resolve; });
+      gates.push({ args, resolveGate });
+      return gate.then(() => ({ status: 0 }));
+    },
+    processExternal: () => true,
+    logger: { warn() {} },
+  });
+
+  // Session A routes node 40.
+  router.start('HavenCombined_100', 100);
+  monitors[0].stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  assert.equal(issued.length, 1);
+  gates[0].resolveGate();
+  await flushAsyncWork();
+  assert.equal(router._routes.size, 1);
+
+  // Stop A: the restore is issued but held in flight.
+  const stopA = router.stop();
+  await flushAsyncWork();
+  assert.equal(issued.length, 2);
+
+  // Session B starts and sees the same stream while A's restore is pending.
+  // Its move must wait until the old restore has fully completed.
+  monitorIndex = 1;
+  router.start('HavenCombined_100', 100);
+  monitors[1].stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  await flushAsyncWork();
+  assert.equal(issued.length, 2);
+
+  gates[1].resolveGate();
+  await flushAsyncWork();
+  assert.equal(issued.length, 3);
+  gates[2].resolveGate();
+  await flushAsyncWork();
+  await flushAsyncWork();
+  assert.equal(issued.length, 4);
+  assert.deepEqual(issued[3], ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id']);
+  gates[3].resolveGate();
+  await flushAsyncWork();
+  assert.equal(router._routes.size, 1);
+  assert.equal(await stopA, true);
+
+  const stopB = router.stop();
+  await flushAsyncWork();
+  gates[4].resolveGate();
+  await flushAsyncWork();
+  gates[5].resolveGate();
+  await flushAsyncWork();
+  assert.equal(await stopB, true);
 });

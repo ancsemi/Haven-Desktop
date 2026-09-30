@@ -46,27 +46,6 @@ try { ({ autoUpdater } = require('electron-updater')); } catch {}
 let _manualUpdateCheck = false; // set by Help > Check for Updates (Haven #5627)
 
 // ── Constants ─────────────────────────────────────────────
-// ── Enable native Wayland and video encoding (must be before app.whenReady) ──
-const enabledFeatures = [
-  'PlatformHEVCEncoderSupport',
-  'WebRtcAllowH265Send',
-  'WebRtcAV1HWEncode',
-];
-if (process.platform === 'linux') {
-  enabledFeatures.push(
-    'UseOzonePlatform',
-    'WaylandWindowDecorations',
-    'AcceleratedVideoEncoder',
-    'VaapiOnNvidiaGPUs',
-    // Without this, Chromium's VA-API driver checks reject most real-world
-    // Linux drivers (Intel/AMD/NVIDIA all hit the blocklist in practice), so
-    // WebRTC screen shares silently fall back to software encoding: no GPU
-    // confirmation, black tiles until rejoin, and CPU-bound frame drops.
-    'VaapiIgnoreDriverChecks'
-  );
-  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
-}
-app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
 
 const IS_DEV    = process.argv.includes('--dev');
 const SHOW_SERVER  = process.argv.includes('--show-server');
@@ -97,6 +76,7 @@ const store = new Store({
     hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
     disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
     unlimitFrameRate:  false, // disable Chromium's frame-rate cap (pairs with disableGpuVsync)
+    linuxVaapiBypass:  false, // skip Chromium's VA-API driver blocklist on Linux (off by default)
     videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
     serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
     language: SYSTEM_LANGUAGE,
@@ -112,6 +92,30 @@ if (storedLanguage && storedLanguage !== SYSTEM_LANGUAGE && storedLanguage !== '
 if (storedLanguage && storedLanguage !== SYSTEM_LANGUAGE && storedLanguage !== 'system') {
   app.commandLine.appendSwitch('lang', resolveLocale(storedLanguage));
 }
+
+// ── Enable native Wayland and video encoding (must be before app.whenReady) ──
+const enabledFeatures = [
+  'PlatformHEVCEncoderSupport',
+  'WebRtcAllowH265Send',
+  'WebRtcAV1HWEncode',
+];
+if (process.platform === 'linux') {
+  enabledFeatures.push('UseOzonePlatform', 'WaylandWindowDecorations');
+  // The VA-API bypass flags below skip Chromium's driver blocklist for both
+  // encode AND decode, so they stay off by default and are opt-in via the
+  // Desktop setting (linuxVaapiBypass). Enabling them can unlock hardware
+  // encoding on drivers Chromium would otherwise reject, at the cost of
+  // bypassing upstream stability checks.
+  if (store.get('linuxVaapiBypass') === true) {
+    enabledFeatures.push(
+      'AcceleratedVideoEncoder',
+      'VaapiOnNvidiaGPUs',
+      'VaapiIgnoreDriverChecks'
+    );
+  }
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+}
+app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
 
 let currentLocale = 'en';
 
@@ -2472,28 +2476,6 @@ function rebuildTrayMenu() {
 // sources and audio apps, then native per-app audio starts for the selection.
 // ───────────────────────────────────────────────────────────
 
-function getScreenAudioPickerData() {
-  let audioApps = [];
-  try {
-    audioApps = audioCapture.getAudioApplications().filter(candidate =>
-      Number.isSafeInteger(candidate?.pid) && candidate.pid > 0 && candidate.pid !== process.pid &&
-      typeof candidate.identity === 'string' && candidate.identity.length > 0
-    );
-  } catch (err) {
-    console.warn('[ScreenShare] audio app enumeration failed:', err.message);
-  }
-  const supported = audioCapture.isSupported() && !audioCaptureController.hasActive();
-  const system = supported && (process.platform === 'win32' || process.platform === 'linux');
-  return {
-    audioApps,
-    audioCapabilities: {
-      application: supported,
-      systemNative: system,
-      system,
-    },
-  };
-}
-
 function getScreenPickerCopy() {
   const keys = [
     'title', 'subtitle', 'portalSubtitle', 'systemPortal', 'screens', 'windows',
@@ -3352,7 +3334,7 @@ function registerIPC() {
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
     'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
     'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
-    'disableGpuVsync', 'unlimitFrameRate', 'videoEncoderPreference'
+    'disableGpuVsync', 'unlimitFrameRate', 'linuxVaapiBypass', 'videoEncoderPreference'
   ]);
   // Only Haven Desktop's own screens (welcome, splash, the error page) use
   // the generic store; they load from local files. A server page must never
@@ -3477,6 +3459,7 @@ function registerIPC() {
     hideMenuBar:      !!store.get('hideMenuBar'),
     disableGpuVsync:  !!store.get('disableGpuVsync'),
     unlimitFrameRate: !!store.get('unlimitFrameRate'),
+    linuxVaapiBypass: !!store.get('linuxVaapiBypass'),
     language:         getI18nState(),
     videoEncoderPreference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
   }));
@@ -3541,6 +3524,15 @@ function registerIPC() {
 
   ipcMain.handle('desktop:set-unlimit-frame-rate', (_e, enabled) => {
     store.set('unlimitFrameRate', !!enabled);
+    return { requiresRestart: true };
+  });
+
+  // Linux VA-API driver-blocklist bypass (AcceleratedVideoEncoder,
+  // VaapiOnNvidiaGPUs, VaapiIgnoreDriverChecks). Off by default; Chromium
+  // command-line switches applied at app boot, so flipping it requires a
+  // restart to take effect.
+  ipcMain.handle('desktop:set-linux-vaapi-bypass', (_e, enabled) => {
+    store.set('linuxVaapiBypass', !!enabled);
     return { requiresRestart: true };
   });
 

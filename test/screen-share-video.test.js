@@ -25,7 +25,7 @@ test('normalizes invalid encoder preferences to hardware', () => {
   assert.equal(normalizeVideoEncoderPreference('invalid'), 'hardware');
 });
 
-test('hardware preference requests compatible H.264 and keeps transport codecs', () => {
+test('hardware preference requests compatible H.264 first and keeps every fallback codec', () => {
   let preferences;
   const transceiver = {
     setCodecPreferences(codecs) { preferences = codecs; },
@@ -41,7 +41,7 @@ test('hardware preference requests compatible H.264 and keeps transport codecs',
   assert.equal(result.applied, true);
   assert.equal(result.codec, 'h264');
   assert.deepEqual(preferences, [
-    hardwareH264, h264Packet0, rtx, red, ulpfec, flexfec,
+    hardwareH264, h264Packet0, vp8, rtx, red, ulpfec, flexfec,
   ]);
 });
 
@@ -84,7 +84,7 @@ test('hardware preference stays automatic when hardware is unavailable', () => {
   assert.equal(called, false);
 });
 
-test('explicit VP9 preference excludes other primary codecs', () => {
+test('explicit VP9 preference is ordered first but keeps other codecs as fallback', () => {
   const vp9Profile2 = { mimeType: 'video/VP9', sdpFmtpLine: 'profile-id=2' };
   const vp9Profile0 = { mimeType: 'video/VP9', sdpFmtpLine: 'profile-id=0' };
   let preferences;
@@ -100,7 +100,26 @@ test('explicit VP9 preference excludes other primary codecs', () => {
   );
 
   assert.equal(result.applied, true);
-  assert.deepEqual(preferences, [vp9Profile0, vp9Profile2, rtx]);
+  assert.deepEqual(preferences, [vp9Profile0, vp9Profile2, vp8, rtx]);
+});
+
+test('H.265 preference keeps H.264 available for viewers that cannot decode it', () => {
+  const h265 = { mimeType: 'video/H265' };
+  const h264 = { mimeType: 'video/H264', sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' };
+  let preferences;
+  const transceiver = {
+    setCodecPreferences(codecs) { preferences = codecs; },
+  };
+
+  const result = applyVideoEncoderPreference(
+    transceiver,
+    [h264, vp8, h265, rtx],
+    'h265',
+    false
+  );
+
+  assert.equal(result.applied, true);
+  assert.deepEqual(preferences, [h265, h264, vp8, rtx]);
 });
 
 test('automatic preference restores Chromium defaults', () => {

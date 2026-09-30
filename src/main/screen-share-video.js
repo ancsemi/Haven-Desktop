@@ -98,8 +98,15 @@ function applyVideoEncoderPreference(
     AUXILIARY_CODECS.has(codec?.mimeType?.toLowerCase())
   );
 
+  // Prefer the chosen family but keep every other codec Chromium exposed.
+  // Filtering the rest out would leave viewers that cannot decode the chosen
+  // codec (increasingly likely with H.265/AV1) with no video at all; with
+  // the full ordered list, negotiation falls back to a decodable codec.
+  const preferred = new Set([...primaryCodecs, ...auxiliaryCodecs]);
+  const fallbackCodecs = codecs.filter(codec => !preferred.has(codec));
+
   try {
-    transceiver.setCodecPreferences([...primaryCodecs, ...auxiliaryCodecs]);
+    transceiver.setCodecPreferences([...primaryCodecs, ...fallbackCodecs, ...auxiliaryCodecs]);
     return {
       applied: true,
       preference,

@@ -2,7 +2,7 @@
 // Haven Desktop — Audio Capture Manager
 //
 // Provides per-application audio capture via native addons:
-//   • Windows  →  WASAPI Process Loopback (build 20348+)
+//   • Windows  →  WASAPI Process Loopback (build 19041+)
 //   • Linux    →  PulseAudio sink-input isolation
 //
 // The native addon (native/build/Release/haven_audio.node) is

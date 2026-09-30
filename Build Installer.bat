@@ -19,7 +19,7 @@ if not exist "node_modules" (
 echo Building one-click Windows installer...
 echo (This will create an .exe in the dist/ folder)
 echo.
-call npm run build:win
+node "./node_modules/electron-builder/out/cli/cli.js" --win
 if %ERRORLEVEL% neq 0 (
     color 0C
     echo.
