@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.4.40
+
+### Changed
+- **Haven's new home.** The app's website link and contact address now point
+  to haven-app.com.
+
+---
+
 ## v1.4.39
 
 ### Fixed
