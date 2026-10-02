@@ -16,29 +16,35 @@
     </header>
 
     <div class="content">
-      <section id="screens-section">
-        <h2 id="screens-title"></h2>
-        <div id="screens" class="source-grid"></div>
-      </section>
+      <!-- What to share scrolls on its own; the options below always stay in
+           view, so the audio choice is never hidden below the fold. -->
+      <div class="sources">
+        <section id="screens-section">
+          <h2 id="screens-title"></h2>
+          <div id="screens" class="source-grid"></div>
+        </section>
 
-      <section id="windows-section">
-        <h2 id="windows-title"></h2>
-        <div id="windows" class="source-grid"></div>
-      </section>
+        <section id="windows-section">
+          <h2 id="windows-title"></h2>
+          <div id="windows" class="source-grid"></div>
+        </section>
+      </div>
 
-      <section class="options-section">
-        <h2 id="video-title"></h2>
-        <select id="video-encoder"></select>
-        <p id="video-note" class="note"></p>
-      </section>
+      <div class="options">
+        <section id="audio-section" class="options-section">
+          <h2 id="audio-title"></h2>
+          <div id="audio-modes" class="audio-options"></div>
+          <h3 id="application-audio-title"></h3>
+          <div id="audio-apps" class="audio-options audio-apps"></div>
+          <p id="audio-note" class="note"></p>
+        </section>
 
-      <section id="audio-section" class="options-section">
-        <h2 id="audio-title"></h2>
-        <div id="audio-modes" class="audio-options"></div>
-        <h3 id="application-audio-title"></h3>
-        <div id="audio-apps" class="audio-options"></div>
-        <p id="audio-note" class="note"></p>
-      </section>
+        <section class="options-section">
+          <h2 id="video-title"></h2>
+          <select id="video-encoder"></select>
+          <p id="video-note" class="note"></p>
+        </section>
+      </div>
     </div>
 
     <footer>

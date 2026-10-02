@@ -43,8 +43,25 @@ header { padding: 24px 28px 18px; border-bottom: 1px solid #292d42; }
 h1 { margin: 0; font-size: 24px; line-height: 1.2; }
 .subtitle { margin: 7px 0 0; color: #a7adbf; font-size: 13px; line-height: 1.5; }
 
-.content { flex: 1; min-height: 0; overflow: auto; padding: 22px 28px; }
-section + section { margin-top: 22px; }
+/* Two areas: the sources scroll, the options below them never move. */
+.content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sources { flex: 1; min-height: 120px; overflow: auto; padding: 22px 28px; }
+.sources section + section { margin-top: 22px; }
+.options {
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 28px;
+  max-height: 45vh;
+  overflow: auto;
+  padding: 18px 28px;
+  border-top: 1px solid #292d42;
+  background: rgba(13, 15, 26, 0.7);
+}
+.options select { width: 100%; min-width: 0; }
+/* A long list of apps scrolls inside its own box instead of pushing the
+   rest of the options away. */
+.audio-apps { max-height: 112px; overflow: auto; }
 h2, h3 { margin: 0 0 10px; color: #c2c7d6; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
 h3 { margin-top: 16px; color: #8f96aa; }
 
@@ -84,7 +101,6 @@ h3 { margin-top: 16px; color: #8f96aa; }
 }
 
 .source-name { margin-top: 8px; overflow: hidden; color: #e4e6ed; font-size: 12px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
-.options-section { padding-top: 18px; border-top: 1px solid #292d42; }
 
 select {
   min-width: min(330px, 100%);
@@ -112,7 +128,8 @@ footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 28px
 @media (max-width: 640px) {
   body { padding: 10px; }
   .picker { height: calc(100vh - 20px); border-radius: 12px; }
-  header, .content { padding-left: 18px; padding-right: 18px; }
+  header, .sources, .options { padding-left: 18px; padding-right: 18px; }
+  .options { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   footer { padding: 14px 18px 16px; }
   .source-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .button { flex: 1; min-width: 0; }
