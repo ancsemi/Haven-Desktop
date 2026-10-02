@@ -467,7 +467,7 @@ test('restores a stream moved while the session was stopping', async () => {
   ]);
 });
 
-test('does not wipe a new session route with a stale in-flight repair', async () => {
+test('serializes a new session move after a stale in-flight repair', async () => {
   const monitors = [createMonitor(), createMonitor()];
   let monitorIndex = 0;
   const commands = [];
@@ -494,30 +494,32 @@ test('does not wipe a new session route with a stale in-flight repair', async ()
   assert.equal(commands.length, 1);
 
   // Stop the first session and start a new one while its move is in flight.
+  // The new session must wait for the stale move + repair instead of racing
+  // it, so no second move is issued yet.
   const stopA = router.stop();
   assert.equal(await stopA, true);
   monitorIndex = 1;
   router.start('HavenCombined_100', 100);
   monitors[1].stdout.emit('data', JSON.stringify(graph()));
   await flushAsyncWork();
-  // The new session's move is issued even though the old one is still gated.
-  assert.equal(commands.length, 2);
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
 
-  // Let the stale move land: its repair must skip because the new session
-  // already owns node 40, so the new route survives.
+  // Let the stale move land: repair restores 2000 + delete, then the new
+  // session moves to 1000. The repair never lands after the new move.
   resolveMove();
   await flushAsyncWork();
   await router._pendingRestore;
   await flushAsyncWork();
+  await flushAsyncWork();
 
   assert.equal(router._routes.size, 1);
-  assert.deepEqual(commands.slice(0, 2), [
+  assert.deepEqual(commands, [
     ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '2000', 'Spa:Id'],
+    ['-n', 'default', '-d', '40', 'target.object'],
     ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
   ]);
-  assert.ok(!commands.slice(2).some(args =>
-    args[2] === '40' && args[4] === '2000'
-  ));
   await router.stop();
 });
 

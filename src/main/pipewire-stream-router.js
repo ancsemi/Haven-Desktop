@@ -130,6 +130,10 @@ class PipeWireStreamRouter {
     this._metadataTargets = new Map();
     this._routes = new Map();
     this._routing = new Set();
+    // In-flight pw-metadata moves by node, surviving stop()/start() so a new
+    // session waits for an older session's move + late repair instead of
+    // racing it and getting wiped.
+    this._activeMoves = new Map();
     this._warnedMetadata = false;
     // Async-session guards (see stop()): every start/stop bumps the
     // generation so late pw-metadata completions from a previous session can
@@ -319,11 +323,12 @@ class PipeWireStreamRouter {
     try { await this._pendingRestore; } catch {}
     if (generation !== this._generation) return;
 
-    const combinedSink = [...this._objects.values()].find(object =>
+    const combinedSinkFor = () => [...this._objects.values()].find(object =>
       object.type === 'PipeWire:Interface:Node' &&
       object.props['node.name'] === this._combinedSinkName
     );
-    const combinedSerial = Number(combinedSink?.props['object.serial']);
+    let combinedSink = combinedSinkFor();
+    let combinedSerial = Number(combinedSink?.props['object.serial']);
     if (!Number.isSafeInteger(combinedSerial) || combinedSerial <= 0) return;
 
     for (const [nodeId, node] of this._objects) {
@@ -348,12 +353,40 @@ class PipeWireStreamRouter {
 
       let previousTarget = this._metadataTargets.get(nodeId) || null;
       if (Number(previousTarget?.value) === combinedSerial) previousTarget = null;
+
+      // An older session may still have this node in flight (move or late
+      // repair). Wait for it before moving so our move lands after its
+      // repair, never before. Continuations run in attach order, so awaiting
+      // the older promise guarantees its repair is already chained via
+      // _pendingRestore by the time we proceed to await it below.
+      const pending = this._activeMoves.get(nodeId);
+      if (pending && pending.generation !== generation) {
+        try { await pending.promise; } catch {}
+        try { await this._pendingRestore; } catch {}
+        if (generation !== this._generation) return;
+        if (this._routes.has(nodeId) || this._routing.has(nodeId)) continue;
+        // The graph may have been rebuilt while waiting; re-validate targets.
+        combinedSink = combinedSinkFor();
+        combinedSerial = Number(combinedSink?.props['object.serial']);
+        if (!Number.isSafeInteger(combinedSerial) || combinedSerial <= 0) return;
+        const freshSink = this._findLinkedSink(nodeId);
+        const freshSerial = Number(freshSink?.props['object.serial']);
+        if (!Number.isSafeInteger(freshSerial) || freshSerial <= 0 ||
+            freshSink.props['node.name'] === this._combinedSinkName) continue;
+        if (freshSerial !== originalSerial) continue;
+        previousTarget = this._metadataTargets.get(nodeId) || null;
+        if (Number(previousTarget?.value) === combinedSerial) previousTarget = null;
+      }
+
       this._routing.add(nodeId);
       let moved = false;
+      let movePromise = null;
       try {
-        moved = await this._runMetadata([
+        movePromise = this._runMetadata([
           '-n', 'default', String(nodeId), 'target.object', String(combinedSerial), 'Spa:Id',
         ]);
+        this._activeMoves.set(nodeId, { promise: movePromise, generation });
+        moved = await movePromise;
       } finally {
         this._routing.delete(nodeId);
       }
@@ -363,6 +396,8 @@ class PipeWireStreamRouter {
       // hijacked. The repair is chained via _pendingRestore and skips when a
       // newer session already owns the node, so it can neither wipe a route
       // the new session just created nor publish a route for a dead session.
+      // The _activeMoves entry is kept until the repair finishes so a newer
+      // session waits for both instead of racing the restore.
       if (generation !== this._generation) {
         if (moved && !this._routes.has(nodeId)) {
           const orphanRoute = {
@@ -371,16 +406,30 @@ class PipeWireStreamRouter {
             combinedSerial,
             externallyChanged: false,
           };
-          const previous = this._pendingRestore;
-          const repair = previous.then(async () => {
-            if (this._routes.has(nodeId)) return true;
-            return this._restoreRoute(nodeId, orphanRoute);
-          }).catch(() => false);
-          this._pendingRestore = repair;
-          repair.catch(() => {});
+          const repair = (async () => {
+            try {
+              const previous = this._pendingRestore;
+              const task = previous.then(async () => {
+                if (this._routes.has(nodeId)) return true;
+                return this._restoreRoute(nodeId, orphanRoute);
+              }).catch(() => false);
+              this._pendingRestore = task;
+              task.catch(() => {});
+              return await task;
+            } finally {
+              const current = this._activeMoves.get(nodeId);
+              if (current?.generation === generation) this._activeMoves.delete(nodeId);
+            }
+          })();
+          this._activeMoves.set(nodeId, { promise: repair, generation });
+        } else {
+          const current = this._activeMoves.get(nodeId);
+          if (current?.generation === generation) this._activeMoves.delete(nodeId);
         }
         return;
       }
+      const current = this._activeMoves.get(nodeId);
+      if (current?.generation === generation) this._activeMoves.delete(nodeId);
       if (moved) this._routes.set(nodeId, {
         originalSerial,
         previousTarget,
