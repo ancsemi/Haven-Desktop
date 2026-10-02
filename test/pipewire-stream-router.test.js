@@ -105,6 +105,61 @@ function graph({ previousTarget = null } = {}) {
   return objects;
 }
 
+function replacementGraph({ own = false, serial = 9000, withoutSerial = false } = {}) {
+  const objects = graph({ previousTarget: 3000 });
+  objects[2].info.props = own
+    ? { 'application.name': 'Haven', 'application.process.id': 100 }
+    : { 'application.name': 'Music', 'application.process.id': 600 };
+  objects[3].info.props['node.name'] = own ? 'Haven audio' : 'Music audio';
+  objects[3].info.props['object.serial'] = serial;
+  if (withoutSerial) delete objects[3].info.props['object.serial'];
+  return objects;
+}
+
+function controlledRouting({ hold = () => false, native = false } = {}) {
+  const commands = [];
+  const monitors = [];
+  const gates = new Map();
+  const router = new PipeWireStreamRouter({
+    spawnProcess(command, args) {
+      if (command === 'pw-metadata') {
+        const index = commands.push(args) - 1;
+        const child = new EventEmitter();
+        child.kill = () => {};
+        if (hold(args, index)) gates.set(index, status => child.emit('close', status));
+        else setImmediate(() => child.emit('close', 0));
+        return child;
+      }
+      const monitor = createMonitor();
+      monitors.push(monitor);
+      return monitor;
+    },
+    runCommand: native ? null : (_command, args) => {
+      const index = commands.push(args) - 1;
+      if (!hold(args, index)) return { status: 0 };
+      return new Promise(resolve => gates.set(index, status => resolve({ status })));
+    },
+    processExternal: pid => pid !== 100,
+    logger: { warn() {} },
+  });
+  return {
+    router,
+    commands,
+    start(objects = graph()) {
+      assert.equal(router.start('HavenCombined_100', 100), true);
+      this.send(objects);
+    },
+    send(objects) {
+      monitors.at(-1).stdout.emit('data', JSON.stringify(objects));
+    },
+    complete(index, status = 0) {
+      assert.ok(gates.has(index), `command ${index} must be in flight`);
+      gates.get(index)(status);
+      gates.delete(index);
+    },
+  };
+}
+
 test('parses fragmented consecutive pw-dump arrays', () => {
   const values = [];
   const parse = createJsonArrayParser(value => values.push(value));
@@ -794,4 +849,341 @@ test('serializes an old session restore before a new session move', async () => 
   gates[5].resolveGate();
   await flushAsyncWork();
   assert.equal(await stopB, true);
+});
+
+test('ingests first-snapshot reuse while a different stream blocks the restore queue', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 1 || index === 2 });
+  const { router, commands } = harness;
+  const objects = graph();
+  objects.push({
+    id: 42,
+    type: 'PipeWire:Interface:Node',
+    info: { props: {
+      'client.id': 30,
+      'media.class': 'Stream/Output/Audio',
+      'node.name': 'Second external stream',
+      'object.serial': 4200,
+    } },
+  }, {
+    id: 52,
+    type: 'PipeWire:Interface:Link',
+    info: { 'output-node-id': 42, 'input-node-id': 20 },
+  });
+  // Node 42 is routed first; node 40 then holds a move in flight.
+  const stream40 = objects.splice(objects.findIndex(object => object.id === 40), 1)[0];
+  objects.push(stream40);
+  harness.start(objects);
+  await flushAsyncWork();
+  assert.equal(commands.length, 2);
+  const stopped = router.stop();
+  await flushAsyncWork();
+  assert.equal(commands.length, 3);
+  harness.complete(1);
+  await flushAsyncWork();
+  // A's repair is now queued behind node 42's held restore. B's very first
+  // snapshot announces reuse, and B stops before that queue is released.
+  harness.start(replacementGraph({ own: true }));
+  await flushAsyncWork();
+  const stoppedB = router.stop();
+  harness.complete(2);
+  await stopped;
+  await stoppedB;
+  await router._pendingRestore;
+  await flushAsyncWork();
+  assert.deepEqual(commands, [
+    ['-n', 'default', '42', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '42', 'target.object', '2000', 'Spa:Id'],
+    ['-n', 'default', '-d', '42', 'target.object'],
+  ]);
+  assert.equal(router._activeMoves.size, 0);
+  assert.equal(router._routeOperations.size, 0);
+});
+
+for (const change of ['reuse', 'external target']) {
+  test(`late repair rechecks ${change} before deleting metadata (async spawn)`, async () => {
+    const harness = controlledRouting({
+      native: true,
+      hold: (_args, index) => index === 0 || index === 1,
+    });
+    const { router, commands } = harness;
+    harness.start();
+    await flushAsyncWork();
+    await router.stop();
+    harness.complete(0);
+    await flushAsyncWork();
+    assert.equal(commands.length, 2);
+    if (change === 'reuse') harness.start(replacementGraph({ own: true }));
+    else harness.start(graph({ previousTarget: 3000 }));
+    await flushAsyncWork();
+    const stopB = router.stop();
+    harness.complete(1);
+    await stopB;
+    await router._pendingRestore;
+    await flushAsyncWork();
+    assert.deepEqual(commands, [
+      ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+      ['-n', 'default', '40', 'target.object', '2000', 'Spa:Id'],
+    ]);
+    assert.equal(router._activeMoves.size, 0);
+    assert.equal(router._routeOperations.size, 0);
+  });
+}
+
+for (const withoutSerial of [false, true]) {
+  test(`same-session ID reuse retains the old operation until settled (serial: ${!withoutSerial})`, async () => {
+    const harness = controlledRouting({ hold: (_args, index) => index === 0 });
+    const { router, commands } = harness;
+    const initial = graph();
+    if (withoutSerial) delete initial[3].info.props['object.serial'];
+    harness.start(initial);
+    await flushAsyncWork();
+    const original = router._activeMoves.get(40);
+    harness.send([{ id: 40, info: null }, ...replacementGraph({ withoutSerial })]);
+    await flushAsyncWork();
+    assert.equal(commands.length, 1);
+    assert.equal(router._activeMoves.get(40), original);
+    assert.equal(original.invalidated, true);
+    harness.complete(0);
+    await flushAsyncWork();
+    assert.equal(router._routes.get(40).previousTarget.value, 3000);
+    assert.equal(commands.length, 2);
+    await router.stop();
+    assert.deepEqual(commands, [
+      ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+      ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+      ['-n', 'default', '40', 'target.object', '3000', 'Spa:Id'],
+    ]);
+    assert.equal(router._activeMoves.size, 0);
+    assert.equal(router._routeOperations.size, 0);
+  });
+}
+
+test('late repair preserves a newer explicit target across two stops', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start(graph({ previousTarget: 2000 }));
+  await flushAsyncWork();
+  await router.stop();
+  const newer = graph({ previousTarget: 3000 });
+  newer[1].info.props['object.serial'] = 3000;
+  harness.start(newer);
+  await flushAsyncWork();
+  await router.stop();
+  harness.complete(0);
+  await flushAsyncWork();
+  await router._pendingRestore;
+  assert.equal(commands.length, 1);
+  assert.equal(router._routeOperations.size, 0);
+});
+
+test('a stable external replacement is routed after waiting, without another update', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  await router.stop();
+  harness.start(replacementGraph());
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+  harness.complete(0);
+  await flushAsyncWork();
+  assert.equal(router._routes.get(40).streamSerial, 9000);
+  await router.stop();
+  assert.deepEqual(commands, [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '3000', 'Spa:Id'],
+  ]);
+});
+
+test('a name-only update with the same serial does not cancel a late repair', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  await router.stop();
+  harness.start();
+  // Merge a partial property update: the serial is retained and authoritative.
+  harness.send([{ id: 40, info: { props: { 'node.name': 'Renamed stream' } } }]);
+  await flushAsyncWork();
+  await router.stop();
+  harness.complete(0);
+  await flushAsyncWork();
+  await router._pendingRestore;
+  assert.deepEqual(commands, [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '2000', 'Spa:Id'],
+    ['-n', 'default', '-d', '40', 'target.object'],
+  ]);
+});
+
+test('observing the moved link does not undo a live screen share', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  harness.send([{
+    id: 50,
+    type: 'PipeWire:Interface:Link',
+    info: { 'output-node-id': 40, 'input-node-id': 10 },
+  }]);
+  harness.complete(0);
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+  assert.equal(router._routes.has(40), true);
+  await router.stop();
+  assert.equal(router._routeOperations.size, 0);
+});
+
+test('delayed own restore echoes do not suppress a required retry', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 1 || index === 2 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  const stopped = router.stop();
+  await flushAsyncWork();
+  harness.start();
+  harness.complete(1);
+  await flushAsyncWork();
+  assert.equal(commands.length, 3);
+  // The delete is pending, but pw-dump only now reports our preceding set.
+  harness.send(graph({ previousTarget: 2000 }).filter(object => object.type === 'PipeWire:Interface:Metadata'));
+  const stoppedB = router.stop();
+  harness.complete(2, 1);
+  await stopped;
+  await stoppedB;
+  assert.equal(commands.length, 5);
+  assert.deepEqual(commands.slice(3), [
+    ['-n', 'default', '40', 'target.object', '2000', 'Spa:Id'],
+    ['-n', 'default', '-d', '40', 'target.object'],
+  ]);
+  assert.equal(router._routeOperations.size, 0);
+});
+
+test('a partial initial snapshot is not positive evidence of stream reuse', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  await router.stop();
+  harness.start([{ id: 40, type: 'PipeWire:Interface:Node', info: { props: {} } }]);
+  await router.stop();
+  harness.complete(0);
+  await flushAsyncWork();
+  await router._pendingRestore;
+  assert.equal(commands.length, 3);
+  assert.equal(router._routeOperations.size, 0);
+});
+
+test('a numeric node ID reused by a Link vetoes the old repair', async () => {
+  const harness = controlledRouting({ hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  await router.stop();
+  harness.start([{
+    id: 40,
+    type: 'PipeWire:Interface:Link',
+    info: { 'output-node-id': 400, 'input-node-id': 20 },
+  }]);
+  await router.stop();
+  harness.complete(0);
+  await flushAsyncWork();
+  await router._pendingRestore;
+  assert.equal(commands.length, 1);
+  assert.equal(router._routeOperations.size, 0);
+});
+
+test('a failed async move releases its operation without attempting a repair', async () => {
+  const harness = controlledRouting({ native: true, hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  await router.stop();
+  harness.complete(0, 1);
+  await flushAsyncWork();
+  await router._pendingRestore;
+  assert.equal(commands.length, 1);
+  assert.equal(router._activeMoves.size, 0);
+  assert.equal(router._routeOperations.size, 0);
+});
+
+for (const lastObserved of ['combined', 'external']) {
+  test(`pending move preserves the last external choice when ${lastObserved} is observed last`, async () => {
+    const harness = controlledRouting({ native: true, hold: (_args, index) => index === 0 });
+    const { router, commands } = harness;
+    harness.start(graph({ previousTarget: 2000 }));
+    await flushAsyncWork();
+    const announce = value => harness.send(graph({ previousTarget: value }).filter(object =>
+      object.type === 'PipeWire:Interface:Metadata'
+    ));
+    announce(lastObserved === 'combined' ? 3000 : 1000);
+    announce(lastObserved === 'combined' ? 1000 : 3000);
+    if (lastObserved === 'combined') {
+      harness.send([{
+        id: 50,
+        type: 'PipeWire:Interface:Link',
+        info: { 'output-node-id': 40, 'input-node-id': 10 },
+      }]);
+    }
+    // The move has applied/been observed, but its child has not closed yet.
+    await router.stop();
+    harness.complete(0);
+    await flushAsyncWork();
+    await router._pendingRestore;
+    if (lastObserved === 'combined') {
+      assert.deepEqual(commands, [
+        ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+        ['-n', 'default', '40', 'target.object', '3000', 'Spa:Id'],
+      ]);
+    } else {
+      assert.equal(commands.length, 1);
+    }
+    assert.equal(router._activeMoves.size, 0);
+    assert.equal(router._routeOperations.size, 0);
+  });
+}
+
+test('an initial explicit target announced after the move starts is restored after stop', async () => {
+  const harness = controlledRouting({ native: true, hold: (_args, index) => index === 0 });
+  const { router, commands } = harness;
+  harness.start();
+  await flushAsyncWork();
+  for (const value of [2000, 1000]) {
+    harness.send(graph({ previousTarget: value }).filter(object => object.type === 'PipeWire:Interface:Metadata'));
+  }
+  await router.stop();
+  harness.complete(0);
+  await flushAsyncWork();
+  await router._pendingRestore;
+  assert.deepEqual(commands, [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '2000', 'Spa:Id'],
+  ]);
+});
+
+test('a repair that overwrites a newer target retries that choice, not the old target', async () => {
+  const harness = controlledRouting({ native: true, hold: (_args, index) => index === 0 || index === 1 });
+  const { router, commands } = harness;
+  harness.start(graph({ previousTarget: 2000 }));
+  await flushAsyncWork();
+  await router.stop();
+  harness.complete(0);
+  await flushAsyncWork();
+  assert.equal(commands.length, 2);
+  harness.start(graph({ previousTarget: 2000 }));
+  for (const value of [3000, 2000]) {
+    harness.send(graph({ previousTarget: value }).filter(object => object.type === 'PipeWire:Interface:Metadata'));
+  }
+  const stopB = router.stop();
+  harness.complete(1);
+  await stopB;
+  await router._pendingRestore;
+  assert.deepEqual(commands, [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '2000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '3000', 'Spa:Id'],
+  ]);
+  assert.equal(router._routeOperations.size, 0);
 });
