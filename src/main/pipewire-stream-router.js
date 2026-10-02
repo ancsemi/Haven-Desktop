@@ -254,6 +254,11 @@ class PipeWireStreamRouter {
     return failedRoutes.length === 0;
   }
 
+  _markStaleInvalid(nodeId, observerGeneration) {
+    const active = this._activeMoves.get(nodeId);
+    if (active && active.generation !== observerGeneration) active.invalidated = true;
+  }
+
   _handleBatch(batch) {
     if (!Array.isArray(batch)) return;
 
@@ -264,7 +269,7 @@ class PipeWireStreamRouter {
         this._removeObject(update.id, generation);
         continue;
       }
-      this._updateObject(update);
+      this._updateObject(update, generation);
     }
     // Route asynchronously: pw-metadata must never run synchronously on the
     // main thread (once per stream per pw-dump update would freeze the UI),
@@ -274,11 +279,34 @@ class PipeWireStreamRouter {
     void this._routeEligibleStreams(generation).catch(() => false);
   }
 
-  _updateObject(update) {
+  _updateObject(update, observerGeneration = this._generation) {
     const existing = this._objects.get(update.id);
     const type = update.type || existing?.type;
 
     if (type === 'PipeWire:Interface:Client' || type === 'PipeWire:Interface:Node') {
+      // ID reuse observed as an in-place serial/owner change invalidates a
+      // late repair for an older session's stream with the same numeric ID.
+      if (type === 'PipeWire:Interface:Node' && existing?.type === 'PipeWire:Interface:Node') {
+        const active = this._activeMoves.get(update.id);
+        if (active && active.generation !== observerGeneration) {
+          const nextSerial = Number(update.info?.props?.['object.serial']);
+          const prevSerial = Number(existing.props?.['object.serial']);
+          const nextClient = update.info?.props?.['client.id'];
+          const nextName = update.info?.props?.['node.name'];
+          const serialChanged = Number.isSafeInteger(nextSerial) &&
+            Number.isSafeInteger(active.streamSerial) && nextSerial !== active.streamSerial;
+          const ownerChanged = (nextClient !== undefined &&
+              Number(nextClient) !== active.streamClientId) ||
+            (nextName !== undefined && String(nextName) !== active.streamName);
+          // Only treat it as reuse when the update actually carries identity
+          // keys; benign prop updates must not invalidate.
+          if ((Number.isSafeInteger(nextSerial) || nextClient !== undefined || nextName !== undefined) &&
+              (serialChanged || ownerChanged ||
+                (Number.isSafeInteger(nextSerial) && Number.isSafeInteger(prevSerial) && nextSerial !== prevSerial))) {
+            active.invalidated = true;
+          }
+        }
+      }
       const props = {
         ...(existing?.props || {}),
         ...(update.info?.props || {}),
@@ -334,6 +362,10 @@ class PipeWireStreamRouter {
     this._routing.delete(id);
     this._metadataTargets.delete(id);
     this._objects.delete(id);
+    // A removal observed by a newer session means an older session's in-flight
+    // stream with the same ID is gone (or churned): its late repair must not
+    // touch whatever reuses the ID afterwards.
+    this._markStaleInvalid(id, generation);
   }
 
   async _routeEligibleStreams(generation = this._generation) {
@@ -341,6 +373,24 @@ class PipeWireStreamRouter {
     // `pw-metadata -d` must land before this session's move, never after.
     try { await this._pendingRestore; } catch {}
     if (generation !== this._generation) return;
+
+    // Veto stale repairs from positive evidence in the current graph: if this
+    // session observes an in-flight older ID with a different serial/owner,
+    // the older stream was reused — its late repair must not touch the new
+    // one, even across later stop() clears. Absence alone is not evidence
+    // (the monitor may simply not have announced the node yet).
+    for (const [id, active] of this._activeMoves) {
+      if (active.generation === generation) continue;
+      const live = this._objects.get(id);
+      if (live?.type !== 'PipeWire:Interface:Node') continue;
+      const liveSerial = Number(live.props['object.serial']);
+      if (Number.isSafeInteger(active.streamSerial) && Number.isSafeInteger(liveSerial)) {
+        if (liveSerial !== active.streamSerial) active.invalidated = true;
+      } else if (Number(live.props['client.id']) !== Number(active.streamClientId) ||
+          String(live.props['node.name'] || '') !== String(active.streamName || '')) {
+        active.invalidated = true;
+      }
+    }
 
     const combinedSinkFor = () => [...this._objects.values()].find(object =>
       object.type === 'PipeWire:Interface:Node' &&
@@ -391,11 +441,25 @@ class PipeWireStreamRouter {
         if (this._routes.has(nodeId) || this._routing.has(nodeId)) continue;
         // The graph may have changed while waiting: the ID may have been
         // removed or reused by a different (possibly own) stream. Re-fetch
-        // and re-validate identity plus eligibility from scratch.
+        // and re-validate identity plus eligibility from scratch. A mismatch
+        // against the older session's stream also invalidates its late
+        // repair, which must survive later stop() clears (see repair).
         const freshNode = this._objects.get(nodeId);
         if (!freshNode || freshNode.type !== 'PipeWire:Interface:Node' ||
-            freshNode.props['media.class'] !== 'Stream/Output/Audio') continue;
+            freshNode.props['media.class'] !== 'Stream/Output/Audio') {
+          pending.invalidated = true;
+          continue;
+        }
         const freshStreamSerial = Number(freshNode.props['object.serial']);
+        const oldSerial = Number(pending.streamSerial);
+        const oldMatches = Number.isSafeInteger(oldSerial) && Number.isSafeInteger(freshStreamSerial)
+          ? freshStreamSerial === oldSerial
+          : Number(freshNode.props['client.id']) === Number(pending.streamClientId) &&
+            String(freshNode.props['node.name'] || '') === String(pending.streamName || '');
+        if (!oldMatches) {
+          pending.invalidated = true;
+          continue;
+        }
         if (Number.isSafeInteger(streamSerial) && Number.isSafeInteger(freshStreamSerial)) {
           if (freshStreamSerial !== streamSerial) continue;
         } else if (Number(freshNode.props['client.id']) !== streamClientId ||
@@ -430,7 +494,13 @@ class PipeWireStreamRouter {
         movePromise = this._runMetadata([
           '-n', 'default', String(nodeId), 'target.object', String(combinedSerial), 'Spa:Id',
         ]);
-        this._activeMoves.set(nodeId, { promise: movePromise, generation });
+        this._activeMoves.set(nodeId, {
+          promise: movePromise,
+          generation,
+          streamSerial,
+          streamClientId,
+          streamName,
+        });
         moved = await movePromise;
       } finally {
         this._routing.delete(nodeId);
@@ -457,15 +527,24 @@ class PipeWireStreamRouter {
           // Identity at stop() time, if the move was still in flight then.
           // stop() snapshots before clearing _objects, so a removal/reuse
           // already announced still protects the repair after the clear.
+          // Invalidations observed by later sessions (removal/reuse while
+          // waiting, or removal deltas) are carried over and re-checked
+          // inside the task, so a second stop() clearing the graph cannot
+          // resurrect a blind restore.
           const activeAtCompletion = this._activeMoves.get(nodeId);
-          const atStop = activeAtCompletion?.generation === generation
-            ? activeAtCompletion.atStop
-            : undefined;
+          const sameEntry = activeAtCompletion?.generation === generation ? activeAtCompletion : undefined;
+          const atStop = sameEntry?.atStop;
+          const invalidatedAtCreation = sameEntry?.invalidated === true;
           const repair = (async () => {
             try {
               const previous = this._pendingRestore;
               const task = previous.then(async () => {
                 if (this._routes.has(nodeId)) return true;
+                // New evidence wins over an old snapshot: any session that
+                // observed removal/reuse of this ID vetoes the blind repair,
+                // even if a later stop() cleared the graph afterwards.
+                if (invalidatedAtCreation) return true;
+                if (this._activeMoves.get(nodeId)?.invalidated === true) return true;
                 // If the graph at stop() already showed a different stream
                 // (or no stream) for this ID, the original is gone: never
                 // restore blindly after the clear.
@@ -503,7 +582,14 @@ class PipeWireStreamRouter {
               if (current?.generation === generation) this._activeMoves.delete(nodeId);
             }
           })();
-          this._activeMoves.set(nodeId, { promise: repair, generation });
+          this._activeMoves.set(nodeId, {
+            promise: repair,
+            generation,
+            streamSerial,
+            streamClientId,
+            streamName,
+            invalidated: invalidatedAtCreation === true ? true : undefined,
+          });
         } else {
           const current = this._activeMoves.get(nodeId);
           if (current?.generation === generation) this._activeMoves.delete(nodeId);

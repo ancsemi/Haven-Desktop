@@ -672,6 +672,67 @@ test('skips a late repair when the ID was reused before stop cleared the graph',
   assert.equal(commands.length, 1);
 });
 
+test('keeps a later-session reuse veto across its stop before the old move lands', async () => {
+  const monitors = [createMonitor(), createMonitor()];
+  let monitorIndex = 0;
+  const commands = [];
+  let resolveMove;
+  const moveGate = new Promise(resolve => { resolveMove = resolve; });
+  let moves = 0;
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitors[monitorIndex],
+    runCommand: (_command, args) => {
+      commands.push(args);
+      if (args[2] === '40' && args[4] === '1000' && ++moves === 1) {
+        return moveGate.then(() => ({ status: 0 }));
+      }
+      return { status: 0 };
+    },
+    processExternal: pid => pid === 500,
+    logger: { warn() {} },
+  });
+
+  // Session A routes an external stream; its move stays gated.
+  router.start('HavenCombined_100', 100);
+  monitors[0].stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+  assert.equal(await router.stop(), true);
+
+  // Session B observes ID 40 reused by an own Haven stream with an explicit
+  // target of 3000, then stops as well before A's move lands.
+  monitorIndex = 1;
+  router.start('HavenCombined_100', 100);
+  const reused = graph({ previousTarget: 3000 });
+  reused[2].info.props = {
+    'application.name': 'Haven',
+    'application.process.id': 100,
+  };
+  reused[3].info.props = {
+    'client.id': 90,
+    'media.class': 'Stream/Output/Audio',
+    'node.name': 'Haven audio',
+    'object.serial': 9000,
+  };
+  reused[2].id = 90;
+  reused[3].info.props['client.id'] = 90;
+  monitors[1].stdout.emit('data', JSON.stringify(reused));
+  await flushAsyncWork();
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+  assert.equal(await router.stop(), true);
+
+  // A's gated move lands after both stops: the repair must honor B's reuse
+  // veto instead of trusting A's pre-clear snapshot and wiping target 3000.
+  resolveMove();
+  await flushAsyncWork();
+  await router._pendingRestore;
+  await flushAsyncWork();
+
+  assert.equal(router._routes.size, 0);
+  assert.equal(commands.length, 1);
+});
+
 test('serializes an old session restore before a new session move', async () => {
   const monitors = [createMonitor(), createMonitor()];
   let monitorIndex = 0;
