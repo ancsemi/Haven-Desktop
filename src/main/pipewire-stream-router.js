@@ -357,10 +357,30 @@ class PipeWireStreamRouter {
       } finally {
         this._routing.delete(nodeId);
       }
-      // The session may have ended while pw-metadata was in flight. Never
-      // publish a route for a dead session: with no monitor left to restore
-      // it, the stream would stay hijacked.
-      if (generation !== this._generation) return;
+      // The session may have ended while pw-metadata was in flight. The move
+      // itself may still have landed, so queue a best-effort restore that
+      // returns the stream to its previous target instead of leaving it
+      // hijacked. The repair is chained via _pendingRestore and skips when a
+      // newer session already owns the node, so it can neither wipe a route
+      // the new session just created nor publish a route for a dead session.
+      if (generation !== this._generation) {
+        if (moved && !this._routes.has(nodeId)) {
+          const orphanRoute = {
+            originalSerial,
+            previousTarget,
+            combinedSerial,
+            externallyChanged: false,
+          };
+          const previous = this._pendingRestore;
+          const repair = previous.then(async () => {
+            if (this._routes.has(nodeId)) return true;
+            return this._restoreRoute(nodeId, orphanRoute);
+          }).catch(() => false);
+          this._pendingRestore = repair;
+          repair.catch(() => {});
+        }
+        return;
+      }
       if (moved) this._routes.set(nodeId, {
         originalSerial,
         previousTarget,

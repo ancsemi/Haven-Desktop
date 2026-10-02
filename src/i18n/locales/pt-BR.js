@@ -74,6 +74,7 @@ module.exports = {
   'screenPicker.noApplications': 'Nenhum aplicativo reproduzindo áudio',
   'screenPicker.systemUnavailable': 'Áudio do sistema indisponível',
   'screenPicker.applicationUnavailable': 'Áudio de aplicativos indisponível',
+  'screenPicker.audioUnavailable': 'O áudio do compartilhamento está indisponível — o módulo nativo de áudio não está disponível, então este compartilhamento ficará sem áudio. O vídeo ainda será compartilhado.',
   'screenPicker.videoEncoder': 'Codificador de vídeo',
   'screenPicker.hardwareH264': 'H.264 — preferir hardware (recomendado)',
   'screenPicker.automaticEncoder': 'Automático (padrão do navegador)',

@@ -2480,7 +2480,7 @@ function getScreenPickerCopy() {
   const keys = [
     'title', 'subtitle', 'portalSubtitle', 'systemPortal', 'screens', 'windows',
     'audio', 'noAudio', 'systemAudio', 'applicationAudio', 'noApplications',
-    'systemUnavailable', 'applicationUnavailable', 'videoEncoder', 'hardwareH264',
+    'systemUnavailable', 'applicationUnavailable', 'audioUnavailable', 'videoEncoder', 'hardwareH264',
     'automaticEncoder', 'unavailable', 'hardwareEncodingAvailable',
     'hardwareEncodingUnavailable', 'h265Available',
     'h265Unavailable', 'silent', 'silentDescription', 'noPreview', 'cancel',
@@ -2776,6 +2776,7 @@ function registerScreenShareHandler() {
         application: nativeAudioAvailable,
         systemNative: nativeSystemAudio,
         system: nativeSystemAudio,
+        nativeAvailable: nativeAudioAvailable,
       };
 
       const sourceData = sources.map(s => ({

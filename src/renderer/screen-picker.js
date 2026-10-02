@@ -206,6 +206,13 @@ picker.onData(data => {
     apps.appendChild(empty);
   }
 
+  // Without the Electron loopback fallback, a missing native addon means no
+  // share audio at all (not system audio), so spell that out instead of
+  // leaving two bare "unavailable" labels.
+  const shareAudioUnavailable = audioCapabilities.system !== true &&
+    audioCapabilities.application !== true;
+  setText('audio-note', shareAudioUnavailable ? copy.audioUnavailable : '');
+
   let submitted = false;
   const submit = cancelled => {
     if (submitted) return;

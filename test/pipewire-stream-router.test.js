@@ -429,7 +429,7 @@ test('spawns pw-metadata asynchronously instead of blocking the main thread', as
   await router.stop();
 });
 
-test('does not publish a route when the session ends while pw-metadata is in flight', async () => {
+test('restores a stream moved while the session was stopping', async () => {
   const monitor = createMonitor();
   let resolveMove;
   const moveGate = new Promise(resolve => { resolveMove = resolve; });
@@ -438,7 +438,7 @@ test('does not publish a route when the session ends while pw-metadata is in fli
     spawnProcess: () => monitor,
     runCommand: (_command, args) => {
       commands.push(args);
-      if (args[2] === '40') return moveGate.then(() => ({ status: 0 }));
+      if (args[2] === '40' && args[4] === '1000') return moveGate.then(() => ({ status: 0 }));
       return { status: 0 };
     },
     processExternal: () => true,
@@ -450,14 +450,75 @@ test('does not publish a route when the session ends while pw-metadata is in fli
   await flushAsyncWork();
   assert.equal(commands.length, 1);
 
-  // End the session while the move is still in flight: nothing was published
-  // yet, so there is nothing to restore.
-  assert.equal(await router.stop(), true);
+  // End the session while the move is still in flight. The move itself may
+  // still land, so the router must restore the previous target instead of
+  // dropping the route and leaving the stream hijacked.
+  const stopPromise = router.stop();
+  assert.equal(await stopPromise, true);
   resolveMove();
   await flushAsyncWork();
+  await router._pendingRestore;
 
   assert.equal(router._routes.size, 0);
+  assert.deepEqual(commands, [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '2000', 'Spa:Id'],
+    ['-n', 'default', '-d', '40', 'target.object'],
+  ]);
+});
+
+test('does not wipe a new session route with a stale in-flight repair', async () => {
+  const monitors = [createMonitor(), createMonitor()];
+  let monitorIndex = 0;
+  const commands = [];
+  let resolveMove;
+  const moveGate = new Promise(resolve => { resolveMove = resolve; });
+  let moves = 0;
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitors[monitorIndex],
+    runCommand: (_command, args) => {
+      commands.push(args);
+      // Hold only the first session's move; everything else succeeds at once.
+      if (args[2] === '40' && args[4] === '1000' && ++moves === 1) {
+        return moveGate.then(() => ({ status: 0 }));
+      }
+      return { status: 0 };
+    },
+    processExternal: () => true,
+    logger: { warn() {} },
+  });
+
+  router.start('HavenCombined_100', 100);
+  monitors[0].stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
   assert.equal(commands.length, 1);
+
+  // Stop the first session and start a new one while its move is in flight.
+  const stopA = router.stop();
+  assert.equal(await stopA, true);
+  monitorIndex = 1;
+  router.start('HavenCombined_100', 100);
+  monitors[1].stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  // The new session's move is issued even though the old one is still gated.
+  assert.equal(commands.length, 2);
+
+  // Let the stale move land: its repair must skip because the new session
+  // already owns node 40, so the new route survives.
+  resolveMove();
+  await flushAsyncWork();
+  await router._pendingRestore;
+  await flushAsyncWork();
+
+  assert.equal(router._routes.size, 1);
+  assert.deepEqual(commands.slice(0, 2), [
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+    ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
+  ]);
+  assert.ok(!commands.slice(2).some(args =>
+    args[2] === '40' && args[4] === '2000'
+  ));
+  await router.stop();
 });
 
 test('serializes an old session restore before a new session move', async () => {
