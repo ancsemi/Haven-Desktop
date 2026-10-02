@@ -55,6 +55,7 @@ function graph({ previousTarget = null } = {}) {
         'client.id': 30,
         'media.class': 'Stream/Output/Audio',
         'node.name': 'Stremio audio',
+        'object.serial': 4000,
       } },
     },
     {
@@ -78,6 +79,7 @@ function graph({ previousTarget = null } = {}) {
         'client.id': 31,
         'media.class': 'Stream/Output/Audio',
         'node.name': 'Chrome audio',
+        'object.serial': 4100,
       } },
     },
     {
@@ -520,6 +522,84 @@ test('serializes a new session move after a stale in-flight repair', async () =>
     ['-n', 'default', '-d', '40', 'target.object'],
     ['-n', 'default', '40', 'target.object', '1000', 'Spa:Id'],
   ]);
+  await router.stop();
+});
+
+test('ignores a stream ID reused by an own process while waiting', async () => {
+  const monitors = [createMonitor(), createMonitor()];
+  let monitorIndex = 0;
+  const commands = [];
+  let resolveMove;
+  const moveGate = new Promise(resolve => { resolveMove = resolve; });
+  let moves = 0;
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitors[monitorIndex],
+    runCommand: (_command, args) => {
+      commands.push(args);
+      if (args[2] === '40' && args[4] === '1000' && ++moves === 1) {
+        return moveGate.then(() => ({ status: 0 }));
+      }
+      return { status: 0 };
+    },
+    // Only the Flatpak host PID counts as external; PID 100 is Haven itself.
+    processExternal: pid => pid === 500,
+    logger: { warn() {} },
+  });
+
+  router.start('HavenCombined_100', 100);
+  monitors[0].stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+
+  const stopA = router.stop();
+  assert.equal(await stopA, true);
+  monitorIndex = 1;
+  router.start('HavenCombined_100', 100);
+  monitors[1].stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+
+  // While the old move is still gated, ID 40 is removed and reused by an own
+  // Haven stream with a different object.serial on the same sink.
+  monitors[1].stdout.emit('data', JSON.stringify([
+    { id: 40, info: null },
+    { id: 30, info: null },
+    {
+      id: 90,
+      type: 'PipeWire:Interface:Client',
+      info: { props: {
+        'application.name': 'Haven',
+        'application.process.id': 100,
+      } },
+    },
+    {
+      id: 40,
+      type: 'PipeWire:Interface:Node',
+      info: { props: {
+        'client.id': 90,
+        'media.class': 'Stream/Output/Audio',
+        'node.name': 'Haven audio',
+        'object.serial': 9999,
+      } },
+    },
+    {
+      id: 50,
+      type: 'PipeWire:Interface:Link',
+      info: { 'output-node-id': 40, 'input-node-id': 20 },
+    },
+  ]));
+  await flushAsyncWork();
+
+  // Let the stale move land: neither its repair nor the new session may touch
+  // the reused own stream.
+  resolveMove();
+  await flushAsyncWork();
+  await router._pendingRestore;
+  await flushAsyncWork();
+  await flushAsyncWork();
+
+  assert.equal(router._routes.size, 0);
+  assert.equal(commands.length, 1);
   await router.stop();
 });
 

@@ -354,6 +354,11 @@ class PipeWireStreamRouter {
       let previousTarget = this._metadataTargets.get(nodeId) || null;
       if (Number(previousTarget?.value) === combinedSerial) previousTarget = null;
 
+      // Stream identity for ID-reuse safety (see wait below).
+      const streamSerial = Number(node.props['object.serial']);
+      const streamClientId = Number(node.props['client.id']);
+      const streamName = String(node.props['node.name'] || '');
+
       // An older session may still have this node in flight (move or late
       // repair). Wait for it before moving so our move lands after its
       // repair, never before. Continuations run in attach order, so awaiting
@@ -365,6 +370,27 @@ class PipeWireStreamRouter {
         try { await this._pendingRestore; } catch {}
         if (generation !== this._generation) return;
         if (this._routes.has(nodeId) || this._routing.has(nodeId)) continue;
+        // The graph may have changed while waiting: the ID may have been
+        // removed or reused by a different (possibly own) stream. Re-fetch
+        // and re-validate identity plus eligibility from scratch.
+        const freshNode = this._objects.get(nodeId);
+        if (!freshNode || freshNode.type !== 'PipeWire:Interface:Node' ||
+            freshNode.props['media.class'] !== 'Stream/Output/Audio') continue;
+        const freshStreamSerial = Number(freshNode.props['object.serial']);
+        if (Number.isSafeInteger(streamSerial) && Number.isSafeInteger(freshStreamSerial)) {
+          if (freshStreamSerial !== streamSerial) continue;
+        } else if (Number(freshNode.props['client.id']) !== streamClientId ||
+            String(freshNode.props['node.name'] || '') !== streamName) {
+          continue;
+        }
+        const freshName = String(freshNode.props['node.name'] || '');
+        if (freshName.startsWith(`output.${this._combinedSinkName}_`) ||
+            freshNode.props['node.virtual'] === true) continue;
+        const freshClientId = Number(freshNode.props['client.id']);
+        const freshClient = this._objects.get(freshClientId);
+        const freshProps = { ...(freshClient?.props || {}), ...freshNode.props };
+        if (freshProps['client.api'] === 'pipewire-pulse' ||
+            !this._isExternalStream(freshProps)) continue;
         // The graph may have been rebuilt while waiting; re-validate targets.
         combinedSink = combinedSinkFor();
         combinedSerial = Number(combinedSink?.props['object.serial']);
@@ -404,6 +430,9 @@ class PipeWireStreamRouter {
             originalSerial,
             previousTarget,
             combinedSerial,
+            streamSerial,
+            streamClientId,
+            streamName,
             externallyChanged: false,
           };
           const repair = (async () => {
@@ -411,6 +440,22 @@ class PipeWireStreamRouter {
               const previous = this._pendingRestore;
               const task = previous.then(async () => {
                 if (this._routes.has(nodeId)) return true;
+                // Bind the repair to the original stream: if the numeric ID
+                // was reused by a different (possibly own) stream meanwhile,
+                // leave it alone instead of moving someone else's audio.
+                const live = this._objects.get(nodeId);
+                if (live?.type === 'PipeWire:Interface:Node') {
+                  const liveSerial = Number(live.props['object.serial']);
+                  if (Number.isSafeInteger(streamSerial) && Number.isSafeInteger(liveSerial)) {
+                    if (liveSerial !== streamSerial) return true;
+                  } else if (Number(live.props['client.id']) !== streamClientId ||
+                      String(live.props['node.name'] || '') !== streamName) {
+                    return true;
+                  }
+                  const liveClient = this._objects.get(Number(live.props['client.id']));
+                  const liveProps = { ...(liveClient?.props || {}), ...live.props };
+                  if (!this._isExternalStream(liveProps)) return true;
+                }
                 return this._restoreRoute(nodeId, orphanRoute);
               }).catch(() => false);
               this._pendingRestore = task;
@@ -434,6 +479,9 @@ class PipeWireStreamRouter {
         originalSerial,
         previousTarget,
         combinedSerial,
+        streamSerial,
+        streamClientId,
+        streamName,
         externallyChanged: false,
       });
     }
