@@ -1142,10 +1142,50 @@ function devTaskbarIconPath() {
     const file = path.join(app.getPath('userData'), 'haven-taskbar.ico');
     fs.writeFileSync(file, Buffer.concat([header, entries, ...pngs]));
     devTaskbarIcon = file;
+    fixDevStartMenuShortcuts(file);
   } catch (err) {
     console.warn('[Haven] could not build the taskbar icon:', err.message);
   }
   return devTaskbarIcon;
+}
+
+// Windows takes the taskbar icon and name for an app id from a Start Menu
+// shortcut that carries that id, ahead of anything the window sets. A copy run
+// from source can end up with one named "Electron" that has Electron's icon
+// and starts bare electron.exe. Point any shortcut for this copy at the Haven
+// icon, name and app instead.
+function fixDevStartMenuShortcuts(icon) {
+  const { shell } = require('electron');
+  const programs = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+  const wanted = 'Haven Desktop (source).lnk';
+  let names = [];
+  try {
+    names = fs.readdirSync(programs).filter(name => name.toLowerCase().endsWith('.lnk'));
+  } catch (err) {
+    console.warn('[Haven] could not read the Start Menu folder:', err.message);
+    return;
+  }
+  for (const name of names) {
+    const file = path.join(programs, name);
+    let link;
+    try { link = shell.readShortcutLink(file); }
+    catch { continue; } // some shortcuts (installer "advertised" ones) cannot be read, and none of those are ours
+    if (link.appUserModelId !== 'com.haven.desktop') continue;
+    if (path.resolve(link.target || '').toLowerCase() !== process.execPath.toLowerCase()) continue;
+    if (link.icon === icon && name === wanted) continue;
+    try {
+      shell.writeShortcutLink(file, 'update', {
+        args: `"${app.getAppPath()}"${IS_DEV ? ' --dev' : ''}`,
+        cwd: app.getAppPath(),
+        description: 'Haven Desktop (run from source)',
+        icon,
+        iconIndex: 0,
+      });
+      if (name !== wanted) fs.renameSync(file, path.join(programs, wanted));
+    } catch (err) {
+      console.warn('[Haven] could not update the Start Menu shortcut:', err.message);
+    }
+  }
 }
 
 function applyDevTaskbarIcon(win) {
