@@ -280,6 +280,11 @@ app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
 // ── State ─────────────────────────────────────────────────
 let mainWindow      = null;
 let welcomeWindow   = null;
+// Whether Haven last asked for the welcome window to be shown. Linux window
+// managers show a window a moment after show() returns, so isVisible() can
+// still say false right after it; the app window's close handler reads this
+// instead (#5715).
+let welcomeWanted   = false;
 let tray            = null;
 let trayRefreshTimer = null;
 let serverManager   = null;
@@ -1102,10 +1107,12 @@ app.on('before-quit', () => {
 // ═══════════════════════════════════════════════════════════
 
 function hideWelcome() {
+  welcomeWanted = false;
   if (welcomeWindow && !welcomeWindow.isDestroyed()) welcomeWindow.hide();
 }
 
 function createWelcomeWindow() {
+  welcomeWanted = true;
   if (welcomeWindow && !welcomeWindow.isDestroyed()) {
     welcomeWindow.show();
     welcomeWindow.focus();
@@ -1132,7 +1139,7 @@ function createWelcomeWindow() {
     welcomeWindow.show();
     if (IS_DEV) welcomeWindow.webContents.openDevTools({ mode: 'detach' });
   });
-  welcomeWindow.on('closed', () => { welcomeWindow = null; });
+  welcomeWindow.on('closed', () => { welcomeWindow = null; welcomeWanted = false; });
 }
 
 function createAppWindow(serverUrl) {
@@ -1235,7 +1242,7 @@ function createAppWindow(serverUrl) {
       // error page can bring it back. Once the app window is gone with
       // nothing else showing, closing the window has to close the app, or
       // it would live on unseen behind the hidden welcome window.
-      if (!app.isQuitting && welcomeWindow && !welcomeWindow.isDestroyed() && !welcomeWindow.isVisible()) {
+      if (!app.isQuitting && welcomeWindow && !welcomeWindow.isDestroyed() && !welcomeWanted) {
         setTimeout(() => { if (!app.isQuitting) app.quit(); }, 0);
       }
       serverViews.clear();
