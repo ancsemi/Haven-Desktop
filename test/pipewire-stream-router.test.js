@@ -603,6 +603,75 @@ test('ignores a stream ID reused by an own process while waiting', async () => {
   await router.stop();
 });
 
+test('skips a late repair when the ID was reused before stop cleared the graph', async () => {
+  const monitor = createMonitor();
+  const commands = [];
+  let resolveMove;
+  const moveGate = new Promise(resolve => { resolveMove = resolve; });
+  let moves = 0;
+  const router = new PipeWireStreamRouter({
+    spawnProcess: () => monitor,
+    runCommand: (_command, args) => {
+      commands.push(args);
+      if (args[2] === '40' && args[4] === '1000' && ++moves === 1) {
+        return moveGate.then(() => ({ status: 0 }));
+      }
+      return { status: 0 };
+    },
+    processExternal: pid => pid === 500,
+    logger: { warn() {} },
+  });
+
+  router.start('HavenCombined_100', 100);
+  monitor.stdout.emit('data', JSON.stringify(graph()));
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+
+  // The monitor reports removal + reuse by an own stream while the move is
+  // still gated, then the share stops (clearing the graph, no restart).
+  monitor.stdout.emit('data', JSON.stringify([
+    { id: 40, info: null },
+    { id: 30, info: null },
+    {
+      id: 90,
+      type: 'PipeWire:Interface:Client',
+      info: { props: {
+        'application.name': 'Haven',
+        'application.process.id': 100,
+      } },
+    },
+    {
+      id: 40,
+      type: 'PipeWire:Interface:Node',
+      info: { props: {
+        'client.id': 90,
+        'media.class': 'Stream/Output/Audio',
+        'node.name': 'Haven audio',
+        'object.serial': 9000,
+      } },
+    },
+    {
+      id: 50,
+      type: 'PipeWire:Interface:Link',
+      info: { 'output-node-id': 40, 'input-node-id': 20 },
+    },
+  ]));
+  await flushAsyncWork();
+  assert.equal(commands.length, 1);
+
+  assert.equal(await router.stop(), true);
+
+  // The gated move lands after the clear: with no identity confirmation the
+  // repair must not touch ID 40 blindly.
+  resolveMove();
+  await flushAsyncWork();
+  await router._pendingRestore;
+  await flushAsyncWork();
+
+  assert.equal(router._routes.size, 0);
+  assert.equal(commands.length, 1);
+});
+
 test('serializes an old session restore before a new session move', async () => {
   const monitors = [createMonitor(), createMonitor()];
   let monitorIndex = 0;

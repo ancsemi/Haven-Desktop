@@ -200,7 +200,26 @@ class PipeWireStreamRouter {
 
     // Snapshot the routes before clearing: restoration runs asynchronously
     // (pw-metadata via spawn) so the monitor detach above stays synchronous.
+    // Also snapshot the live node identity for in-flight moves: the late
+    // repair must be able to tell a removed/reused ID apart from the original
+    // stream even after the graph below is cleared.
     const routes = [...this._routes];
+    for (const [nodeId, active] of this._activeMoves) {
+      // Keep the first snapshot: start() calls stop() internally, so a
+      // restart would otherwise overwrite the pre-clear identity with absent.
+      if (active.atStop !== undefined) continue;
+      const live = this._objects.get(nodeId);
+      if (live?.type === 'PipeWire:Interface:Node') {
+        active.atStop = {
+          present: true,
+          serial: Number(live.props['object.serial']),
+          clientId: Number(live.props['client.id']),
+          name: String(live.props['node.name'] || ''),
+        };
+      } else {
+        active.atStop = { present: false };
+      }
+    }
     this._objects.clear();
     this._metadataTargets.clear();
     this._routes.clear();
@@ -435,11 +454,29 @@ class PipeWireStreamRouter {
             streamName,
             externallyChanged: false,
           };
+          // Identity at stop() time, if the move was still in flight then.
+          // stop() snapshots before clearing _objects, so a removal/reuse
+          // already announced still protects the repair after the clear.
+          const activeAtCompletion = this._activeMoves.get(nodeId);
+          const atStop = activeAtCompletion?.generation === generation
+            ? activeAtCompletion.atStop
+            : undefined;
           const repair = (async () => {
             try {
               const previous = this._pendingRestore;
               const task = previous.then(async () => {
                 if (this._routes.has(nodeId)) return true;
+                // If the graph at stop() already showed a different stream
+                // (or no stream) for this ID, the original is gone: never
+                // restore blindly after the clear.
+                if (atStop) {
+                  if (!atStop.present) return true;
+                  if (Number.isSafeInteger(streamSerial) && Number.isSafeInteger(atStop.serial)) {
+                    if (atStop.serial !== streamSerial) return true;
+                  } else if (atStop.clientId !== streamClientId || atStop.name !== streamName) {
+                    return true;
+                  }
+                }
                 // Bind the repair to the original stream: if the numeric ID
                 // was reused by a different (possibly own) stream meanwhile,
                 // leave it alone instead of moving someone else's audio.
