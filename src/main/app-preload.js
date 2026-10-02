@@ -140,6 +140,12 @@ function setI18nTitle(element, key, values) {
 function localizeMessageValues(values = {}) {
   const localized = { ...values };
   if (localized.modeKey) localized.mode = t(localized.modeKey);
+  if (localized.reasonKey) {
+    localized.reason = t(
+      localized.reasonKey,
+      localizeMessageValues(localized.reasonValues || {})
+    );
+  }
   return localized;
 }
 
@@ -236,6 +242,298 @@ window.addEventListener('languagechange', () => {
     ipcRenderer.invoke('i18n:refresh-automatic').catch(() => {});
   }
 });
+const { BoundedPcmRing, shouldDropAudioPacket } = require('./screen-share-audio');
+const {
+  normalizeVideoEncoderPreference,
+  getAvailableVideoEncoderPreferences,
+  applyVideoEncoderPreference,
+} = require('./screen-share-video');
+
+const _displayVideoTracks = new WeakSet();
+const _screenShareTransceivers = new WeakMap();
+const _encoderStatsTimers = new WeakMap();
+const _encoderStatsGenerations = new WeakMap();
+let _activeDisplayVideoTrack = null;
+// Latch for the GPU-confirmed badge. Every viewer peer reports its own stats
+// on its own timer and they all write to the same badge (last-wins), so once
+// any negotiated report proves hardware encoding for the current screen track
+// the badge stays confirmed until the track ends — instead of flickering
+// between confirmed/software as competing peer reports land.
+let _gpuConfirmedTrack = null;
+let _videoEncoderConfig = {
+  preference: 'hardware',
+  hardwareAvailable: false,
+  hardwareStatus: 'unavailable',
+};
+
+function videoEncoderLabel(preference) {
+  return {
+    auto: t('screenPicker.automaticEncoder'),
+    hardware: t('screenPicker.hardwareH264'),
+    h264: 'H.264',
+    vp8: 'VP8',
+    vp9: 'VP9',
+    av1: 'AV1',
+    h265: 'H.265 / HEVC',
+  }[preference] || preference;
+}
+
+function publishVideoEncoderStatus(status) {
+  const detail = { ...status, timestamp: Date.now() };
+  window.__havenShareVideoEncoder = detail;
+  window.dispatchEvent(new CustomEvent('haven:share-video-encoder', { detail }));
+
+  if (!document.body) return;
+  let badge = document.getElementById('haven-video-encoder-status');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'haven-video-encoder-status';
+    badge.style.cssText = [
+      'position:fixed', 'right:14px', 'bottom:14px', 'z-index:2147483647',
+      'padding:7px 10px', 'border-radius:7px', 'background:rgba(17,20,31,.94)',
+      'border:1px solid rgba(128,105,232,.55)', 'color:#ddd',
+      'font:12px/1.35 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+      'box-shadow:0 6px 22px rgba(0,0,0,.35)', 'pointer-events:none',
+    ].join(';');
+    document.body.appendChild(badge);
+  }
+
+  if (status.powerEfficientEncoder === true && status.track) {
+    _gpuConfirmedTrack = status.track;
+  }
+  const gpuLatched = !!_gpuConfirmedTrack &&
+    _gpuConfirmedTrack.readyState === 'live' &&
+    _gpuConfirmedTrack === _activeDisplayVideoTrack;
+  if (!gpuLatched && _gpuConfirmedTrack?.readyState !== 'live') _gpuConfirmedTrack = null;
+  const codec = status.mimeType?.replace(/^video\//i, '').toUpperCase()
+    || videoEncoderLabel(status.preference);
+  let acceleration = t('screenEncoder.browserManaged');
+  if (gpuLatched || status.powerEfficientEncoder === true) {
+    acceleration = t('screenEncoder.gpuConfirmed');
+  }
+  else if (status.powerEfficientEncoder === false) acceleration = t('screenEncoder.software');
+  else if (status.hardwareAvailable && codec.includes('H264')) {
+    acceleration = t('screenEncoder.gpuPending');
+  } else if (!status.hardwareAvailable && status.preference === 'hardware') {
+    acceleration = t('screenEncoder.gpuUnavailable');
+  }
+
+  badge.textContent = t('screenEncoder.status', { codec, acceleration });
+  badge.title = [
+    status.encoderImplementation,
+    status.sdpFmtpLine,
+    status.reason,
+  ].filter(Boolean).join(' • ');
+}
+
+function clearVideoEncoderStatus() {
+  document.getElementById('haven-video-encoder-status')?.remove();
+  window.__havenShareVideoEncoder = null;
+  _gpuConfirmedTrack = null;
+}
+
+function configureScreenShareTransceiver(track, transceiver) {
+  if (!transceiver || transceiver.stopped) return;
+
+  // Only screen-share video transceivers are ever configured. Relay and
+  // voice transceivers share this prototype hook, so anything that is not a
+  // live display video track is left completely untouched.
+  if (track?.kind && track.kind !== 'video') return;
+
+  if (!_displayVideoTracks.has(track) || track.readyState !== 'live') {
+    if (_screenShareTransceivers.has(transceiver)) {
+      try { transceiver.setCodecPreferences([]); } catch {}
+      _screenShareTransceivers.delete(transceiver);
+    }
+    return;
+  }
+
+  const codecs = window.RTCRtpSender?.getCapabilities?.('video')?.codecs;
+  const preference = normalizeVideoEncoderPreference(_videoEncoderConfig.preference);
+  const result = applyVideoEncoderPreference(
+    transceiver,
+    codecs,
+    preference,
+    _videoEncoderConfig.hardwareAvailable
+  );
+
+  if (result.applied) {
+    _screenShareTransceivers.set(transceiver, { ...result, track });
+    publishVideoEncoderStatus({
+      phase: 'requested',
+      ...result,
+      hardwareAvailable: _videoEncoderConfig.hardwareAvailable,
+      hardwareStatus: _videoEncoderConfig.hardwareStatus,
+    });
+    console.log(`[Haven Desktop] screen encoder requested: ${preference}`);
+  } else {
+    if (_screenShareTransceivers.has(transceiver)) {
+      try { transceiver.setCodecPreferences([]); } catch {}
+      _screenShareTransceivers.delete(transceiver);
+    }
+    publishVideoEncoderStatus({
+      phase: 'fallback',
+      preference,
+      reason: result.reason,
+      hardwareAvailable: _videoEncoderConfig.hardwareAvailable,
+      hardwareStatus: _videoEncoderConfig.hardwareStatus,
+    });
+  }
+}
+
+async function reportNegotiatedScreenEncoder(peer) {
+  let hasLiveScreenTrack = false;
+  let reported = false;
+  for (const transceiver of peer.getTransceivers()) {
+    const encoderState = _screenShareTransceivers.get(transceiver);
+    if (!encoderState) continue;
+    const track = transceiver.sender.track;
+    if (track?.readyState !== 'live' || track !== _activeDisplayVideoTrack) {
+      if (_screenShareTransceivers.get(transceiver) === encoderState) {
+        _screenShareTransceivers.delete(transceiver);
+      }
+      continue;
+    }
+    hasLiveScreenTrack = true;
+    try {
+      const stats = await transceiver.sender.getStats();
+      if (_screenShareTransceivers.get(transceiver) !== encoderState) continue;
+      if (track.readyState !== 'live' || transceiver.sender.track !== track) {
+        _screenShareTransceivers.delete(transceiver);
+        continue;
+      }
+      const entries = [...stats.values()];
+      const outbound = entries.find(stat =>
+        stat.type === 'outbound-rtp'
+        && (stat.kind === 'video' || stat.mediaType === 'video')
+      );
+      const codec = entries.find(stat => stat.id === outbound?.codecId);
+      if (!outbound || !codec) continue;
+      publishVideoEncoderStatus({
+        phase: 'negotiated',
+        preference: encoderState.preference,
+        track,
+        mimeType: codec.mimeType,
+        sdpFmtpLine: codec.sdpFmtpLine || '',
+        encoderImplementation: outbound.encoderImplementation || null,
+        powerEfficientEncoder: outbound.powerEfficientEncoder,
+        hardwareAvailable: _videoEncoderConfig.hardwareAvailable,
+        hardwareStatus: _videoEncoderConfig.hardwareStatus,
+        frameWidth: outbound.frameWidth,
+        frameHeight: outbound.frameHeight,
+        framesPerSecond: outbound.framesPerSecond,
+      });
+      console.log(
+        `[Haven Desktop] negotiated screen encoder: ${codec.mimeType}`,
+        outbound.encoderImplementation || ''
+      );
+      reported = true;
+    } catch (error) {
+      console.warn('[Haven Desktop] screen encoder stats unavailable:', error.message);
+    }
+  }
+  if (!hasLiveScreenTrack && _activeDisplayVideoTrack?.readyState !== 'live') {
+    clearVideoEncoderStatus();
+  }
+  return { hasLiveScreenTrack, reported };
+}
+
+function scheduleScreenEncoderReport(peer, attempt = 0, generation = null) {
+  if (generation === null) {
+    generation = (_encoderStatsGenerations.get(peer) || 0) + 1;
+    _encoderStatsGenerations.set(peer, generation);
+  }
+  if (_encoderStatsGenerations.get(peer) !== generation) return;
+  const previousTimer = _encoderStatsTimers.get(peer);
+  if (previousTimer) clearTimeout(previousTimer);
+  const timer = setTimeout(async () => {
+    _encoderStatsTimers.delete(peer);
+    const result = await reportNegotiatedScreenEncoder(peer);
+    if (_encoderStatsGenerations.get(peer) !== generation) return;
+    if (result.hasLiveScreenTrack && !result.reported && attempt < 15) {
+      scheduleScreenEncoderReport(peer, attempt + 1, generation);
+    }
+  }, attempt === 0 ? 500 : 2000);
+  _encoderStatsTimers.set(peer, timer);
+}
+
+function installScreenShareEncodingOverride() {
+  if (!window.RTCPeerConnection || !window.RTCRtpSender) return false;
+
+  const peerPrototype = window.RTCPeerConnection.prototype;
+  const originalAddTrack = peerPrototype.addTrack;
+  const originalAddTransceiver = peerPrototype.addTransceiver;
+  const originalCreateOffer = peerPrototype.createOffer;
+  const originalCreateAnswer = peerPrototype.createAnswer;
+  const originalSetRemoteDescription = peerPrototype.setRemoteDescription;
+  const trackPrototype = window.MediaStreamTrack?.prototype;
+  const originalTrackStop = trackPrototype?.stop;
+
+  function configureTransceivers(peer) {
+    // Scope the hook to transceivers carrying the live screen track. The
+    // override patches every RTCPeerConnection in the page, including the
+    // relay's, so iterating blindly would reset or re-preference
+    // transceivers that have nothing to do with screen sharing.
+    for (const transceiver of peer.getTransceivers()) {
+      const track = transceiver?.sender?.track;
+      if (!track || track.readyState !== 'live' || !_displayVideoTracks.has(track)) continue;
+      configureScreenShareTransceiver(track, transceiver);
+    }
+  }
+
+  peerPrototype.addTrack = function (track, ...streams) {
+    const sender = originalAddTrack.call(this, track, ...streams);
+    const transceiver = this.getTransceivers().find(item => item.sender === sender);
+    configureScreenShareTransceiver(track, transceiver);
+    return sender;
+  };
+
+  peerPrototype.addTransceiver = function (trackOrKind, init) {
+    const transceiver = originalAddTransceiver.call(this, trackOrKind, init);
+    if (typeof trackOrKind !== 'string') {
+      configureScreenShareTransceiver(trackOrKind, transceiver);
+    }
+    return transceiver;
+  };
+
+  peerPrototype.createOffer = function (...args) {
+    configureTransceivers(this);
+    return originalCreateOffer.apply(this, args);
+  };
+
+  peerPrototype.createAnswer = function (...args) {
+    configureTransceivers(this);
+    return originalCreateAnswer.apply(this, args);
+  };
+
+  peerPrototype.setRemoteDescription = function (...args) {
+    const operation = originalSetRemoteDescription.apply(this, args);
+    if (!operation?.then) return operation;
+    return operation.then(result => {
+      scheduleScreenEncoderReport(this);
+      return result;
+    });
+  };
+
+  if (trackPrototype && originalTrackStop) {
+    trackPrototype.stop = function (...args) {
+      const isDisplayTrack = _displayVideoTracks.has(this);
+      const result = originalTrackStop.apply(this, args);
+      if (isDisplayTrack && _activeDisplayVideoTrack === this) {
+        _displayVideoTracks.delete(this);
+        _activeDisplayVideoTrack = null;
+        clearVideoEncoderStatus();
+      }
+      return result;
+    };
+  }
+
+  return true;
+}
+
+if (!installScreenShareEncodingOverride()) {
+  window.addEventListener('DOMContentLoaded', installScreenShareEncodingOverride, { once: true });
+}
 
 // Mark the document as running inside the Electron shell.
 // This lets CSS override responsive breakpoints that would otherwise
@@ -714,8 +1012,15 @@ let _audioWorkletNode    = null;
 let _audioCtx            = null;
 let _audioDestination    = null;
 let _capturedAudioPid    = null;
+let _activeAudioCaptureId = null;
+let _activeShareId       = null;
+let _pendingShareId      = null;
+let _displayMediaPending = false;
 let _audioBufferQueue    = [];
+let _audioBufferedSamples = 0;
 let _audioPacketsReceived = 0;
+let _audioPreparationQueue = Promise.resolve();
+const _cancelledAudioPreparations = new Set();
 // ─── Global voice shortcut triggers ──────────────────────
 ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
 ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
@@ -854,22 +1159,27 @@ let _ipcDataCount = 0;
 // getDisplayMedia override abort its readiness wait early on hard failure
 // instead of always burning the full timeout.
 ipcRenderer.on('audio:capture-status', (_event, status) => {
+  if (!status?.captureId || status.captureId !== _activeAudioCaptureId) return;
   _lastNativeStatus = localizeAudioStatus(status);
   const codeHex = '0x' + ((status?.code || 0) >>> 0).toString(16);
   console.log(`[Haven Desktop] native capture status: kind=${status?.kind} code=${codeHex} msg=${status?.message}`);
 });
 
 // Resolved share-audio mode reported by main once the picker handler decides
-// what audio path to use (per-app / system-clean / fallback / loopback / none).
+// what audio path to use (application / system / none).
 // Forwarded to the page so the webapp can show a small mode indicator.
 ipcRenderer.on('audio:share-mode', (_event, modeInfo) => {
+  if (modeInfo?.captureId && modeInfo.captureId !== _activeShareId) return;
   console.log('[Haven Desktop] share audio mode:', modeInfo);
   try {
     _lastShareModeInfo = modeInfo;
     dispatchShareModeInfo(modeInfo);
   } catch (e) { console.warn('[Haven Desktop] dispatch share-mode event failed:', e.message); }
 });
-ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
+ipcRenderer.on('audio:capture-data', (_event, payload) => {
+  if (!payload?.captureId || payload.captureId !== _activeAudioCaptureId) return;
+  if (shouldDropAudioPacket(payload.capturedAt)) return;
+  const pcmData = payload.data;
   // Build a Float32Array from whatever Electron's IPC delivers.
   // The main process now sends a plain ArrayBuffer (guaranteed offset-0),
   // but we still handle typed-array arrivals defensively.
@@ -902,269 +1212,73 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
   }
 
   if (_audioWorkletNode) {
-    _audioWorkletNode.port.postMessage({ type: 'audio-data', samples });
+    _audioWorkletNode.port.postMessage({ type: 'audio-data', samples }, [samples.buffer]);
   } else if (window._havenAppAudioPush) {
     window._havenAppAudioPush(samples);
   } else {
-    _audioBufferQueue.push(samples);
+    const buffered = samples.length > 4800 ? samples.subarray(samples.length - 4800) : samples;
+    _audioBufferQueue.push(buffered);
+    _audioBufferedSamples += buffered.length;
+    while (_audioBufferedSamples > 4800 && _audioBufferQueue.length > 1) {
+      _audioBufferedSamples -= _audioBufferQueue.shift().length;
+    }
   }
   _audioPacketsReceived++;
 });
 
-// ─── Listen for screen-picker request from main process ──
-ipcRenderer.on('screen:show-picker', (_event, data) => {
-  showScreenPicker(data?.sources || [], data?.audioApps || [], data?.requestId || null);
+// The trusted picker runs in its own local BrowserWindow. Only after that
+// window records consent does main ask this preload to prepare the audio track.
+ipcRenderer.on('screen:prepare-share-cancel', (_event, data = {}) => {
+  const requestId = typeof data.requestId === 'string' ? data.requestId : null;
+  if (!requestId) return;
+  _cancelledAudioPreparations.add(requestId);
+  if (_activeAudioCaptureId === requestId) teardownAudioPipeline(requestId);
+});
+
+ipcRenderer.on('screen:prepare-share', (_event, data = {}) => {
+  const requestId = typeof data.requestId === 'string' ? data.requestId : null;
+  if (!requestId) return;
+  _cancelledAudioPreparations.delete(requestId);
+
+  const prepare = async () => {
+    if (_cancelledAudioPreparations.delete(requestId)) return;
+
+    teardownAudioPipeline(_activeAudioCaptureId);
+    _activeShareId = requestId;
+    _pendingShareId = requestId;
+    _lastNativeStatus = null;
+
+    const audioAppPid = data.audioAppPid;
+    const wantsNativePipeline =
+      (Number.isSafeInteger(audioAppPid) && audioAppPid > 0) || audioAppPid === 'system';
+    let audioReady = true;
+    if (wantsNativePipeline) {
+      _activeAudioCaptureId = requestId;
+      _capturedAudioPid = audioAppPid;
+      try {
+        audioReady = await buildAudioPipeline(() =>
+          _cancelledAudioPreparations.has(requestId) || _activeAudioCaptureId !== requestId
+        );
+      } catch (err) {
+        console.warn('[Haven Desktop] Local audio pipeline failed to build:', err.message);
+        audioReady = false;
+      }
+    }
+
+    if (_cancelledAudioPreparations.delete(requestId)) {
+      teardownAudioPipeline(requestId);
+      return;
+    }
+    if (!audioReady) teardownAudioPipeline(requestId);
+    ipcRenderer.send('screen:prepare-share-result', { requestId, audioReady });
+  };
+
+  _audioPreparationQueue = _audioPreparationQueue.then(prepare, prepare);
 });
 
 // ═══════════════════════════════════════════════════════════
 // Screen-Share Picker  (injected as a full-screen overlay)
 // ═══════════════════════════════════════════════════════════
-
-function showScreenPicker(sources, audioApps, requestId) {
-  // Remove stale picker
-  document.getElementById('haven-screen-picker')?.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = 'haven-screen-picker';
-  overlay.dataset.havenI18nRoot = '';
-  overlay.dir = i18nState.direction;
-  overlay.lang = i18nState.locale;
-  overlay.innerHTML = `
-    <style>
-      /* The picker is an overlay inside the Haven page, so the app's theme
-         variables are in scope. Fallbacks keep the login and splash pages,
-         which carry no theme, looking the way they did. */
-      #haven-screen-picker {
-        position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:999999;
-        display:flex;align-items:center;justify-content:center;
-        font-family:var(--font-main,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif);
-      }
-      /* height (not max-height) makes the flex budget definite on the first
-         layout, min-height on the list keeps the window grid from being
-         squeezed out by a tall audio-app row, and the audio row scrolls on
-         its own past 30vh. Together they end the "no scrollbar sometimes". */
-      .hsp-box{background:var(--bg-card,#1a1a2e);border-radius:var(--radius,14px);padding:28px;max-width:820px;width:92%;
-        height:82vh;max-height:82vh;display:flex;flex-direction:column;border:1px solid var(--border,rgba(107,79,219,.3));
-        box-shadow:0 20px 60px rgba(0,0,0,.5);}
-      .hsp-title{color:var(--text-primary,#e0e0e0);font-size:20px;font-weight:700;margin-bottom:2px;flex-shrink:0}
-      .hsp-sub{color:var(--text-secondary,#888);font-size:13px;margin-bottom:14px;flex-shrink:0}
-      .hsp-scroll{flex:1 1 auto;overflow-y:auto;padding-right:6px;margin-right:-6px;min-height:9rem;
-        scrollbar-width:auto;scrollbar-color:var(--accent,#6b4fdb) transparent}
-      .hsp-scroll::-webkit-scrollbar{width:10px}
-      .hsp-scroll::-webkit-scrollbar-thumb{background:var(--accent,#6b4fdb);border-radius:5px;opacity:.75}
-      .hsp-sec{margin-bottom:14px}
-      .hsp-sec-title{color:var(--text-muted,#aaa);font-size:11px;text-transform:uppercase;letter-spacing:1.2px;
-        margin-bottom:8px;font-weight:700}
-      .hsp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}
-      .hsp-src{background:var(--bg-tertiary,#16213e);border-radius:8px;padding:8px;cursor:pointer;
-        border:2px solid transparent;transition:border-color .2s,transform .15s}
-      .hsp-src:hover{border-color:var(--accent-glow,rgba(107,79,219,.5));transform:translateY(-1px)}
-      .hsp-src.sel{border-color:var(--accent,#6b4fdb)}
-      .hsp-src img{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
-        object-fit:cover;background:var(--bg-input,#0d0d1a)}
-      .hsp-src .hsp-thumb-ph{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
-        background:linear-gradient(135deg,var(--bg-input,#0d0d1a),var(--bg-primary,#1a1a2e));display:flex;align-items:center;
-        justify-content:center;color:var(--text-muted,#777);font-size:11px;letter-spacing:.3px}
-      .hsp-src-name{color:var(--text-primary,#ccc);font-size:12px;text-align:center;white-space:nowrap;
-        overflow:hidden;text-overflow:ellipsis}
-      .hsp-audio{padding-top:14px;border-top:1px solid var(--border,#2a2a4a);flex:0 1 auto;margin-top:10px;
-        max-height:30vh;overflow-y:auto}
-      .hsp-apps{display:flex;flex-wrap:wrap;gap:8px}
-      .hsp-app{background:var(--bg-tertiary,#16213e);border-radius:6px;padding:8px 14px;cursor:pointer;
-        border:2px solid transparent;transition:border-color .2s;display:flex;
-        align-items:center;gap:8px;color:var(--text-primary,#ccc);font-size:13px}
-      .hsp-app:hover{border-color:var(--accent-glow,rgba(107,79,219,.5))}
-      .hsp-app.sel{border-color:var(--accent,#6b4fdb)}
-      .hsp-app .ico{width:20px;height:20px}
-      .hsp-btns{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-shrink:0}
-      .hsp-btn{padding:8px 22px;border-radius:6px;border:none;font-size:14px;cursor:pointer;font-weight:600}
-      /* Scoped: the server picker's global .hsp-cancel rule (display:block;
-         width:100%) otherwise stretches this Cancel across the row. */
-      #haven-screen-picker .hsp-cancel{display:inline-block;width:auto;margin-top:0;background:var(--bg-hover,#333);color:var(--text-secondary,#ccc)}
-      #haven-screen-picker .hsp-cancel:hover{background:var(--bg-active,#444)}
-      .hsp-share{background:var(--accent,#6b4fdb);color:var(--accent-text,#fff)}.hsp-share:hover{background:var(--accent-hover,#7b5fe9)}
-      .hsp-share:disabled{opacity:.45;cursor:not-allowed}
-      .hsp-none{color:var(--text-muted,#666);font-size:12px;font-style:italic;padding:8px}
-    </style>
-
-    <div class="hsp-box">
-      <div class="hsp-title" data-haven-i18n="screenPicker.title">${t('screenPicker.title')}</div>
-      <div class="hsp-sub" data-haven-i18n="screenPicker.subtitle">${t('screenPicker.subtitle')}</div>
-
-      <div class="hsp-scroll">
-        <div class="hsp-sec">
-          <div class="hsp-sec-title" data-haven-i18n="screenPicker.screens">${t('screenPicker.screens')}</div>
-          <div class="hsp-grid" id="hsp-screens"></div>
-        </div>
-
-        <div class="hsp-sec">
-          <div class="hsp-sec-title" data-haven-i18n="screenPicker.windows">${t('screenPicker.windows')}</div>
-          <div class="hsp-grid" id="hsp-windows"></div>
-        </div>
-      </div>
-
-      <div class="hsp-audio">
-        <div class="hsp-sec-title" data-haven-i18n="screenPicker.audio" data-haven-i18n-prefix="🔊 ">🔊 ${t('screenPicker.audio')}</div>
-        <div class="hsp-apps" id="hsp-audio-apps"></div>
-      </div>
-
-      <div class="hsp-btns">
-        <button class="hsp-btn hsp-cancel" id="hsp-cancel" data-haven-i18n="screenPicker.cancel">${t('screenPicker.cancel')}</button>
-        <button class="hsp-btn hsp-share" id="hsp-go" data-haven-i18n="screenPicker.share" disabled>${t('screenPicker.share')}</button>
-      </div>
-    </div>`;
-
-  document.body.appendChild(overlay);
-
-  let selSource = null;
-  let selAudioPid = null;
-
-  const screensEl  = document.getElementById('hsp-screens');
-  const windowsEl  = document.getElementById('hsp-windows');
-  const appsEl     = document.getElementById('hsp-audio-apps');
-  const goBtn      = document.getElementById('hsp-go');
-
-  // ── Populate video sources ─────────────────────────────
-  sources.forEach(src => {
-    const el = document.createElement('div');
-    el.className = 'hsp-src';
-    if (src.thumbnail) {
-      const preview = document.createElement('img');
-      preview.src = src.thumbnail;
-      preview.alt = '';
-      el.appendChild(preview);
-    } else {
-      const preview = document.createElement('div');
-      preview.className = 'hsp-thumb-ph';
-      setI18nText(preview, 'screenPicker.noPreview');
-      el.appendChild(preview);
-    }
-    const sourceName = document.createElement('div');
-    sourceName.className = 'hsp-src-name';
-    sourceName.title = src.name;
-    sourceName.textContent = src.name;
-    el.appendChild(sourceName);
-    el.onclick = () => {
-      overlay.querySelectorAll('.hsp-src.sel').forEach(s => s.classList.remove('sel'));
-      el.classList.add('sel');
-      selSource = src.id;
-      goBtn.disabled = false;
-    };
-    (src.id.startsWith('screen:') ? screensEl : windowsEl).appendChild(el);
-  });
-
-  // ── Populate audio applications ────────────────────────
-  // "No Audio" option — always shown first
-  const muteEl = document.createElement('div');
-  muteEl.className = 'hsp-app';
-  setI18nText(muteEl, 'screenPicker.noAudio', null, '🔇 ');
-  muteEl.onclick = () => {
-    appsEl.querySelectorAll('.sel').forEach(a => a.classList.remove('sel'));
-    muteEl.classList.add('sel');
-    selAudioPid = 'none';
-  };
-  appsEl.appendChild(muteEl);
-
-  // "System Audio (no Haven voice)" — selected by default. On Windows we
-  // capture system audio via WASAPI exclude-mode so Haven's own voice output
-  // is filtered out. On Linux we fall back to Electron loopback (still
-  // includes Haven voice; can't be helped without OS-level support yet).
-  const sysEl = document.createElement('div');
-  sysEl.className = 'hsp-app sel';
-  setI18nText(sysEl, 'screenPicker.systemAudio', null, '🔊 ');
-  selAudioPid = 'system';
-  sysEl.onclick = () => {
-    appsEl.querySelectorAll('.sel').forEach(a => a.classList.remove('sel'));
-    sysEl.classList.add('sel');
-    selAudioPid = 'system';
-  };
-  appsEl.appendChild(sysEl);
-
-  // Per-app entries when native module is available. Inactive sessions
-  // (paused YouTube tabs, idle games) are shown but visually dimmed.
-  if (audioApps && audioApps.length) {
-    audioApps.forEach(a => {
-      const el = document.createElement('div');
-      el.className = 'hsp-app';
-      if (a.active === false) el.style.opacity = '0.55';
-      if (a.icon) {
-        const icon = document.createElement('img');
-        icon.className = 'ico';
-        icon.src = a.icon;
-        icon.alt = '';
-        el.appendChild(icon);
-      } else {
-        el.appendChild(document.createTextNode('🔊'));
-      }
-      const appName = document.createElement('span');
-      const appNameLabel = document.createElement('span');
-      if (a.nameKey) setI18nText(appNameLabel, a.nameKey);
-      else appNameLabel.textContent = a.name;
-      appName.appendChild(appNameLabel);
-      if (a.active === false) {
-        appName.appendChild(document.createTextNode(' '));
-        const silent = document.createElement('span');
-        silent.style.cssText = 'color:#888;font-size:11px';
-        setI18nText(silent, 'screenPicker.silent', null, '(', ')');
-        appName.appendChild(silent);
-      }
-      el.appendChild(appName);
-      if (a.active === false) setI18nTitle(el, 'screenPicker.silentDescription');
-      else if (a.nameKey) setI18nTitle(el, a.nameKey);
-      else el.title = a.name;
-      el.onclick = () => {
-        appsEl.querySelectorAll('.sel').forEach(x => x.classList.remove('sel'));
-        el.classList.add('sel');
-        selAudioPid = a.pid;
-      };
-      appsEl.appendChild(el);
-    });
-  }
-
-  // ── Cancel ─────────────────────────────────────────────
-  let dismissed = false;
-  const dismiss = async (cancelled) => {
-    if (dismissed) return; // prevent double-dismiss
-    dismissed = true;
-    overlay.remove();
-    document.removeEventListener('keydown', escHandler);
-
-    // Restore focus to the main window content (prevents Wayland focus loss)
-    try { document.body?.focus(); window.focus(); } catch {}
-
-    let effectiveAudioPid = selAudioPid;
-    // Native pipeline applies to per-app PIDs AND to 'system' (which uses
-    // WASAPI exclude-mode in main to strip Haven's voice from the share).
-    const wantsNativePipeline = !cancelled && selAudioPid &&
-                                selAudioPid !== 'none';
-    if (wantsNativePipeline) {
-      _capturedAudioPid = selAudioPid;
-      console.log(`[Haven Desktop] Picker dismissed: building native audio pipeline for ${selAudioPid}`);
-      const pipelineOk = await buildAudioPipeline();
-      if (!pipelineOk) {
-        console.warn('[Haven Desktop] Local audio pipeline failed to build — main will fall back to Electron loopback for system audio, or silence for per-app');
-        _capturedAudioPid = null;
-        // For per-app picks, leave effectiveAudioPid alone — main will see
-        // the request and try to start native capture; if that ALSO fails
-        // it stays silent. For 'system' picks, leave it as 'system' too —
-        // main will try exclude-mode and last-ditch fall back to loopback.
-      }
-    }
-
-    ipcRenderer.send('screen:picker-result', cancelled
-      ? { requestId, cancelled: true }
-      : { requestId, sourceId: selSource, audioAppPid: effectiveAudioPid });
-  };
-
-  document.getElementById('hsp-cancel').onclick = () => dismiss(true);
-  goBtn.onclick = () => dismiss(false);
-
-  // Also dismiss on overlay background click (outside the box)
-  overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(true); });
-
-  const escHandler = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dismiss(true); } };
-  document.addEventListener('keydown', escHandler, true);
-}
 
 // ═══════════════════════════════════════════════════════════
 // Audio-Capture Pipeline
@@ -1174,38 +1288,34 @@ function showScreenPicker(sources, audioApps, requestId) {
 // the system-loopback track on the screen-share MediaStream.
 // ═══════════════════════════════════════════════════════════
 
-async function buildAudioPipeline() {
+async function buildAudioPipeline(isCancelled = () => false) {
+  if (isCancelled()) return false;
   // Reset arrival counters so the getDisplayMedia override's readiness
   // check reflects ONLY this capture session, never a stale prior one.
   _audioPacketsReceived = 0;
   _ipcDataCount = 0;
   _audioBufferQueue = [];
+  _audioBufferedSamples = 0;
 
   // Try AudioWorklet first, fall back to ScriptProcessorNode if it fails
   // (AudioWorklet blob URLs can fail in some Electron/BrowserView contexts)
   try {
-    _audioCtx = new AudioContext({ sampleRate: 48000 });
+    _audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     // Explicitly resume — BrowserView contexts may start suspended
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
+    if (isCancelled()) return false;
 
     // Inline AudioWorklet processor (blob URL avoids CSP / file issues)
     const workletSrc = `
+      ${BoundedPcmRing.toString()}
       class AppAudioProcessor extends AudioWorkletProcessor {
         constructor() {
           super();
-          this._ring   = new Float32Array(96000);   // 2 s ring buffer
-          this._wPos   = 0;
-          this._rPos   = 0;
-          this._avail  = 0;
+          this._ring = new BoundedPcmRing(4800); // Never retain more than 100 ms.
 
           this.port.onmessage = (e) => {
             if (e.data.type !== 'audio-data') return;
-            const s = e.data.samples;
-            for (let i = 0; i < s.length; i++) {
-              this._ring[this._wPos] = s[i];
-              this._wPos = (this._wPos + 1) % this._ring.length;
-            }
-            this._avail = Math.min(this._avail + s.length, this._ring.length);
+            this._ring.push(e.data.samples);
           };
         }
 
@@ -1215,13 +1325,7 @@ async function buildAudioPipeline() {
           const buf = out[0];
           const len = buf.length;
 
-          if (this._avail < len) { buf.fill(0); return true; }
-
-          for (let i = 0; i < len; i++) {
-            buf[i] = this._ring[this._rPos];
-            this._rPos = (this._rPos + 1) % this._ring.length;
-          }
-          this._avail -= len;
+          this._ring.pull(buf);
 
           for (let ch = 1; ch < out.length; ch++) out[ch].set(buf);
           return true;
@@ -1234,6 +1338,7 @@ async function buildAudioPipeline() {
     const url  = URL.createObjectURL(blob);
     await _audioCtx.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
+    if (isCancelled()) return false;
 
     _audioWorkletNode = new AudioWorkletNode(_audioCtx, 'app-audio-processor', {
       numberOfInputs: 0,
@@ -1252,9 +1357,10 @@ async function buildAudioPipeline() {
 
     // Flush any PCM that arrived before the pipeline was ready
     _audioBufferQueue.forEach(buf =>
-      _audioWorkletNode.port.postMessage({ type: 'audio-data', samples: buf })
+      _audioWorkletNode.port.postMessage({ type: 'audio-data', samples: buf }, [buf.buffer])
     );
     _audioBufferQueue = [];
+    _audioBufferedSamples = 0;
 
     // Expose track globally so our getDisplayMedia override can grab it
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
@@ -1276,51 +1382,40 @@ async function buildAudioPipeline() {
     _audioWorkletNode = null;
     if (_audioCtx) { _audioCtx.close().catch(() => {}); _audioCtx = null; }
     _audioDestination = null;
+    if (isCancelled()) return false;
   }
 
   // ── Fallback: ScriptProcessorNode (works in all Electron versions) ──
   try {
-    _audioCtx = new AudioContext({ sampleRate: 48000 });
+    _audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
+    if (isCancelled()) return false;
 
-    const bufSize = 4096;
+    const bufSize = 1024;
     // Use 1 input channel (not 0).  A "generator" ScriptProcessor with
     // 0 inputs may not have its onaudioprocess callback pumped reliably
     // in Electron / BrowserView environments.  Connecting a live source
     // to the input guarantees Chromium's audio thread drives the node.
     const scriptNode = _audioCtx.createScriptProcessor(bufSize, 1, 2);
-    const ring   = new Float32Array(96000);
-    let   wPos   = 0;
-    let   rPos   = 0;
-    let   avail  = 0;
+    const ring = new BoundedPcmRing(4800);
     let   _spProcessCount = 0;
 
     // Store a push function that the IPC handler can call
     window._havenAppAudioPush = (samples) => {
-      for (let i = 0; i < samples.length; i++) {
-        ring[wPos] = samples[i];
-        wPos = (wPos + 1) % ring.length;
-      }
-      avail = Math.min(avail + samples.length, ring.length);
+      ring.push(samples);
     };
 
     scriptNode.onaudioprocess = (e) => {
       _spProcessCount++;
       const out = e.outputBuffer.getChannelData(0);
-      if (avail < out.length) { out.fill(0); } else {
-        for (let i = 0; i < out.length; i++) {
-          out[i] = ring[rPos];
-          rPos = (rPos + 1) % ring.length;
-        }
-        avail -= out.length;
-      }
+      ring.pull(out);
       // Copy mono to stereo
       const out1 = e.outputBuffer.getChannelData(1);
       out1.set(out);
       // Periodic diagnostic
       if (_spProcessCount === 1 || _spProcessCount % 200 === 0) {
         const peak = Math.max(...Array.from(out.slice(0, 128)).map(Math.abs));
-        console.log(`[Haven Desktop] ScriptProcessor process #${_spProcessCount}, avail=${avail}, peak=${peak.toFixed(4)}`);
+        console.log(`[Haven Desktop] ScriptProcessor process #${_spProcessCount}, avail=${ring.available}, peak=${peak.toFixed(4)}`);
       }
     };
 
@@ -1343,6 +1438,7 @@ async function buildAudioPipeline() {
     // Flush buffered PCM
     _audioBufferQueue.forEach(buf => window._havenAppAudioPush(buf));
     _audioBufferQueue = [];
+    _audioBufferedSamples = 0;
 
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
     window._havenAppAudioStream = _audioDestination.stream;
@@ -1367,9 +1463,10 @@ async function buildAudioPipeline() {
   }
 }
 
-function teardownAudioPipeline() {
+function teardownAudioPipeline(captureId = _activeAudioCaptureId) {
+  if (captureId && captureId !== _activeAudioCaptureId) return;
   // Stop native capture first so IPC messages stop arriving
-  ipcRenderer.invoke('audio:stop-capture').catch(() => {});
+  if (captureId) ipcRenderer.invoke('audio:stop-capture', { captureId }).catch(() => {});
   if (window._havenAudioCtxMonitor) {
     clearInterval(window._havenAudioCtxMonitor);
     window._havenAudioCtxMonitor = null;
@@ -1380,7 +1477,9 @@ function teardownAudioPipeline() {
   _audioCtx         = null;
   _audioDestination = null;
   _capturedAudioPid = null;
+  _activeAudioCaptureId = null;
   _audioBufferQueue = [];
+  _audioBufferedSamples = 0;
   _audioPacketsReceived = 0;
   _ipcDataCount     = 0;
   window._havenAppAudioTrack  = null;
@@ -1412,80 +1511,111 @@ function installGetDisplayMediaOverride() {
   const _origGDM = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
 
   navigator.mediaDevices.getDisplayMedia = async function (constraints) {
+    if (_displayMediaPending) {
+      throw new DOMException('A screen-share request is already open.', 'InvalidStateError');
+    }
+    _displayMediaPending = true;
+
     // Reset native status before each share so a stale "failed" from a
     // prior session doesn't poison the next attempt.
     _lastNativeStatus = null;
 
-    const stream = await _origGDM(constraints);
-    const audioTracksFromElectron = stream.getAudioTracks().length;
-    console.log(`[Haven Desktop] getDisplayMedia resolved (capturedAudioPid=${_capturedAudioPid}, electron-audio-tracks=${audioTracksFromElectron}, per-app track ready=${!!window._havenAppAudioTrack})`);
-
-    // If a native capture was requested (per-app PID OR 'system' exclude-mode),
-    // wait for the first PCM packet to land.  IF AND ONLY IF native PCM
-    // arrives, we strip Electron's loopback track and substitute the per-app
-    // PCM track.  If PCM never arrives we leave Electron's loopback track in
-    // place so the share has *some* audio \u2014 silent shares are the worse UX
-    // (per user feedback after the per-app overhaul: many Windows installs
-    // hit ActivateAudioInterfaceAsync E_INVALIDARG / E_NOT_IMPLEMENTED on
-    // the WASAPI Process Loopback API, leaving every share dead-silent).
-    if (_capturedAudioPid) {
-      const timeoutMs = 8000;
-      const stepMs    = 100;
-      const start     = Date.now();
-      let lastLog     = 0;
-      while ((Date.now() - start) < timeoutMs) {
-        if (_audioPacketsReceived > 0) break;
-        // Abort early on hard failure from native side.
-        if (_lastNativeStatus && _lastNativeStatus.kind === 'failed') {
-          console.warn(`[Haven Desktop] native capture reported FAILED during readiness wait — keeping Electron loopback so share isn't silent`);
-          break;
-        }
-        if (Date.now() - lastLog > 1000) {
-          lastLog = Date.now();
-          console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
-        }
-        await new Promise(resolve => setTimeout(resolve, stepMs));
+    let stream;
+    try {
+      stream = await _origGDM(constraints);
+    } catch (error) {
+      const failedShareId = _pendingShareId;
+      _pendingShareId = null;
+      if (failedShareId && _activeShareId === failedShareId) {
+        teardownAudioPipeline(failedShareId);
+        _activeShareId = null;
       }
-
-      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {
-        // Native pipeline succeeded — NOW it's safe to drop Electron's
-        // loopback and substitute the clean per-app / exclude-mode track.
-        stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
-        stream.addTrack(window._havenAppAudioTrack);
-        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
-      } else {
-        // Native capture failed.  KEEP Electron's loopback track so the
-        // share is audible.  Yes, this can include Haven's own voice
-        // output (echo risk) but silence is worse — the share-audio-mode
-        // badge / toast will already warn the user.
-        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
-        console.warn('  capturedAudioPid:', _capturedAudioPid);
-        console.warn('  packetsReceived:', _audioPacketsReceived);
-        console.warn('  ipcDataCount:', _ipcDataCount);
-        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
-        console.warn('  audioCtx state:', _audioCtx?.state);
-        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
-        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
-        console.warn('  lastNativeStatus:', _lastNativeStatus);
-        console.warn("  Falling back to Electron loopback audio so share isn't silent (Haven voice loop possible).");
-      }
-    } else if (window._havenAppAudioTrack) {
-      // Defensive: a per-app track exists but no _capturedAudioPid was set.
-      // Prefer per-app over loopback to be safe.
-      stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
-      stream.addTrack(window._havenAppAudioTrack);
-      console.log('[Haven Desktop] Added pre-existing per-app audio track to share (defensive)');
-    } else {
-      // No native capture requested. Whatever Electron returned (loopback or
-      // nothing) is what we use. If audio was requested via constraints but
-      // not delivered, that's an Electron-level issue, not ours.
-      console.log(`[Haven Desktop] no native capture requested; using Electron-provided audio (${audioTracksFromElectron} track(s))`);
+      _displayMediaPending = false;
+      throw error;
     }
+    try {
+      const shareId = _pendingShareId || _activeShareId;
+      _pendingShareId = null;
+      const captureId = shareId === _activeAudioCaptureId ? shareId : null;
+      const capturedAudioPid = captureId ? _capturedAudioPid : null;
+      const audioTracksFromElectron = stream.getAudioTracks().length;
+      console.log(`[Haven Desktop] getDisplayMedia resolved (capturedAudioPid=${capturedAudioPid}, electron-audio-tracks=${audioTracksFromElectron}, per-app track ready=${!!window._havenAppAudioTrack})`);
 
-    // Auto-teardown when the video track ends (user stops sharing)
-    stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => teardownAudioPipeline()));
+      // Native capture is strict: wait for PCM and add only that track. An
+      // application-capture failure stays silent instead of exposing all audio.
+      if (capturedAudioPid) {
+        const timeoutMs = 8000;
+        const stepMs    = 20;
+        const start     = Date.now();
+        let lastLog     = 0;
+        while ((Date.now() - start) < timeoutMs) {
+          if (_activeAudioCaptureId !== captureId) break;
+          if (_audioPacketsReceived > 0) break;
+          if (_lastNativeStatus && _lastNativeStatus.kind === 'failed') {
+            console.warn('[Haven Desktop] native capture reported FAILED during readiness wait');
+            break;
+          }
+          if (Date.now() - lastLog > 1000) {
+            lastLog = Date.now();
+            console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
+          }
+          await new Promise(resolve => setTimeout(resolve, stepMs));
+        }
 
-    return stream;
+        if (_activeAudioCaptureId === captureId &&
+            _audioPacketsReceived > 0 && window._havenAppAudioTrack) {
+          // Remove any unexpected Electron track before attaching native audio.
+          stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+          stream.addTrack(window._havenAppAudioTrack);
+          console.log(`[Haven Desktop] native audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
+        } else {
+          console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
+          console.warn('  capturedAudioPid:', capturedAudioPid);
+          console.warn('  packetsReceived:', _audioPacketsReceived);
+          console.warn('  ipcDataCount:', _ipcDataCount);
+          console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
+          console.warn('  audioCtx state:', _audioCtx?.state);
+          console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
+          console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
+          console.warn('  lastNativeStatus:', _lastNativeStatus);
+          console.warn('  Continuing without audio to prevent a Haven voice loop.');
+          stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+          teardownAudioPipeline(captureId);
+        }
+      } else if (window._havenAppAudioTrack && !_activeAudioCaptureId) {
+        // A track without an active selection is stale and must never leak into
+        // a later "no audio" or "all system audio" share.
+        teardownAudioPipeline();
+      } else {
+        console.log(`[Haven Desktop] no native capture requested; using Electron-provided audio (${audioTracksFromElectron} track(s))`);
+      }
+
+      const encoderConfig = await ipcRenderer
+        .invoke('video:get-encoder-config')
+        .catch(() => _videoEncoderConfig);
+      _videoEncoderConfig = {
+        ...encoderConfig,
+        preference: normalizeVideoEncoderPreference(encoderConfig.preference),
+        hardwareAvailable: encoderConfig.hardwareAvailable === true,
+      };
+      stream.getVideoTracks().forEach((track, index) => {
+        _displayVideoTracks.add(track);
+        if (index === 0) _activeDisplayVideoTrack = track;
+      });
+
+      // An older video track must not tear down a newer share.
+      stream.getVideoTracks().forEach(track => track.addEventListener('ended', () => {
+        if (_activeShareId !== shareId || _activeDisplayVideoTrack !== track) return;
+        teardownAudioPipeline(captureId);
+        clearVideoEncoderStatus();
+        _activeDisplayVideoTrack = null;
+        _activeShareId = null;
+      }));
+
+      return stream;
+    } finally {
+      _displayMediaPending = false;
+    }
   };
 
   console.log('[Haven Desktop] getDisplayMedia override installed');
@@ -1645,6 +1775,7 @@ window.havenDesktop = {
     setHideMenuBar:   (v)     => ipcRenderer.invoke('desktop:set-hide-menu-bar', v),
     setDisableGpuVsync:  (v)  => ipcRenderer.invoke('desktop:set-disable-gpu-vsync', v),
     setUnlimitFrameRate: (v)  => ipcRenderer.invoke('desktop:set-unlimit-frame-rate', v),
+    setLinuxVaapiBypass:(v)  => ipcRenderer.invoke('desktop:set-linux-vaapi-bypass', v),
     setLanguage:         (v)  => ipcRenderer.invoke('i18n:set-language', v),
   },
 

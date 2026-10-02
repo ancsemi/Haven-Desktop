@@ -88,10 +88,10 @@ if %ERRORLEVEL% neq 0 (
     echo        install-app-deps complete.
 )
 
-:: ─── Build native audio addon ──────────────────────────
+:: ─── Build native audio addon ─────────────────────
 echo.
-echo [4/4] Building native per-app audio addon...
-echo        (Requires Visual Studio Build Tools with C++ workload^)
+echo [4/4] Building native audio addon...
+echo        (Requires Visual Studio Build Tools^)
 echo.
 
 :: Builds against Electron's headers first (the installed Node's own headers

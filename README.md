@@ -34,6 +34,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | Feature | Description |
 |---|---|
 | **Per-Application Audio** | Share audio from a **single application** during screen share — just like Discord. Powered by native WASAPI (Windows) and PulseAudio (Linux) hooks. |
+| **Screen-Share Encoder Controls** | Choose the codec before streaming. Screen sharing requests H.264 and reports whether Chromium confirms hardware acceleration. |
 | **Audio Device Switching** | Switch your microphone and speaker mid-call without leaving voice chat. |
 | **Desktop Notifications** | Native OS-level notifications via the taskbar / system tray. |
 | **Host or Join** | Run your own Haven server from the app, or connect to someone else's. Auto-detects local servers. |
@@ -62,13 +63,14 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 - **npm** 10+
 - **C++ Build Tools:**
   - **Windows:** Visual Studio Build Tools 2019+ with the "Desktop development with C++" workload
-  - **Linux:** `build-essential`, `libpulse-dev`
+  - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
 
 ### Quick Start (Windows — No Terminal)
 
-1. Double-click **`Setup.bat`** — installs everything
-2. Double-click **`Start Haven Desktop.bat`** — launches the app
-3. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
+1. Install the Windows prerequisites listed above
+2. Double-click **`Setup.bat`** — installs npm dependencies and builds the native components
+3. Double-click **`Start Haven Desktop.bat`** — launches the app
+4. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
 
 ### Quick Start (Terminal)
 
@@ -147,7 +149,7 @@ Haven-Desktop/
 ### How Per-App Audio Works
 
 **Windows (WASAPI Process Loopback):**
-The app uses the Windows 10 2004+ `ActivateAudioInterfaceAsync` API with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` to capture audio exclusively from a target process. This is the same API Discord uses. The native addon runs in a background thread, captures 48 kHz float32 PCM, and streams it to the renderer via IPC.
+The app uses the Windows 10 2004+ `ActivateAudioInterfaceAsync` API with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` to capture audio exclusively from a target process. The native addon runs in a background thread, captures 48 kHz float32 PCM, and streams it to the renderer via IPC.
 
 **Linux (PulseAudio):**
 The app creates a virtual null sink, moves the target application's audio stream to it, records from the sink's monitor, and loops the audio back to the default output so the user still hears it.

@@ -14,6 +14,7 @@ namespace haven {
 struct AudioApp {
     uint32_t    pid;
     std::string name;
+    std::string identity; // platform process identity, stable across PID reuse
     std::string icon;   // base64 data-URL, or empty
     bool        active = true; // false = the session exists but is currently silent
 };
@@ -43,11 +44,12 @@ using CaptureStatusCb = std::function<void(const CaptureStatus&)>;
 // What kind of capture do we want?
 //   IncludeProcess: capture audio FROM the given PID (and its children)
 //   ExcludeProcess: capture ALL system audio EXCEPT the given PID tree
-//                   (Windows-only; falls back to IncludeProcess elsewhere
-//                    with a Failed status for Linux callers.)
+//                   (Windows process loopback; Linux isolated routing.)
+//   SystemLoopback: raw default-output monitor (internal Linux fallback only).
 enum class CaptureMode {
     IncludeProcess,
     ExcludeProcess,
+    SystemLoopback,
 };
 
 // Abstract per-platform audio capture
@@ -62,12 +64,13 @@ public:
     // in terms of this for backwards compatibility.
     virtual bool StartCapture(uint32_t        pid,
                               CaptureMode     mode,
+                              const std::string& expectedIdentity,
                               AudioDataCb     dataCb,
                               CaptureStatusCb statusCb) = 0;
 
     // Backwards-compatible shim — IncludeProcess, no status callback.
     bool StartCapture(uint32_t pid, AudioDataCb cb) {
-        return StartCapture(pid, CaptureMode::IncludeProcess, std::move(cb), nullptr);
+        return StartCapture(pid, CaptureMode::IncludeProcess, "", std::move(cb), nullptr);
     }
 
     virtual void                  StopCapture()                = 0;

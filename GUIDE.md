@@ -206,13 +206,14 @@ Your server data (messages, uploads, config) is stored separately in the Haven d
 - **npm** 10+
 - **C++ Build Tools:**
   - **Windows:** Visual Studio Build Tools 2019+ with "Desktop development with C++"
-  - **Linux:** `build-essential`, `libpulse-dev`
+  - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
 
 ### Windows — No Terminal
 
-1. Double-click **`Setup.bat`** — installs Node dependencies and builds the native module
-2. Double-click **`Start Haven Desktop.bat`** — launches the app in dev mode
-3. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
+1. Install the Windows prerequisites listed above
+2. Double-click **`Setup.bat`** — installs Node dependencies and builds the native components
+3. Double-click **`Start Haven Desktop.bat`** — launches the app in dev mode
+4. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
 
 ### Terminal
 
@@ -266,7 +267,7 @@ GitHub Actions builds the Windows `.exe` and Linux `.AppImage` / `.deb`, then pu
 | No sound from per-app capture | Make sure the target app is actually producing audio. Try selecting a different application. |
 | App opens to blank screen | Check that the server is running and reachable at the configured URL. Try clearing settings by deleting the config file (see Configuration above). |
 | Tray icon missing (Linux) | Some desktop environments need an app indicator extension. On GNOME, install `gnome-shell-extension-appindicator`. |
-| Can't build native module | Ensure you have C++ build tools installed. On Windows: `npm install --global --production windows-build-tools`. On Linux: `sudo apt install build-essential libpulse-dev`. |
+| Can't build native module | Install the C++ development prerequisites from the build section above. |
 
 ---
 
