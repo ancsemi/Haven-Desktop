@@ -75,6 +75,7 @@ module.exports = {
   'screenPicker.systemUnavailable': 'System audio unavailable',
   'screenPicker.applicationUnavailable': 'Application audio unavailable',
   'screenPicker.audioUnavailable': 'Share audio is unavailable: the native audio module is not available, so this share will have no audio. Video will still be shared.',
+  'screenPicker.audioModuleOutdated': 'Apps are playing audio, but Haven Desktop\'s audio module is out of date, so they cannot be listed. Run Setup.bat again (or npm run build:native:local), then restart Haven Desktop.',
   'screenPicker.videoEncoder': 'Video Encoder',
   'screenPicker.hardwareH264': 'H.264, prefer hardware (recommended)',
   'screenPicker.automaticEncoder': 'Automatic (browser default)',

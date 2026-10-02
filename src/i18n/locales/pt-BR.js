@@ -75,6 +75,7 @@ module.exports = {
   'screenPicker.systemUnavailable': 'Áudio do sistema indisponível',
   'screenPicker.applicationUnavailable': 'Áudio de aplicativos indisponível',
   'screenPicker.audioUnavailable': 'O áudio do compartilhamento está indisponível: o módulo nativo de áudio não está disponível, então este compartilhamento ficará sem áudio. O vídeo ainda será compartilhado.',
+  'screenPicker.audioModuleOutdated': 'Há aplicativos reproduzindo áudio, mas o módulo de áudio do Haven Desktop está desatualizado, então eles não podem ser listados. Execute o Setup.bat novamente (ou npm run build:native:local) e reinicie o Haven Desktop.',
   'screenPicker.videoEncoder': 'Codificador de vídeo',
   'screenPicker.hardwareH264': 'H.264, preferir hardware (recomendado)',
   'screenPicker.automaticEncoder': 'Automático (padrão do navegador)',

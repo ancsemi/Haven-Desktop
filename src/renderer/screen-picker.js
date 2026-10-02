@@ -211,7 +211,9 @@ picker.onData(data => {
   // leaving two bare "unavailable" labels.
   const shareAudioUnavailable = audioCapabilities.system !== true &&
     audioCapabilities.application !== true;
-  setText('audio-note', shareAudioUnavailable ? copy.audioUnavailable : '');
+  setText('audio-note', shareAudioUnavailable
+    ? copy.audioUnavailable
+    : (audioCapabilities.moduleOutdated === true ? copy.audioModuleOutdated : ''));
 
   let submitted = false;
   const submit = cancelled => {

@@ -2487,7 +2487,7 @@ function getScreenPickerCopy() {
   const keys = [
     'title', 'subtitle', 'portalSubtitle', 'systemPortal', 'screens', 'windows',
     'audio', 'noAudio', 'systemAudio', 'applicationAudio', 'noApplications',
-    'systemUnavailable', 'applicationUnavailable', 'audioUnavailable', 'videoEncoder', 'hardwareH264',
+    'systemUnavailable', 'applicationUnavailable', 'audioUnavailable', 'audioModuleOutdated', 'videoEncoder', 'hardwareH264',
     'automaticEncoder', 'unavailable', 'hardwareEncodingAvailable',
     'hardwareEncodingUnavailable', 'h265Available',
     'h265Unavailable', 'silent', 'silentDescription', 'noPreview', 'cancel',
@@ -2768,11 +2768,20 @@ function registerScreenShareHandler() {
 
       // Audio-producing applications (native addon)
       let audioApps = [];
+      // An audio module compiled before per-app identities existed (a copy run
+      // from source that was not rebuilt after updating) lists apps without
+      // one. Those cannot be captured safely, so they are left out, but the
+      // picker says why instead of claiming nothing is playing.
+      let audioModuleOutdated = false;
       try {
-        audioApps = audioCapture.getAudioApplications().filter(app =>
-          Number.isSafeInteger(app?.pid) && app.pid > 0 && app.pid !== process.pid &&
-          typeof app.identity === 'string' && app.identity.length > 0
+        const listed = audioCapture.getAudioApplications().filter(app =>
+          Number.isSafeInteger(app?.pid) && app.pid > 0 && app.pid !== process.pid
         );
+        audioApps = listed.filter(app => typeof app.identity === 'string' && app.identity.length > 0);
+        if (listed.length > 0 && audioApps.length === 0) {
+          audioModuleOutdated = true;
+          console.warn('[ScreenShare] the native audio module is out of date (no app identities); rebuild it with Setup.bat or npm run build:native:local');
+        }
       }
       catch (err) { console.warn('[ScreenShare] audio app enumeration failed:', err.message); }
 
@@ -2784,6 +2793,7 @@ function registerScreenShareHandler() {
         systemNative: nativeSystemAudio,
         system: nativeSystemAudio,
         nativeAvailable: nativeAudioAvailable,
+        moduleOutdated: audioModuleOutdated,
       };
 
       const sourceData = sources.map(s => ({
