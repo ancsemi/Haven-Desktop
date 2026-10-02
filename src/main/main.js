@@ -1106,6 +1106,65 @@ app.on('before-quit', () => {
 // Window Factories
 // ═══════════════════════════════════════════════════════════
 
+// ── Taskbar icon for a copy run from source (Windows) ────
+// A copy run from source is electron.exe, and Windows 11 draws a combined
+// taskbar button from the program's own icon (Electron's logo) unless the
+// window names a relaunch icon. The app id alone did not change that. Build a
+// Haven .ico once from icon.png into userData and attach it, with a relaunch
+// command, to each window. Installed copies already carry the icon in their
+// exe, so they are left alone.
+let devTaskbarIcon = null;
+function devTaskbarIconPath() {
+  if (devTaskbarIcon !== null) return devTaskbarIcon;
+  devTaskbarIcon = '';
+  try {
+    const base = nativeImage.createFromPath(ICON_PATH);
+    if (base.isEmpty()) return devTaskbarIcon;
+    // An .ico of PNG images, one per size Windows asks for.
+    const sizes = [16, 24, 32, 48, 64, 128, 256];
+    const pngs = sizes.map(size => base.resize({ width: size, height: size, quality: 'best' }).toPNG());
+    const header = Buffer.alloc(6);
+    header.writeUInt16LE(0, 0);
+    header.writeUInt16LE(1, 2);
+    header.writeUInt16LE(sizes.length, 4);
+    const entries = Buffer.alloc(16 * sizes.length);
+    let offset = header.length + entries.length;
+    sizes.forEach((size, i) => {
+      const at = i * 16;
+      entries.writeUInt8(size >= 256 ? 0 : size, at);
+      entries.writeUInt8(size >= 256 ? 0 : size, at + 1);
+      entries.writeUInt16LE(1, at + 4);
+      entries.writeUInt16LE(32, at + 6);
+      entries.writeUInt32LE(pngs[i].length, at + 8);
+      entries.writeUInt32LE(offset, at + 12);
+      offset += pngs[i].length;
+    });
+    const file = path.join(app.getPath('userData'), 'haven-taskbar.ico');
+    fs.writeFileSync(file, Buffer.concat([header, entries, ...pngs]));
+    devTaskbarIcon = file;
+  } catch (err) {
+    console.warn('[Haven] could not build the taskbar icon:', err.message);
+  }
+  return devTaskbarIcon;
+}
+
+function applyDevTaskbarIcon(win) {
+  if (process.platform !== 'win32' || app.isPackaged || !win || win.isDestroyed()) return;
+  const icon = devTaskbarIconPath();
+  if (!icon) return;
+  try {
+    win.setAppDetails({
+      appId: 'com.haven.desktop',
+      appIconPath: icon,
+      appIconIndex: 0,
+      relaunchCommand: `"${process.execPath}" "${app.getAppPath()}"${IS_DEV ? ' --dev' : ''}`,
+      relaunchDisplayName: 'Haven Desktop',
+    });
+  } catch (err) {
+    console.warn('[Haven] could not set the taskbar icon:', err.message);
+  }
+}
+
 function hideWelcome() {
   welcomeWanted = false;
   if (welcomeWindow && !welcomeWindow.isDestroyed()) welcomeWindow.hide();
@@ -1134,6 +1193,7 @@ function createWelcomeWindow() {
     show: false,
   });
 
+  applyDevTaskbarIcon(welcomeWindow);
   welcomeWindow.loadFile(path.join(__dirname, '..', 'renderer', 'welcome.html'));
   welcomeWindow.once('ready-to-show', () => {
     welcomeWindow.show();
@@ -1163,6 +1223,8 @@ function createAppWindow(serverUrl) {
         sandbox: false,
       },
     });
+
+    applyDevTaskbarIcon(mainWindow);
 
     // Show a splash page in the main window itself while the active server's
     // BrowserView loads. Without this the window opens to a flat dark
