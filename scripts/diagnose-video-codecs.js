@@ -7,7 +7,7 @@ const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const { applyDisplayColorWorkarounds } = require('../src/main/color-profile');
 
-app.setPath('userData', path.join(app.getPath('temp'), 'opencode', `haven-codecs-${process.pid}`));
+app.setPath('userData', path.join(app.getPath('temp'), `haven-codecs-${process.pid}`));
 app.commandLine.appendSwitch('enable-features', 'PlatformHEVCEncoderSupport,WebRtcAllowH265Send,WebRtcAV1HWEncode');
 applyDisplayColorWorkarounds(app.commandLine, process.platform, !process.argv.includes('--native-colors'));
 app.commandLine.appendSwitch('disable-gpu-memory-buffer-video-frames');
