@@ -19,6 +19,7 @@ const Store = require('electron-store');
 const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
 const { normalizeHost, isLocalHost, certDecision } = require('./cert-trust');
+const { applyDisplayColorWorkarounds } = require('./color-profile');
 const {
   DEFAULT_LOCALE, SYSTEM_LANGUAGE, SUPPORTED_LOCALES, normalizeLocale,
   resolveLocale, translate, getLocaleMetadata,
@@ -197,10 +198,8 @@ function setLanguagePreference(preference) {
   return getI18nState();
 }
 
-// ── Force sRGB color profile when user has HDR issues (must be before app.whenReady) ──
-if (store.get('forceSDR')) {
-  app.commandLine.appendSwitch('force-color-profile', 'srgb');
-}
+// ── Display color workarounds (must be before app.whenReady) ──
+applyDisplayColorWorkarounds(app.commandLine, process.platform, store.get('forceSDR'));
 
 // ── G-Sync / VRR workaround (#35): Chromium can negotiate a tiny refresh rate
 // with an Nvidia G-Sync display and then never renegotiate back up, dropping
