@@ -1,5 +1,42 @@
 # Haven Desktop Changelog
 
+## v1.5.0
+
+### Added
+- **A new screen share picker (#57).** Sharing opens its own window that the
+  server page cannot click or control, and capture only starts from there.
+  Screens and windows scroll in their own area, and the audio and video
+  options always stay in view below them.
+- **Share one app's audio, or the whole system's (#57).** Pick an application
+  under "Audio from one application" to share just its sound (Windows 10
+  22H2 and later, and Linux with PulseAudio or PipeWire), or share all system
+  audio. The picker says plainly when sharing audio is not available.
+- **Hardware video encoding preference (#57).** Choose H.264, H.265 or AV1
+  with hardware encoding first. Viewers whose device cannot decode that
+  choice still get video.
+- **Linux: VA-API bypass (#57).** An opt-in switch for graphics cards on
+  Chromium's VA-API blocklist, in Settings, Desktop App. Off by default.
+
+### Fixed
+- **Push to talk toggle on Linux (Haven #5724).** On Wayland the toggle key
+  did nothing while Haven was focused, and holding a key flipped the mic back
+  and forth. Toggle now works from inside the window too, once per press.
+  Please try it and let us know.
+- **Washed-out colors on mixed HDR and SDR monitors (#59).** With Force SDR
+  on, Windows now uses a color profile that fixes washed-out whites without
+  turning off H.265. If you use Force SDR, please try it and let us know.
+- **Go Back to Welcome closed the app on Linux (Haven #5715).** It returns to
+  the welcome window now.
+- **Running from source:** the taskbar shows Haven's icon instead of
+  Electron's, and an out-of-date audio module says so in the share picker
+  instead of listing no apps.
+
+### Security
+- Dependency updates for brace-expansion, fast-uri, http-cache-semantics and
+  undici.
+
+---
+
 ## v1.4.40
 
 ### Changed
