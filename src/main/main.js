@@ -856,6 +856,10 @@ function _ensureUiohookStarted() {
         _uiohookDownState.add(stateKey);
         safeSend(getActiveContents(), `${binding.event}-down`);
       } else {
+        // A toggle fires once per press: holding the key a moment must not
+        // flip it again on every OS auto-repeat (Haven #5724).
+        if (_uiohookDownState.has(stateKey)) continue;
+        _uiohookDownState.add(stateKey);
         // The preload listens for voice:ptt-toggle, the same name the
         // shortcut API path sends; the bare event name went nowhere.
         safeSend(getActiveContents(), binding.event === 'voice:ptt' ? 'voice:ptt-toggle' : binding.event);

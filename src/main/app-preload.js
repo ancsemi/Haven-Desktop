@@ -1024,7 +1024,7 @@ const _cancelledAudioPreparations = new Set();
 // ─── Global voice shortcut triggers ──────────────────────
 ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
 ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
-ipcRenderer.on('voice:ptt-toggle',    () => document.getElementById('voice-mute-btn')?.click());
+ipcRenderer.on('voice:ptt-toggle',    () => _pttToggleOnce('hook'));
 
 // PTT hold mode (#184): main fires -down on key/mouse press and -up on
 // release. We unmute on press and re-mute on release iff that state
@@ -1065,6 +1065,24 @@ function _pttSetTalking(shouldTalk, via = 'key') {
   const btn = s.btn || document.getElementById('voice-mute-btn');
   if (btn) btn.click();
 }
+// Toggle mode: one press flips the mic. The global hook and the page's own
+// key handler can both see the same press (or the hook sees none at all,
+// as on Wayland), so a press within a quarter second of the last one is the
+// same press and is ignored (Haven #5724).
+let _pttLastToggle = 0;
+function _pttToggleOnce(via) {
+  const now = Date.now();
+  if (now - _pttLastToggle < 250) { console.log(`[PTT] ${via} toggle: same press as the last one, ignored`); return; }
+  _pttLastToggle = now;
+  const s = _pttState();
+  if (!s) { console.log(`[PTT] ${via} toggle: no voice state on the page yet, ignored`); return; }
+  console.log(`[PTT] ${via} toggle: muted=${s.isMuted} inVoice=${s.inVoice} via ${s.source}`);
+  if (s.app && typeof s.app._toggleMute === 'function') {
+    try { s.app._toggleMute(); return; } catch (err) { console.warn('[PTT] _toggleMute threw:', err); }
+  }
+  const btn = s.btn || document.getElementById('voice-mute-btn');
+  if (btn) btn.click();
+}
 ipcRenderer.on('voice:ptt-down', () => _pttSetTalking(true, 'hook'));
 ipcRenderer.on('voice:ptt-up',   () => _pttSetTalking(false, 'hook'));
 
@@ -1075,7 +1093,9 @@ ipcRenderer.on('voice:ptt-up',   () => _pttSetTalking(false, 'hook'));
 // the page is focused it gets the key events itself, so the same binding is
 // followed here as well. _pttSetTalking only clicks when the state has to
 // flip, so whichever path fires second is a no-op, and the two never fight.
-// Toggle mode is left to main alone: a second toggle would cancel the first.
+// Toggle mode is followed here too, through _pttToggleOnce, which drops the
+// second sighting of one press. On Wayland the global hook gets nothing while
+// Haven is focused, so without this the toggle key never worked there.
 const _PTT_DOM_KEYS = {
   Space: ' ', Up: 'ArrowUp', Down: 'ArrowDown', Left: 'ArrowLeft', Right: 'ArrowRight',
   Return: 'Enter', Escape: 'Escape', Tab: 'Tab', Backspace: 'Backspace', Delete: 'Delete',
@@ -1086,6 +1106,7 @@ const _PTT_LONE_MODS = {
   Meta: ['meta'], Cmd: ['meta'], Super: ['meta'], Alt: ['alt'], Shift: ['shift'],
 };
 let _pttDomBinding = null;
+let _pttDomToggle = false;
 let _pttDomDown = false;
 function _parsePttAccel(accel) {
   const mouse = /^Mouse(\d+)$/i.exec(accel || '');
@@ -1114,12 +1135,16 @@ function _pttDomKeyMatches(e, b, isDown) {
 }
 function _refreshPttDomBinding() {
   return ipcRenderer.invoke('shortcuts:get').then((cfg) => {
-    const hold = !cfg || cfg.pttMode !== 'toggle';
-    _pttDomBinding = (hold && cfg && cfg.ptt) ? _parsePttAccel(cfg.ptt) : null;
+    _pttDomToggle = !!cfg && cfg.pttMode === 'toggle';
+    _pttDomBinding = (cfg && cfg.ptt) ? _parsePttAccel(cfg.ptt) : null;
     if (!_pttDomBinding && _pttDomDown) { _pttDomDown = false; _pttSetTalking(false); }
   }).catch(() => { _pttDomBinding = null; });
 }
 window.addEventListener('keydown', (e) => {
+  if (_pttDomToggle) {
+    if (!e.repeat && _pttDomKeyMatches(e, _pttDomBinding, true)) _pttToggleOnce('page');
+    return;
+  }
   if (e.repeat || _pttDomDown || !_pttDomKeyMatches(e, _pttDomBinding, true)) return;
   _pttDomDown = true;
   _pttSetTalking(true);
@@ -1131,7 +1156,9 @@ window.addEventListener('keyup', (e) => {
 }, true);
 window.addEventListener('mousedown', (e) => {
   const b = _pttDomBinding;
-  if (!b || b.mouseButton == null || e.button !== b.mouseButton || _pttDomDown) return;
+  if (!b || b.mouseButton == null || e.button !== b.mouseButton) return;
+  if (_pttDomToggle) { _pttToggleOnce('page'); return; }
+  if (_pttDomDown) return;
   _pttDomDown = true;
   _pttSetTalking(true);
 }, true);
