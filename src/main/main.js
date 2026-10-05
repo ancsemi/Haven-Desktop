@@ -32,6 +32,7 @@ const {
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame } = require('./ipc-security');
+const { x11RelaunchOptions } = require('./linux-x11');
 
 function isWaylandSession(platform = process.platform, env = process.env) {
   if (platform !== 'linux') return false;
@@ -78,6 +79,7 @@ const store = new Store({
     disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
     unlimitFrameRate:  false, // disable Chromium's frame-rate cap (pairs with disableGpuVsync)
     linuxVaapiBypass:  false, // skip Chromium's VA-API driver blocklist on Linux (off by default)
+    linuxForceX11:     false, // run through X11 (XWayland) instead of native Wayland (Haven #5721)
     videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
     serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
     language: SYSTEM_LANGUAGE,
@@ -115,6 +117,19 @@ if (process.platform === 'linux') {
     );
   }
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+  // X11 mode (Haven #5721): start again with --ozone-platform=x11, since a
+  // switch set from here comes too late. See linux-x11.js.
+  const x11Relaunch = x11RelaunchOptions({
+    platform: process.platform,
+    enabled: store.get('linuxForceX11'),
+    argv: process.argv,
+    env: process.env,
+    execPath: process.execPath,
+  });
+  if (x11Relaunch) {
+    app.relaunch(x11Relaunch);
+    app.exit(0);
+  }
 }
 app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
 
@@ -3457,7 +3472,7 @@ function registerIPC() {
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
     'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
     'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
-    'disableGpuVsync', 'unlimitFrameRate', 'linuxVaapiBypass', 'videoEncoderPreference'
+    'disableGpuVsync', 'unlimitFrameRate', 'linuxVaapiBypass', 'linuxForceX11', 'videoEncoderPreference'
   ]);
   // Only Haven Desktop's own screens (welcome, splash, the error page) use
   // the generic store; they load from local files. A server page must never
@@ -3583,6 +3598,7 @@ function registerIPC() {
     disableGpuVsync:  !!store.get('disableGpuVsync'),
     unlimitFrameRate: !!store.get('unlimitFrameRate'),
     linuxVaapiBypass: !!store.get('linuxVaapiBypass'),
+    linuxForceX11:    !!store.get('linuxForceX11'),
     language:         getI18nState(),
     videoEncoderPreference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
   }));
@@ -3656,6 +3672,13 @@ function registerIPC() {
   // restart to take effect.
   ipcMain.handle('desktop:set-linux-vaapi-bypass', (_e, enabled) => {
     store.set('linuxVaapiBypass', !!enabled);
+    return { requiresRestart: true };
+  });
+
+  // Linux X11 mode (Haven #5721): a Chromium switch applied at boot, so it
+  // takes a restart.
+  ipcMain.handle('desktop:set-linux-force-x11', (_e, enabled) => {
+    store.set('linuxForceX11', !!enabled);
     return { requiresRestart: true };
   });
 

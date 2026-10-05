@@ -1803,6 +1803,7 @@ window.havenDesktop = {
     setDisableGpuVsync:  (v)  => ipcRenderer.invoke('desktop:set-disable-gpu-vsync', v),
     setUnlimitFrameRate: (v)  => ipcRenderer.invoke('desktop:set-unlimit-frame-rate', v),
     setLinuxVaapiBypass:(v)  => ipcRenderer.invoke('desktop:set-linux-vaapi-bypass', v),
+    setLinuxForceX11:   (v)  => ipcRenderer.invoke('desktop:set-linux-force-x11', v),
     setLanguage:         (v)  => ipcRenderer.invoke('i18n:set-language', v),
   },
 
