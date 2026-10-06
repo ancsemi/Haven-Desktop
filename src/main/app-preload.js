@@ -243,6 +243,7 @@ window.addEventListener('languagechange', () => {
   }
 });
 const { BoundedPcmRing, shouldDropAudioPacket } = require('./screen-share-audio');
+const { checkServer } = require('./server-check');
 const {
   normalizeVideoEncoderPreference,
   getAvailableVideoEncoderPreferences,
@@ -827,18 +828,22 @@ window.addEventListener('DOMContentLoaded', () => {
         setI18nText(connectBtn, 'serverPicker.connecting');
 
         try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 8000);
-          const res = await fetch(url + '/api/health', { signal: controller.signal }).catch(() => null);
-          clearTimeout(timeout);
+          // The same check as the Join screen, so a new server's own
+          // certificate is asked about instead of refused (#62).
+          const check = await checkServer(url, {
+            fetch: (...args) => fetch(...args),
+            begin: (u) => ipcRenderer.invoke('server-check:begin', u),
+            questionPending: (u) => ipcRenderer.invoke('server-check:question-pending', u),
+            waitForTrust: (u) => ipcRenderer.invoke('server-check:wait-for-trust', u),
+          });
 
-          if (!res || !res.ok) {
+          if (!check.ok) {
             setI18nText(errorEl, 'serverPicker.error.unreachable');
             errorEl.style.display = 'block';
             return;
           }
 
-          ipcRenderer.send('nav:change-primary-server', url);
+          ipcRenderer.send('nav:change-primary-server', check.url);
         } catch {
           setI18nText(errorEl, 'serverPicker.error.connectionFailed');
           errorEl.style.display = 'block';

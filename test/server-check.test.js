@@ -192,7 +192,11 @@ test('main only lets app screens name a server to check, and isServerHost reads 
   const main = read('src', 'main', 'main.js');
   assert.match(main, /require\('\.\/server-check'\)/);
   assert.match(main, /function isServerHost\(host\) \{\r?\n\s+if \(_serverChecks\.has\(host\)\) return true;/);
-  assert.match(main, /const serverCheckAllowed = \(e\) => isLocalScreenFrame\(e\.sender, e\.senderFrame\)/);
+  const gate = main.slice(main.indexOf('const serverCheckAllowed'), main.indexOf("ipcMain.handle('server-check:begin'"));
+  assert.match(gate, /isLocalScreenFrame\(e\.sender, e\.senderFrame\) && !getServerUrlForContents\(e\.sender\)/);
+  // The picker: only the active server's own top frame, nothing looser.
+  assert.match(gate, /getTrustedServerUrlForFrame\(e\.sender, e\.senderFrame, \{ active: true \}\)/);
+  assert.doesNotMatch(gate, /\|\|\s*!!getServerUrlForContents/);
   for (const channel of ['server-check:begin', 'server-check:question-pending', 'server-check:wait-for-trust']) {
     const at = main.indexOf(`ipcMain.handle('${channel}'`);
     assert.ok(at > 0, channel);
@@ -211,4 +215,15 @@ test('the Join screen checks through the preload, not a bare fetch', () => {
   const preload = read('src', 'main', 'preload.js');
   assert.match(preload, /ipcRenderer\.invoke\('server-check:begin', u\)/);
   assert.match(preload, /ipcRenderer\.invoke\('server-check:wait-for-trust', u\)/);
+});
+
+test('the server picker uses the same check and opens the address that answered', () => {
+  const preload = read('src', 'main', 'app-preload.js');
+  assert.match(preload, /require\('\.\/server-check'\)/);
+  const at = preload.indexOf("connectBtn.addEventListener('click'");
+  const picker = preload.slice(at, preload.indexOf('async function loadRecentServers', at));
+  assert.match(picker, /await checkServer\(url, \{/);
+  assert.match(picker, /ipcRenderer\.invoke\('server-check:begin', u\)/);
+  assert.match(picker, /ipcRenderer\.send\('nav:change-primary-server', check\.url\)/);
+  assert.doesNotMatch(picker, /fetch\(url \+ '\/api\/health'/);
 });

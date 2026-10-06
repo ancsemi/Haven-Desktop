@@ -3794,7 +3794,12 @@ function registerIPC() {
   // ── Checking a new server (#62) ──────────────────────
   // Only the app's own screens may say which server they are checking, so a
   // server page cannot make the app ask about some other host's certificate.
-  const serverCheckAllowed = (e) => isLocalScreenFrame(e.sender, e.senderFrame) && !getServerUrlForContents(e.sender);
+  // The one exception is the Switch Server picker, which lives on the active
+  // server's login page: its own top frame, which can already move the app
+  // to any server through nav:change-primary-server.
+  const serverCheckAllowed = (e) =>
+    (isLocalScreenFrame(e.sender, e.senderFrame) && !getServerUrlForContents(e.sender)) ||
+    !!getTrustedServerUrlForFrame(e.sender, e.senderFrame, { active: true });
   ipcMain.handle('server-check:begin', (e, url) => serverCheckAllowed(e) && _serverChecks.add(url));
   ipcMain.handle('server-check:question-pending', (e, url) => serverCheckAllowed(e) && certQuestionPending(url));
   ipcMain.handle('server-check:wait-for-trust', async (e, url) => {
