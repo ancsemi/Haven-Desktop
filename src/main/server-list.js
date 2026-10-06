@@ -7,7 +7,7 @@
 // from another, a rename or a new order stays where it was made. The app
 // keeps the shared copy here and every page reconciles with it:
 //
-//   history  [{ url, name, lastConnected, customName?, icon?, customIcon? }]
+//   history  [{ url, name, lastConnected, customName?, icon?, customIcon?, editedAt? }]
 //   removed  [url]  servers the user removed; pages may not add them back
 //   order    [url]  the user's order for the server rail
 //
@@ -170,6 +170,8 @@ function markConnected(state, rawUrl, now = Date.now()) {
  *  opts.custom === true: a name the user chose; it sticks.
  *  opts.custom === false: the user went back to the server's own name.
  *  no opts.custom: the name the server reports, ignored over a user's name.
+ *  A user edit carries opts.editedAt (when it was made) so pages can tell
+ *  which of two edits is newer; it defaults to now.
  *  Returns true when something changed. */
 function updateServerName(state, rawUrl, rawName, opts = {}) {
   const url = normalizeServerUrl(rawUrl);
@@ -185,6 +187,8 @@ function updateServerName(state, rawUrl, rawName, opts = {}) {
     entry.name = name;
     if (custom) entry.customName = true;
     else delete entry.customName;
+    const at = Number(opts.editedAt);
+    entry.editedAt = Number.isFinite(at) && at > 0 ? at : Date.now();
     if (Object.prototype.hasOwnProperty.call(opts, 'icon')) {
       const icon = typeof opts.icon === 'string' ? opts.icon.trim() : '';
       if (icon && icon.length <= ICON_MAX && /^https?:\/\//i.test(icon)) {
@@ -230,8 +234,9 @@ function setOrder(state, rawUrls) {
   return state.order.join('\n') !== before;
 }
 
-/** What a page reads: the servers in the user's order, the removed ones and
- *  the order itself. */
+/** What a page reads: the servers in the user's order, the removed ones,
+ *  the order itself and whether the user has set one yet (until then the
+ *  first page to ask keeps its own order and sends it). */
 function serverListView(state) {
   const byUrl = new Map(state.history.map(h => [h.url, h]));
   const order = orderedUrls(state);
@@ -239,6 +244,7 @@ function serverListView(state) {
     servers: order.map(u => ({ ...byUrl.get(u) })),
     removed: [...state.removed],
     order,
+    hasOrder: state.order.length > 0,
   };
 }
 

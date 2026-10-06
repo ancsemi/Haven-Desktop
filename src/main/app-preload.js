@@ -1793,7 +1793,7 @@ window.havenDesktop = {
 
   /** The shared server list every server page shows:
    *  { servers: [{ url, name, customName?, icon?, customIcon? }] in the
-   *  user's order, removed: [url], order: [url] }. */
+   *  user's order, removed: [url], order: [url], hasOrder }. */
   getServerList: () => ipcRenderer.invoke('server-list:get'),
   /** Save the user's order. Servers the page leaves out keep their places. */
   setServerOrder: (urls) => ipcRenderer.invoke('server-list:set-order', Array.isArray(urls) ? urls : []),

@@ -71,13 +71,15 @@ test('a name the user chose sticks over the name the server reports', () => {
   const s = state([{ url: 'https://a.example.com', name: 'https://a.example.com' }]);
   assert.equal(list.updateServerName(s, 'https://a.example.com', 'LIT'), true);
   assert.equal(s.history[0].name, 'LIT');
-  assert.equal(list.updateServerName(s, 'https://a.example.com', 'Red Earth', { custom: true }), true);
+  assert.equal(list.updateServerName(s, 'https://a.example.com', 'Red Earth', { custom: true, editedAt: 77 }), true);
   assert.equal(s.history[0].customName, true);
+  assert.equal(s.history[0].editedAt, 77, 'the page keeps the time of its edit');
   assert.equal(list.updateServerName(s, 'https://a.example.com', 'LIT'), false);
   assert.equal(s.history[0].name, 'Red Earth');
   // Going back to the server's own name lets the server rename it again.
   assert.equal(list.updateServerName(s, 'https://a.example.com', 'LIT', { custom: false }), true);
   assert.equal(s.history[0].customName, undefined);
+  assert.ok(s.history[0].editedAt > 77, 'going back is an edit too, so it wins over the older one');
   assert.equal(list.updateServerName(s, 'https://a.example.com', 'LIT 2'), true);
   assert.equal(s.history[0].name, 'LIT 2');
   assert.equal(list.updateServerName(s, 'https://missing.example.com', 'X'), false);
@@ -97,11 +99,13 @@ test('a user icon is kept with a user edit and only as a web address', () => {
 
 test('order: a page moves only the servers it shows, the rest keep their places', () => {
   const s = state(['a', 'b', 'c', 'd'].map(x => ({ url: `https://${x}.example.com`, name: x })));
+  assert.equal(list.serverListView(s).hasOrder, false);
   // Page on b does not list itself; it moves d before a.
   assert.equal(list.setOrder(s, ['https://d.example.com', 'https://a.example.com', 'https://c.example.com']), true);
   assert.deepEqual(list.orderedUrls(s), ['https://d.example.com', 'https://b.example.com', 'https://a.example.com', 'https://c.example.com']);
   assert.equal(list.setOrder(s, ['https://d.example.com', 'https://a.example.com', 'https://c.example.com']), false);
   const view = list.serverListView(s);
+  assert.equal(view.hasOrder, true);
   assert.deepEqual(view.servers.map(h => h.name), ['d', 'b', 'a', 'c']);
   assert.deepEqual(view.order, list.orderedUrls(s));
   // New servers go after the ordered ones; removed ones leave the order.
