@@ -33,7 +33,11 @@ const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame } = require('./ipc-security');
 const { x11RelaunchOptions } = require('./linux-x11');
-const { normalizeServerUrl, isValidServerHost, sanitizeServerHistory } = require('./server-list');
+const {
+  normalizeServerUrl, sanitizeServerHistory,
+  readServerList, writeServerList, addServer, removeServer, markConnected,
+  updateServerName, setOrder, serverListView,
+} = require('./server-list');
 
 function isWaylandSession(platform = process.platform, env = process.env) {
   if (platform !== 'linux') return false;
@@ -83,6 +87,8 @@ const store = new Store({
     linuxForceX11:     false, // run through X11 (XWayland) instead of native Wayland (Haven #5721)
     videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
     serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
+    serverListRemoved: [],    // servers the user removed; pages may not add them back
+    serverListOrder:   [],    // the user's server rail order, shared by every server
     language: SYSTEM_LANGUAGE,
     languagePreferenceSet: false,
   },
@@ -1468,16 +1474,26 @@ function switchToServer(serverUrl) {
     mainWindow.setTitle(t && !/^Loading Haven/i.test(t) ? t : 'Haven');
   } catch {}
 
-  // Save to server history
-  const _hist = store.get('serverHistory') || [];
-  const _hIdx = _hist.findIndex(h => h.url === url);
-  if (_hIdx >= 0) {
-    _hist[_hIdx].lastConnected = Date.now();
-  } else {
-    _hist.push({ url, name: url, lastConnected: Date.now() });
-  }
-  while (_hist.length > 20) _hist.shift();
-  store.set('serverHistory', _hist);
+  // Save to server history. Opening a server also lifts an earlier removal.
+  const _list = readServerList(store);
+  markConnected(_list, url);
+  writeServerList(store, _list);
+}
+
+// The user removed a server from the list: stop its hidden background view
+// too, so its unread badge cannot bring it back. The open server and the
+// one the app connects to first stay.
+function closeBackgroundServerView(serverUrl) {
+  const url = normalizeServerUrl(serverUrl);
+  if (!url || url === activeServerUrl || url === primaryServerUrl) return;
+  const view = serverViews.get(url);
+  if (!view) return;
+  try { mainWindow?.removeBrowserView(view); } catch (e) { console.warn('[Haven Desktop] Could not detach removed server view:', e.message); }
+  try { view.webContents.destroy(); } catch (e) { console.warn('[Haven Desktop] Could not close removed server view:', e.message); }
+  serverViews.delete(url);
+  serverBadgeState.delete(url);
+  knownServerUrlsByView.delete(url);
+  recomputeTaskbarBadge();
 }
 
 // Pre-create a BrowserView for a server WITHOUT making it the visible/active
@@ -3730,11 +3746,11 @@ function registerIPC() {
   // time the renderer asks for the list.
   ipcMain.handle('server-history:get', () => {
     const raw = store.get('serverHistory') || [];
-    const cleaned = sanitizeServerHistory(raw);
-    if (cleaned.length !== raw.length || cleaned.some((c, i) => c.url !== raw[i]?.url)) {
-      store.set('serverHistory', cleaned);
+    const list = readServerList(store);
+    if (list.history.length !== raw.length || list.history.some((c, i) => c.url !== raw[i]?.url)) {
+      store.set('serverHistory', list.history);
     }
-    return cleaned;
+    return list.history;
   });
   // Synchronous variant for preload bootstrap. The renderer can't wait on a
   // promise before the page-scripts run, but it CAN do a sendSync at preload
@@ -3742,37 +3758,52 @@ function registerIPC() {
   // first-join to a brand-new server before any network calls happen.
   ipcMain.on('server-history:get-sync', (e) => {
     try {
-      const raw = store.get('serverHistory') || [];
-      e.returnValue = sanitizeServerHistory(raw);
-    } catch {
+      e.returnValue = readServerList(store).history;
+    } catch (err) {
+      console.warn('[Haven Desktop] Could not read server history:', err.message);
       e.returnValue = [];
     }
   });
-  ipcMain.handle('server-history:add', (_e, url, name) => {
-    const normalizedUrl = normalizeServerUrl(url);
-    if (!normalizedUrl || !isValidServerHost(normalizedUrl)) return;
-    const history = sanitizeServerHistory(store.get('serverHistory') || []);
-    if (history.find(h => h.url === normalizedUrl)) {
-      store.set('serverHistory', history);
-      return;
-    }
-    history.push({ url: normalizedUrl, name: name || normalizedUrl, lastConnected: 0 });
-    while (history.length > 20) history.shift();
-    store.set('serverHistory', history);
+  // A page adds a server. Servers the user removed are refused unless the
+  // third argument says the user added it on purpose ({ userInitiated }).
+  ipcMain.handle('server-history:add', (_e, url, name, opts) => {
+    const list = readServerList(store);
+    const result = addServer(list, url, name, { userInitiated: !!(opts && opts.userInitiated === true) });
+    if (result !== 'invalid') writeServerList(store, list);
+    return result;
   });
   ipcMain.handle('server-history:remove', (_e, url) => {
-    const normalizedUrl = normalizeServerUrl(url);
-    const history = sanitizeServerHistory(store.get('serverHistory') || [])
-      .filter(h => h.url !== normalizedUrl);
-    store.set('serverHistory', history);
-    return history;
+    const list = readServerList(store);
+    removeServer(list, url);
+    writeServerList(store, list);
+    closeBackgroundServerView(url);
+    return list.history;
   });
-  ipcMain.handle('server-history:update-name', (_e, url, name) => {
-    const normalizedUrl = normalizeServerUrl(url);
-    const history = sanitizeServerHistory(store.get('serverHistory') || []);
-    const entry = history.find(h => h.url === normalizedUrl);
-    if (entry && name) entry.name = name;
-    store.set('serverHistory', history);
+  // opts.custom marks a name the user chose (true) or a return to the
+  // server's own name (false); without it the name is the server's own and
+  // never replaces one the user chose.
+  ipcMain.handle('server-history:update-name', (_e, url, name, opts) => {
+    const list = readServerList(store);
+    const changed = updateServerName(list, url, name, (opts && typeof opts === 'object') ? opts : {});
+    if (changed) writeServerList(store, list);
+    return changed;
+  });
+  // The shared server list: servers in the user's order, removed servers and
+  // the order, so every server page shows the same list.
+  ipcMain.handle('server-list:get', () => serverListView(readServerList(store)));
+  ipcMain.on('server-list:get-sync', (e) => {
+    try {
+      e.returnValue = serverListView(readServerList(store));
+    } catch (err) {
+      console.warn('[Haven Desktop] Could not read the server list:', err.message);
+      e.returnValue = null;
+    }
+  });
+  ipcMain.handle('server-list:set-order', (_e, urls) => {
+    const list = readServerList(store);
+    const changed = setOrder(list, urls);
+    if (changed) writeServerList(store, list);
+    return changed;
   });
 
   // ── External links ────────────────────────────────────
