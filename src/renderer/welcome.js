@@ -272,28 +272,24 @@
 
     // Strip to origin (protocol + host + port) — prevents double-path issues
     // e.g. "https://174.49.177.46:3000/app" → "https://174.49.177.46:3000"
-    const serverUrl = parsed.origin;
+    let serverUrl = parsed.origin;
     urlInput.value = serverUrl;
 
     connectBtn.disabled    = true;
     setTranslatedText(connectBtn, 'welcome.connecting');
 
     try {
-      // Quick health check — try to reach the server
-      const controller = new AbortController();
-      const timeout    = setTimeout(() => controller.abort(), 8000);
+      // Quick health check, asking about the server's own certificate when
+      // it has one. An http:// address may answer on https:// instead.
+      const check = await window.haven.servers.check(serverUrl);
 
-      const res = await fetch(serverUrl + '/api/health', {
-        signal: controller.signal,
-      }).catch(() => null);
-
-      clearTimeout(timeout);
-
-      if (!res || !res.ok) {
+      if (!check.ok) {
         setTranslatedText(joinError, 'welcome.error.serverUnreachable');
         joinError.style.display = 'block';
         return;
       }
+      serverUrl = check.url;
+      urlInput.value = serverUrl;
 
       const remember = $('#chk-remember').checked;
 

@@ -5,6 +5,7 @@
 
 const { ipcRenderer } = require('electron');
 const { createTranslator } = require('../i18n');
+const { checkServer } = require('./server-check');
 
 let i18nState = ipcRenderer.sendSync('i18n:get-state-sync');
 let translate = createTranslator(i18nState.locale);
@@ -77,6 +78,14 @@ window.haven = {
   servers: {
     history: ()    => ipcRenderer.invoke('server-history:get'),
     remove:  (url) => ipcRenderer.invoke('server-history:remove', url),
+    // Reach a server before joining it, asking about its certificate when
+    // it has its own (#62). Resolves to { ok, url }.
+    check: (url) => checkServer(url, {
+      fetch: (...args) => window.fetch(...args),
+      begin: (u) => ipcRenderer.invoke('server-check:begin', u),
+      questionPending: (u) => ipcRenderer.invoke('server-check:question-pending', u),
+      waitForTrust: (u) => ipcRenderer.invoke('server-check:wait-for-trust', u),
+    }).then(({ ok, url: reached }) => ({ ok, url: reached })),
   },
 
   // ── Navigation ─────────────────────────────────────────

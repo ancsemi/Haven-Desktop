@@ -37,6 +37,7 @@ const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 // start failed and this copy opens normally instead (Haven #5741).
 let exitingForX11 = false;
 let x11StartFailed = false;
+const { createServerCheckHosts, isLocalScreenFrame } = require('./server-check');
 const {
   normalizeServerUrl, sanitizeServerHistory,
   readServerList, writeServerList, addServer, removeServer, markConnected,
@@ -446,6 +447,8 @@ if (exitingForX11) {
 // ═══════════════════════════════════════════════════════════
 
 const _certQuestions = new Map(); // "host|fingerprint" -> Promise<boolean>
+// Hosts the Join screen or server picker is checking right now (#62).
+const _serverChecks = createServerCheckHosts();
 
 // Chromium caches the verify proc's answers, and a question left open for
 // about 30 seconds times the connection out and leaves a refusal in that
@@ -480,6 +483,7 @@ function rememberCertificate(host, fingerprint) {
  *  a picture in a message from some other host with its own certificate is
  *  refused quietly, the way a browser would. */
 function isServerHost(host) {
+  if (_serverChecks.has(host)) return true;
   const urls = [primaryServerUrl, activeServerUrl, ...serverViews.keys(), store.get('userPrefs.serverUrl'),
     ...(store.get('serverHistory') || []).map(e => e && e.url)];
   return urls.some((u) => {
@@ -487,12 +491,17 @@ function isServerHost(host) {
   });
 }
 
+/** The open question about the certificate of url's host, or null. */
+function pendingCertAnswer(url) {
+  let host = '';
+  try { host = normalizeHost(new URL(url).hostname); } catch { return null; }
+  for (const [key, answer] of _certQuestions) if (key.startsWith(`${host}|`)) return answer;
+  return null;
+}
+
 /** True while the user is being asked about the certificate of url's host. */
 function certQuestionPending(url) {
-  let host = '';
-  try { host = normalizeHost(new URL(url).hostname); } catch { return false; }
-  for (const key of _certQuestions.keys()) if (key.startsWith(`${host}|`)) return true;
-  return false;
+  return !!pendingCertAnswer(url);
 }
 
 function askToTrustCertificate(host, certificate, changed) {
@@ -519,6 +528,7 @@ function askToTrustCertificate(host, certificate, changed) {
     .then(({ response }) => {
       if (response !== 1) return false;
       rememberCertificate(host, fingerprint);
+      _serverChecks.markTrusted(host);
       // A slow answer can outlast the connection, which then gave up and
       // showed the error page; try that server again now.
       setTimeout(() => retryAfterTrust(host), 500);
@@ -3779,6 +3789,19 @@ function registerIPC() {
     if (mainWindow && typeof serverUrl === 'string' && /^https?:\/\//i.test(serverUrl)) {
       switchToServer(normalizeServerUrl(serverUrl));
     }
+  });
+
+  // ── Checking a new server (#62) ──────────────────────
+  // Only the app's own screens may say which server they are checking, so a
+  // server page cannot make the app ask about some other host's certificate.
+  const serverCheckAllowed = (e) => isLocalScreenFrame(e.sender, e.senderFrame) && !getServerUrlForContents(e.sender);
+  ipcMain.handle('server-check:begin', (e, url) => serverCheckAllowed(e) && _serverChecks.add(url));
+  ipcMain.handle('server-check:question-pending', (e, url) => serverCheckAllowed(e) && certQuestionPending(url));
+  ipcMain.handle('server-check:wait-for-trust', async (e, url) => {
+    if (!serverCheckAllowed(e)) return false;
+    const answer = pendingCertAnswer(url);
+    if (answer) await answer;
+    return _serverChecks.trustedDuringCheck(url);
   });
 
   // ── Change Primary Server (from login page server picker) ──
