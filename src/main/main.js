@@ -32,7 +32,11 @@ const {
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame } = require('./ipc-security');
-const { x11RelaunchOptions } = require('./linux-x11');
+const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
+// Set while this copy quits to make way for its X11 copy, and when an X11
+// start failed and this copy opens normally instead (Haven #5741).
+let exitingForX11 = false;
+let x11StartFailed = false;
 const {
   normalizeServerUrl, sanitizeServerHistory,
   readServerList, writeServerList, addServer, removeServer, markConnected,
@@ -124,18 +128,33 @@ if (process.platform === 'linux') {
     );
   }
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
-  // X11 mode (Haven #5721): start again with --ozone-platform=x11, since a
-  // switch set from here comes too late. See linux-x11.js.
-  const x11Relaunch = x11RelaunchOptions({
+  // X11 mode (Haven #5721, #5741): start an X11 copy and quit, since a switch
+  // set from here comes too late. See linux-x11.js.
+  const x11Plan = x11LaunchPlan({
     platform: process.platform,
     enabled: store.get('linuxForceX11'),
     argv: process.argv,
     env: process.env,
     execPath: process.execPath,
+    pending: store.get('linuxX11Pending'),
   });
-  if (x11Relaunch) {
-    app.relaunch(x11Relaunch);
-    app.exit(0);
+  if (x11Plan.action === 'give-up') {
+    // The last X11 start never came up: open normally and say so once ready.
+    store.set('linuxForceX11', false);
+    store.delete('linuxX11Pending');
+    x11StartFailed = true;
+  } else if (x11Plan.action === 'start-x11') {
+    store.set('linuxX11Pending', Date.now());
+    try {
+      require('child_process').spawn(x11Plan.command, x11Plan.args, { detached: true, stdio: 'ignore' }).unref();
+      exitingForX11 = true;
+      app.exit(0);
+    } catch (err) {
+      console.warn('[X11] could not start in X11 mode, opening normally:', err.message);
+      store.set('linuxForceX11', false);
+      store.delete('linuxX11Pending');
+      x11StartFailed = true;
+    }
   }
 }
 app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
@@ -367,8 +386,11 @@ function buildServerAppUrl(serverUrl) {
 }
 
 // ── Single-Instance Lock ──────────────────────────────────
-const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) {
+// A copy quitting for its X11 copy must not take the lock that copy needs.
+const gotLock = exitingForX11 ? false : app.requestSingleInstanceLock();
+if (exitingForX11) {
+  // Quitting; nothing else to set up.
+} else if (!gotLock) {
   // The lock can fail transiently when the previous instance hasn't fully
   // released its file handles yet (Windows error 32 / sharing violation).
   // If this is the first attempt, wait 1.5 s for the old process to finish
@@ -378,7 +400,19 @@ if (!gotLock) {
   const isRetry = process.argv.includes('--relaunch-retry');
   if (!isRetry) {
     setTimeout(() => {
-      app.relaunch({ args: process.argv.slice(1).concat(['--relaunch-retry']) });
+      // An AppImage starts again from the .AppImage file: app.relaunch()
+      // can lose the copy when the AppImage's mount goes away (#5741).
+      const args = process.argv.slice(1).concat(['--relaunch-retry']);
+      if (process.env.APPIMAGE) {
+        try {
+          require('child_process').spawn(process.env.APPIMAGE, args, { detached: true, stdio: 'ignore' }).unref();
+        } catch (err) {
+          console.warn('[Lock] could not start again from the AppImage:', err.message);
+          app.relaunch({ args });
+        }
+      } else {
+        app.relaunch({ args });
+      }
       app.exit(0);
     }, 1500);
   } else {
@@ -388,7 +422,9 @@ if (!gotLock) {
 } else {
   app.on('second-instance', () => {
     const win = mainWindow || welcomeWindow;
-    if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+    // show(): a window closed to the tray is hidden, and focus() alone
+    // leaves it hidden, so launching Haven again looked like nothing happened.
+    if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
   });
 }
 
@@ -547,7 +583,22 @@ app.on('ready', () => {
 // ═══════════════════════════════════════════════════════════
 
 app.whenReady().then(async () => {
+  // Quitting for the X11 copy (Haven #5741): set nothing up.
+  if (exitingForX11) return;
   refreshLocale();
+  // The X11 copy is up. Still running a few seconds later means the start
+  // worked, so the next launch tries X11 again rather than giving up.
+  if (isX11Copy(process.argv) && store.get('linuxX11Pending')) {
+    setTimeout(() => store.delete('linuxX11Pending'), 5000);
+  }
+  if (x11StartFailed) {
+    setTimeout(() => {
+      const parent = mainWindow || welcomeWindow || undefined;
+      const opts = { type: 'info', title: t('linux.x11FailedTitle'), message: t('linux.x11FailedTitle'), detail: t('linux.x11FailedMessage') };
+      (parent ? dialog.showMessageBox(parent, opts) : dialog.showMessageBox(opts))
+        .catch(err => console.warn('[X11] could not show the notice:', err.message));
+    }, 3000);
+  }
   serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV, t });
   audioCapture  = new AudioCaptureManager(null, () => pipeWireStreamRouter?.stop(), t);
   badgeIcon     = createBadgeIcon();

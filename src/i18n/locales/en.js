@@ -208,4 +208,6 @@ module.exports = {
   'audio.unknown': 'unknown',
 
   'linux.desktopComment': 'Private self-hosted chat',
+  'linux.x11FailedTitle': 'X11 mode turned off',
+  'linux.x11FailedMessage': 'Haven Desktop could not start in X11 mode last time, so X11 mode has been turned off and Haven opened normally. You can turn it on again in Settings, Desktop App, or start Haven with --ozone-platform=x11.',
 };
