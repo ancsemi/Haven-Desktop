@@ -1,5 +1,27 @@
 # Haven Desktop Changelog
 
+## v1.6.0
+
+### Added
+- **Linux: X11 mode (Haven #5721).** A switch in Settings, Desktop App runs
+  Haven Desktop through X11 (XWayland) instead of native Wayland, for
+  windows that flicker on Wayland, which some Nvidia cards do. Haven Desktop
+  restarts itself in that mode, the same as starting it with
+  `--ozone-platform=x11`, so no terminal is needed. Off by default.
+
+### Changed
+- **One server list for every server.** The app keeps a single list that
+  every server's sidebar follows. A server you remove stays removed instead
+  of coming back from another server's copy, and removing it also closes its
+  background connection. Opening a server or adding it again brings it
+  back. The order you drag servers into and the names you give them show
+  on every server, and the newer rename wins. The list holds 100 servers
+  instead of 20, and when full it drops the one used longest ago. Needs
+  Haven 4.19.0 on the server for order and names to follow everywhere.
+- **The server picker** shows each server under the same name as the
+  sidebar (the server's own name rather than its window title), and never
+  over a name you chose.
+
 ## v1.5.0
 
 ### Added
