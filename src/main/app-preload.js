@@ -738,13 +738,18 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ── Update server name in history from public config ──
+  // ── Update server name in history from the server ──
+  // The same name the server rail shows (the health check), so the server
+  // picker and every page agree. "Haven" is the default for a server that
+  // never set one, which says less than its address. A name the user chose
+  // is kept by the main process.
   const _serverUrl = _normalizeDesktopServerUrl();
-  fetch('/api/public-config').then(r => r.json()).then(d => {
-    if (d.server_title) {
-      ipcRenderer.invoke('server-history:update-name', _serverUrl, d.server_title);
+  fetch('/api/health').then(r => r.json()).then(d => {
+    const name = typeof d?.name === 'string' ? d.name.trim() : '';
+    if (name && name !== 'Haven') {
+      ipcRenderer.invoke('server-history:update-name', _serverUrl, name);
     }
-  }).catch(() => {});
+  }).catch((err) => { console.warn('[Haven Desktop] could not read this server name', err?.message || err); });
 
   // ── Login Page: Server Picker (desktop only) ─────────────────────────
   if (document.querySelector('.auth-page')) {
