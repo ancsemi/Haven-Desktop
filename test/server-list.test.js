@@ -160,3 +160,8 @@ test('server pages get the shared list from the preload', () => {
   const main = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8');
   assert.match(main, /safeSend\(view\.webContents, 'server-list:changed'\)/);
 });
+
+test('a damaged stored server list reads as empty instead of throwing', () => {
+  const { sanitizeServerHistory } = require('../src/main/server-list');
+  for (const bad of [{ a: 1 }, 5, 'text', null, undefined]) assert.deepEqual(sanitizeServerHistory(bad), []);
+});

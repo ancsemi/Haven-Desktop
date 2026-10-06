@@ -56,7 +56,8 @@ function isValidServerHost(serverUrl) {
 function sanitizeServerHistory(list) {
   const seen = new Set();
   const out = [];
-  for (const entry of (list || [])) {
+  // A damaged settings file can hold anything here; only a list is read.
+  for (const entry of (Array.isArray(list) ? list : [])) {
     if (!entry || !entry.url) continue;
     const normalizedUrl = normalizeServerUrl(entry.url);
     if (!normalizedUrl || !isValidServerHost(normalizedUrl)) continue;
