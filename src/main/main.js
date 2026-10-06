@@ -1476,8 +1476,18 @@ function switchToServer(serverUrl) {
 
   // Save to server history. Opening a server also lifts an earlier removal.
   const _list = readServerList(store);
+  const _before = JSON.stringify(_list);
   markConnected(_list, url);
-  writeServerList(store, _list);
+  saveServerList(_list, _before);
+}
+
+// Write the shared server list and, when it changed, tell every open server
+// page so their sidebars follow without waiting for a reload.
+function saveServerList(list, before) {
+  if (JSON.stringify(list) === before) return false;
+  writeServerList(store, list);
+  for (const [, view] of serverViews) safeSend(view.webContents, 'server-list:changed');
+  return true;
 }
 
 // The user removed a server from the list: stop its hidden background view
@@ -3768,14 +3778,16 @@ function registerIPC() {
   // third argument says the user added it on purpose ({ userInitiated }).
   ipcMain.handle('server-history:add', (_e, url, name, opts) => {
     const list = readServerList(store);
+    const before = JSON.stringify(list);
     const result = addServer(list, url, name, { userInitiated: !!(opts && opts.userInitiated === true) });
-    if (result !== 'invalid') writeServerList(store, list);
+    saveServerList(list, before);
     return result;
   });
   ipcMain.handle('server-history:remove', (_e, url) => {
     const list = readServerList(store);
+    const before = JSON.stringify(list);
     removeServer(list, url);
-    writeServerList(store, list);
+    saveServerList(list, before);
     closeBackgroundServerView(url);
     return list.history;
   });
@@ -3784,9 +3796,9 @@ function registerIPC() {
   // never replaces one the user chose.
   ipcMain.handle('server-history:update-name', (_e, url, name, opts) => {
     const list = readServerList(store);
-    const changed = updateServerName(list, url, name, (opts && typeof opts === 'object') ? opts : {});
-    if (changed) writeServerList(store, list);
-    return changed;
+    const before = JSON.stringify(list);
+    updateServerName(list, url, name, (opts && typeof opts === 'object') ? opts : {});
+    return saveServerList(list, before);
   });
   // The shared server list: servers in the user's order, removed servers and
   // the order, so every server page shows the same list.
@@ -3801,9 +3813,9 @@ function registerIPC() {
   });
   ipcMain.handle('server-list:set-order', (_e, urls) => {
     const list = readServerList(store);
-    const changed = setOrder(list, urls);
-    if (changed) writeServerList(store, list);
-    return changed;
+    const before = JSON.stringify(list);
+    setOrder(list, urls);
+    return saveServerList(list, before);
   });
 
   // ── External links ────────────────────────────────────

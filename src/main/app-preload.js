@@ -1180,6 +1180,12 @@ ipcRenderer.on('server-badge-update', (_event, badgeMap) => {
   window.dispatchEvent(new CustomEvent('haven-server-badges', { detail: badgeMap }));
 });
 
+// The shared server list changed (a removal, rename, new order or server
+// on any server page), so this page's sidebar can follow.
+ipcRenderer.on('server-list:changed', () => {
+  window.dispatchEvent(new CustomEvent('haven-server-list-changed'));
+});
+
 // ─── Forward server log messages to the browser console ──
 ipcRenderer.on('server:log', (_event, msg) => {
   console.log('[Haven Server]', msg.trimEnd());

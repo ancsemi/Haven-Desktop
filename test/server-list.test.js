@@ -155,4 +155,8 @@ test('server pages get the shared list from the preload', () => {
   assert.match(preload, /addServerHistory: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:add', url, name, opts\)/);
   assert.match(preload, /updateServerName: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:update-name', url, name, opts\)/);
   assert.match(preload, /sendSync\('server-list:get-sync'\)/);
+  // A change on one page reaches the others without a reload.
+  assert.match(preload, /ipcRenderer\.on\('server-list:changed'[\s\S]{0,200}haven-server-list-changed/);
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8');
+  assert.match(main, /safeSend\(view\.webContents, 'server-list:changed'\)/);
 });
