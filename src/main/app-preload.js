@@ -1781,8 +1781,27 @@ window.havenDesktop = {
 
   /** Access the Desktop-level server history (persists across all servers) */
   getServerHistory: () => ipcRenderer.invoke('server-history:get'),
-  addServerHistory: (url, name) => ipcRenderer.invoke('server-history:add', url, name),
+  /** opts.userInitiated: the user added it (Add Server), which brings back a
+   *  server removed earlier; other adds of a removed server are refused. */
+  addServerHistory: (url, name, opts) => ipcRenderer.invoke('server-history:add', url, name, opts),
   removeServerHistory: (url) => ipcRenderer.invoke('server-history:remove', url),
+
+  /** The shared server list every server page shows:
+   *  { servers: [{ url, name, customName?, icon?, customIcon? }] in the
+   *  user's order, removed: [url], order: [url] }. */
+  getServerList: () => ipcRenderer.invoke('server-list:get'),
+  /** Save the user's order. Servers the page leaves out keep their places. */
+  setServerOrder: (urls) => ipcRenderer.invoke('server-list:set-order', Array.isArray(urls) ? urls : []),
+  /** Rename a server for every page. opts.custom true: the user's own name
+   *  (opts.icon: the user's own icon, or null); false: back to the server's
+   *  own name; left out: the server's own name, which never replaces the
+   *  user's. */
+  updateServerName: (url, name, opts) => ipcRenderer.invoke('server-history:update-name', url, name, opts),
+  /** Synchronous snapshot of the shared list at page load, or null. */
+  initialServerList: (() => {
+    try { return ipcRenderer.sendSync('server-list:get-sync') || null; }
+    catch (err) { console.warn('[Haven Desktop] could not read the server list', err); return null; }
+  })(),
 
   /** Synchronous snapshot of the cross-server history at page-load time.
    *  Lets the sidebar populate immediately on first-join to a brand-new

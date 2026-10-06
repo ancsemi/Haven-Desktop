@@ -143,3 +143,12 @@ test('main and the preloads use the shared list', () => {
   assert.match(main, /markConnected\(_list, url\)/);
   assert.doesNotMatch(main, /length > 20\) _?hist(ory)?\.shift/);
 });
+
+test('server pages get the shared list from the preload', () => {
+  const preload = fs.readFileSync(path.join(__dirname, '../src/main/app-preload.js'), 'utf8');
+  assert.match(preload, /getServerList: \(\) => ipcRenderer\.invoke\('server-list:get'\)/);
+  assert.match(preload, /setServerOrder: \(urls\) => ipcRenderer\.invoke\('server-list:set-order'/);
+  assert.match(preload, /addServerHistory: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:add', url, name, opts\)/);
+  assert.match(preload, /updateServerName: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:update-name', url, name, opts\)/);
+  assert.match(preload, /sendSync\('server-list:get-sync'\)/);
+});
