@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const list = require('../src/main/server-list');
 const gate = require('../src/main/server-list-gate');
+const fs = require('node:fs');
+const path = require('node:path');
 const { translate } = require('../src/i18n');
 
 const t = (key, values) => translate('en', key, values);
@@ -167,4 +169,28 @@ test('a dialog that fails is a no', async () => {
   const g = gate.createRequestGate({ ask: () => Promise.reject(new Error('no window')), warn: (...a) => warnings.push(a.join(' ')) });
   assert.equal(await g.request({ senderId: 1, requester: EVIL, key: 'a', text: '' }), 'declined');
   assert.equal(warnings.length, 1);
+});
+
+test('main sends every page change of the list through the question', () => {
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8').replace(/\r\n/g, '\n');
+  for (const [channel, kind] of [['server-history:add', 'add'], ['server-history:remove', 'remove'], ['server-history:update-name', 'rename']]) {
+    const at = main.indexOf(`ipcMain.handle('${channel}'`);
+    assert.ok(at > 0, channel);
+    assert.ok(main.slice(at, at + 300).includes(`requestServerListChange(e, { kind: '${kind}'`), channel);
+  }
+  // Opening a server that is not listed adds it, so pages ask first.
+  for (const channel of ['nav:switch-server', 'nav:change-primary-server']) {
+    const at = main.indexOf(`ipcMain.on('${channel}'`);
+    assert.ok(at > 0, channel);
+    assert.ok(main.slice(at, at + 400).includes("requestServerListChange(e, { kind: 'open', url: serverUrl })"), channel);
+  }
+  assert.match(main, /ipcMain\.on\('nav:open-app', \(e, serverUrl\) => \{\n\s+if \(serverListSender\(e\)\?\.local\) createAppWindow/);
+  assert.match(main, /ipcMain\.handle\('server-list:set-order', \(e, urls\) => \{\n\s+if \(!serverListSender\(e\)\) return false;/);
+  // No list function is called from main on a page's word alone.
+  assert.doesNotMatch(main, /\b(addServer|removeServer|updateServerName)\(/);
+});
+
+test('server pages learn that the app asks, so they do not ask twice', () => {
+  const preload = fs.readFileSync(path.join(__dirname, '../src/main/app-preload.js'), 'utf8');
+  assert.match(preload, /serverListGated: true,/);
 });

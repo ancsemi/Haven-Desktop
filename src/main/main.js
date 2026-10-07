@@ -40,9 +40,11 @@ let x11StartFailed = false;
 const { createServerCheckHosts, isLocalScreenFrame } = require('./server-check');
 const {
   normalizeServerUrl, sanitizeServerHistory,
-  readServerList, writeServerList, addServer, removeServer, markConnected,
-  updateServerName, setOrder, serverListView,
+  readServerList, writeServerList, markConnected, setOrder, serverListView,
 } = require('./server-list');
+const {
+  planPageRequest, applyPageRequest, promptText, createRequestGate,
+} = require('./server-list-gate');
 
 function isWaylandSession(platform = process.platform, env = process.env) {
   if (platform !== 'linux') return false;
@@ -1551,6 +1553,67 @@ function saveServerList(list, before) {
   return true;
 }
 
+// ── Server list changes asked for by a server page ──────
+// A server page may not decide alone which other servers the user has: the
+// app asks the user first, in its own dialog, naming the change and the
+// server whose page asked (rules in server-list-gate.js).
+const _serverListGate = createRequestGate({ ask: askAboutServerListChange });
+
+function askAboutServerListChange(text) {
+  const parent = [mainWindow, welcomeWindow].find(w => w && !w.isDestroyed());
+  if (parent?.isMinimized()) parent.restore();
+  const options = {
+    type: 'question',
+    title: text.title,
+    message: text.message,
+    detail: text.detail,
+    buttons: [text.cancel, text.confirm],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    checkboxLabel: text.block,
+    checkboxChecked: false,
+  };
+  return (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response, checkboxChecked }) => ({ confirmed: response === 1, block: !!checkboxChecked }));
+}
+
+/** Who sent a server list request: one of the app's own screens
+ *  ({ local: true }), the top frame of a server page ({ url, id }), or
+ *  anything else (null, refused). */
+function serverListSender(e) {
+  if (isLocalScreenFrame(e.sender, e.senderFrame) && !getServerUrlForContents(e.sender)) return { local: true };
+  const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+  return url ? { local: false, url, id: e.sender.id } : null;
+}
+
+/** Make a change to the server list for a page, asking the user when the
+ *  rules say so. Resolves to { applied, result, saved }: result is what the
+ *  list function returned, or why nothing changed ('declined', 'busy',
+ *  'blocked', 'denied'). */
+async function requestServerListChange(e, request) {
+  const sender = serverListSender(e);
+  if (!sender) return { applied: false, result: 'denied', saved: false };
+  let list = readServerList(store);
+  if (!sender.local) {
+    const plan = planPageRequest(list, request, sender.url);
+    if (plan.action === 'ignore') return { applied: false, result: plan.result, saved: false };
+    if (plan.action === 'ask') {
+      const asker = list.history.find(h => h.url === sender.url);
+      const text = promptText(plan.prompt, { name: asker?.name, url: sender.url }, t);
+      const answer = await _serverListGate.request({ senderId: sender.id, requester: sender.url, key: plan.key, text });
+      if (answer !== 'confirmed') return { applied: false, result: answer, saved: false };
+      // The list may have changed while the question was open.
+      list = readServerList(store);
+      const again = planPageRequest(list, request, sender.url);
+      if (again.action === 'ignore') return { applied: false, result: again.result, saved: false };
+    }
+  }
+  const before = JSON.stringify(list);
+  const result = applyPageRequest(list, request);
+  return { applied: true, result, saved: saveServerList(list, before) };
+}
+
 // The user removed a server from the list: stop its hidden background view
 // too, so its unread badge cannot bring it back. The open server and the
 // one the app connects to first stay.
@@ -2263,7 +2326,9 @@ function handleWindowOpen(url) {
       // Unknown external URLs (including friends' Haven servers) open in the system
       // browser — trying to auto-load them risks a failed navigation that resets the session.
       const normalizedUrl = normalizeServerUrl(url);
-      if (serverViews.has(normalizedUrl)) {
+      // Switching marks a server connected, so a removed one is not brought
+      // back this way.
+      if (serverViews.has(normalizedUrl) && readServerList(store).history.some(h => h.url === normalizedUrl)) {
         switchToServer(normalizedUrl);
         return;
       }
@@ -3783,12 +3848,17 @@ function registerIPC() {
   });
 
   // ── Navigation ────────────────────────────────────────
-  ipcMain.on('nav:open-app', (_e, serverUrl) => createAppWindow(serverUrl));
+  // Only the app's own screens open a server this way.
+  ipcMain.on('nav:open-app', (e, serverUrl) => {
+    if (serverListSender(e)?.local) createAppWindow(serverUrl);
+  });
   ipcMain.on('nav:back-to-welcome', () => resetToWelcome());
-  ipcMain.on('nav:switch-server', (_e, serverUrl) => {
-    if (mainWindow && typeof serverUrl === 'string' && /^https?:\/\//i.test(serverUrl)) {
-      switchToServer(normalizeServerUrl(serverUrl));
-    }
+  // Opening a server adds it to the list, so a page opening one that is not
+  // listed asks the user first.
+  ipcMain.on('nav:switch-server', async (e, serverUrl) => {
+    if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
+    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl });
+    if (applied && mainWindow) switchToServer(normalizeServerUrl(serverUrl));
   });
 
   // ── Checking a new server (#62) ──────────────────────
@@ -3810,8 +3880,12 @@ function registerIPC() {
   });
 
   // ── Change Primary Server (from login page server picker) ──
-  ipcMain.on('nav:change-primary-server', (_e, serverUrl) => {
+  // The picker lives in a server's own page, so a server that is not listed
+  // is asked about like any other page request.
+  ipcMain.on('nav:change-primary-server', async (e, serverUrl) => {
     if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
+    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl });
+    if (!applied || !mainWindow) return;
     try {
       const newUrl = normalizeServerUrl(serverUrl);
       for (const [u, view] of serverViews) {
@@ -3853,31 +3927,30 @@ function registerIPC() {
       e.returnValue = [];
     }
   });
-  // A page adds a server. Servers the user removed are refused unless the
-  // third argument says the user added it on purpose ({ userInitiated }).
-  ipcMain.handle('server-history:add', (_e, url, name, opts) => {
-    const list = readServerList(store);
-    const before = JSON.stringify(list);
-    const result = addServer(list, url, name, { userInitiated: !!(opts && opts.userInitiated === true) });
-    saveServerList(list, before);
-    return result;
+  // A page adds, removes or renames a server only with the user's yes in
+  // the app's own dialog (requestServerListChange); a page may report its
+  // own server's name. The answers keep their old shapes for older pages.
+  // add: opts.userInitiated is the user's own Add Server; without it nothing
+  // is added. Resolves to 'added', 'exists', 'refused', 'invalid',
+  // 'declined', 'busy' or 'blocked'.
+  ipcMain.handle('server-history:add', async (e, url, name, opts) => {
+    const { result } = await requestServerListChange(e, { kind: 'add', url, name, opts });
+    return result === 'denied' ? 'refused' : result;
   });
-  ipcMain.handle('server-history:remove', (_e, url) => {
-    const list = readServerList(store);
-    const before = JSON.stringify(list);
-    removeServer(list, url);
-    saveServerList(list, before);
-    closeBackgroundServerView(url);
-    return list.history;
+  // Resolves to the list after the request, with the server still in it
+  // when the user said no.
+  ipcMain.handle('server-history:remove', async (e, url) => {
+    const { applied } = await requestServerListChange(e, { kind: 'remove', url });
+    if (applied) closeBackgroundServerView(url);
+    return readServerList(store).history;
   });
   // opts.custom marks a name the user chose (true) or a return to the
-  // server's own name (false); without it the name is the server's own and
-  // never replaces one the user chose.
-  ipcMain.handle('server-history:update-name', (_e, url, name, opts) => {
-    const list = readServerList(store);
-    const before = JSON.stringify(list);
-    updateServerName(list, url, name, (opts && typeof opts === 'object') ? opts : {});
-    return saveServerList(list, before);
+  // server's own name (false); without it the name is the one the page's
+  // own server reports, which never replaces one the user chose. Resolves
+  // to true when the list changed.
+  ipcMain.handle('server-history:update-name', async (e, url, name, opts) => {
+    const { applied, saved } = await requestServerListChange(e, { kind: 'rename', url, name, opts });
+    return !!(applied && saved);
   });
   // The shared server list: servers in the user's order, removed servers and
   // the order, so every server page shows the same list.
@@ -3890,7 +3963,9 @@ function registerIPC() {
       e.returnValue = null;
     }
   });
-  ipcMain.handle('server-list:set-order', (_e, urls) => {
+  // A new order needs no question: it only moves servers already listed.
+  ipcMain.handle('server-list:set-order', (e, urls) => {
+    if (!serverListSender(e)) return false;
     const list = readServerList(store);
     const before = JSON.stringify(list);
     setOrder(list, urls);

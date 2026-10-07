@@ -1797,6 +1797,12 @@ window.havenDesktop = {
 
   /** Access the Desktop-level server history (persists across all servers) */
   getServerHistory: () => ipcRenderer.invoke('server-history:get'),
+  /** True: the app asks the user itself before a page adds, removes,
+   *  renames or changes the icon of a server, or opens one that is not
+   *  listed, so the page does not ask a second time. Removing resolves to
+   *  the list with the server still in it when the user said no; adding
+   *  resolves to 'declined', 'busy' or 'blocked' when nothing was added. */
+  serverListGated: true,
   /** opts.userInitiated: the user added it (Add Server), which brings back a
    *  server removed earlier; other adds of a removed server are refused. */
   addServerHistory: (url, name, opts) => ipcRenderer.invoke('server-history:add', url, name, opts),

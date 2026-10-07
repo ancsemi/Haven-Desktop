@@ -164,7 +164,7 @@ test('main and the preloads use the shared list', () => {
   const main = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8');
   assert.match(main, /ipcMain\.handle\('server-list:get'/);
   assert.match(main, /ipcMain\.handle\('server-list:set-order'/);
-  assert.match(main, /addServer\(list, url, name, \{ userInitiated/);
+  assert.match(main, /requestServerListChange\(e, \{ kind: 'add', url, name, opts \}\)/);
   assert.match(main, /markConnected\(_list, url\)/);
   assert.doesNotMatch(main, /length > 20\) _?hist(ory)?\.shift/);
 });
