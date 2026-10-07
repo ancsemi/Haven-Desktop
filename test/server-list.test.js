@@ -132,6 +132,27 @@ test('the history holds 100 servers and drops the longest unused first', () => {
   assert.deepEqual(s.removed, [], 'dropping for room is not a removal');
 });
 
+test('an order cannot add a server, it only moves the listed ones', () => {
+  const s = state(['a', 'b'].map(x => ({ url: `https://${x}.example.com`, name: x })));
+  assert.equal(list.setOrder(s, ['https://evil.example.com', 'https://b.example.com', 'https://a.example.com']), true);
+  assert.deepEqual(s.order, ['https://b.example.com', 'https://a.example.com']);
+  assert.equal(s.history.length, 2);
+  assert.equal(list.setOrder(s, ['https://evil.example.com']), false);
+  assert.ok(!s.order.includes('https://evil.example.com'));
+});
+
+test('a name typed into Add Server stays the name the user chose', () => {
+  const s = state();
+  assert.equal(list.addServer(s, 'https://a.example.com', 'Friends', { userInitiated: true, now: 42 }), 'added');
+  assert.equal(s.history[0].customName, true);
+  assert.equal(s.history[0].editedAt, 42);
+  assert.equal(list.updateServerName(s, 'https://a.example.com', 'Reported'), false, 'the reported name does not replace it');
+  assert.equal(list.addServer(s, 'https://b.example.com', 'B'), 'added');
+  assert.equal(s.history[1].customName, undefined, 'an automatic add only names it');
+  assert.equal(list.addServer(s, 'https://c.example.com', 'https://c.example.com', { userInitiated: true }), 'added');
+  assert.equal(s.history[2].customName, undefined, 'a bare address is not a chosen name');
+});
+
 test('the removed list is capped', () => {
   const s = state();
   for (let i = 0; i < 250; i++) list.removeServer(s, `https://r${i}.example.com`);

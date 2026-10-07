@@ -122,8 +122,10 @@ function cleanName(name) {
 
 /** A page asks to add a server. A server the user removed is refused unless
  *  the user added it on purpose (Add Server), which also lifts the removal.
+ *  A name the user typed into Add Server is the user's own, so the name the
+ *  server reports does not replace it.
  *  Returns 'added', 'exists', 'refused' or 'invalid'. */
-function addServer(state, rawUrl, rawName, { userInitiated = false } = {}) {
+function addServer(state, rawUrl, rawName, { userInitiated = false, now = Date.now() } = {}) {
   const url = normalizeServerUrl(rawUrl);
   if (!url || !isValidServerHost(url)) return 'invalid';
   if (state.removed.includes(url)) {
@@ -137,7 +139,12 @@ function addServer(state, rawUrl, rawName, { userInitiated = false } = {}) {
     if (name && !existing.customName && (!existing.name || existing.name === existing.url)) existing.name = name;
     return 'exists';
   }
-  state.history.push({ url, name: name || url, lastConnected: 0 });
+  const entry = { url, name: name || url, lastConnected: 0 };
+  if (userInitiated && name && name !== 'Haven' && normalizeServerUrl(name) !== url) {
+    entry.customName = true;
+    entry.editedAt = now;
+  }
+  state.history.push(entry);
   capHistory(state, url);
   return 'added';
 }
@@ -216,10 +223,11 @@ function orderedUrls(state) {
 
 /** A page sends its order. A page does not list every server (it hides
  *  itself), so only the servers it lists move, among the places they already
- *  hold; everything else keeps its place. */
+ *  hold; everything else keeps its place. Only servers already in the list
+ *  are placed: an order cannot add one. */
 function setOrder(state, rawUrls) {
-  const gone = new Set(state.removed);
-  const want = cleanUrls(rawUrls).filter(u => !gone.has(u));
+  const listed = new Set(state.history.map(h => h.url));
+  const want = cleanUrls(rawUrls).filter(u => listed.has(u));
   const base = [];
   const baseSet = new Set();
   for (const u of [...state.order, ...orderedUrls(state)]) {
@@ -229,7 +237,6 @@ function setOrder(state, rawUrls) {
   const wantSet = new Set(inBase);
   let i = 0;
   const out = base.map(u => (wantSet.has(u) ? inBase[i++] : u));
-  for (const u of want) if (!baseSet.has(u)) out.push(u);
   const before = state.order.join('\n');
   state.order = out.slice(0, HISTORY_CAP * 2);
   return state.order.join('\n') !== before;
