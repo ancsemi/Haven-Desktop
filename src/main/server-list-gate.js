@@ -216,23 +216,32 @@ function promptText(prompt, requester, t) {
  *   - one open question per page; anything else that page asks meanwhile is
  *     dropped ('busy')
  *   - one dialog at a time, with only a few pages waiting their turn
- *   - a change the user said no to is not asked about again (until the app
- *     restarts), and the user can tell the app to ignore a server's requests
+ *   - a change the user said no to is not asked about again for a minute
+ *     (so a page that repeats it on every sync does not ask each time, and
+ *     the user can still change their mind), and the user can tell the app
+ *     to ignore a server's requests until it restarts
  *
  * ask(text) shows the dialog and resolves to { confirmed, block }. request()
  * resolves to 'confirmed', 'declined', 'busy' or 'blocked'. A dialog that
  * fails counts as a no.
  */
-function createRequestGate({ ask: showQuestion, maxWaiting = 4, warn = console.warn }) {
+function createRequestGate({ ask: showQuestion, maxWaiting = 4, declineMs = 60000, now = Date.now, warn = console.warn }) {
   const asking = new Set();
-  const declined = new Set();
+  const declined = new Map(); // requester + change -> when the no runs out
   const blocked = new Set();
+  const saidNo = (id) => {
+    const until = declined.get(id);
+    if (until === undefined) return false;
+    if (until > now()) return true;
+    declined.delete(id);
+    return false;
+  };
   let waiting = 0;
   let turn = Promise.resolve();
 
   async function answerOne({ requester, key, text }) {
     if (blocked.has(requester)) return 'blocked';
-    if (declined.has(requester + '\n' + key)) return 'declined';
+    if (saidNo(requester + '\n' + key)) return 'declined';
     let answer = null;
     try {
       answer = await showQuestion(text);
@@ -242,7 +251,7 @@ function createRequestGate({ ask: showQuestion, maxWaiting = 4, warn = console.w
     }
     if (answer && answer.block) blocked.add(requester);
     if (answer && answer.confirmed === true) return 'confirmed';
-    declined.add(requester + '\n' + key);
+    declined.set(requester + '\n' + key, now() + declineMs);
     return 'declined';
   }
 
@@ -250,7 +259,7 @@ function createRequestGate({ ask: showQuestion, maxWaiting = 4, warn = console.w
     isBlocked: (requester) => blocked.has(requester),
     request({ senderId, requester, key, text }) {
       if (blocked.has(requester)) return Promise.resolve('blocked');
-      if (declined.has(requester + '\n' + key)) return Promise.resolve('declined');
+      if (saidNo(requester + '\n' + key)) return Promise.resolve('declined');
       if (asking.has(senderId) || waiting >= maxWaiting) return Promise.resolve('busy');
       asking.add(senderId);
       waiting++;

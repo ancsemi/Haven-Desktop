@@ -133,7 +133,8 @@ function deferred() {
 test('one question at a time per page, and a no is remembered', async () => {
   const answers = [];
   const shown = [];
-  const g = gate.createRequestGate({ ask: (text) => { shown.push(text); const d = deferred(); answers.push(d); return d.promise; } });
+  let clock = 1000;
+  const g = gate.createRequestGate({ now: () => clock, ask: (text) => { shown.push(text); const d = deferred(); answers.push(d); return d.promise; } });
   const first = g.request({ senderId: 1, requester: EVIL, key: 'a', text: 'A' });
   assert.equal(await g.request({ senderId: 1, requester: EVIL, key: 'b', text: 'B' }), 'busy');
   const other = g.request({ senderId: 2, requester: RED, key: 'c', text: 'C' });
@@ -147,6 +148,13 @@ test('one question at a time per page, and a no is remembered', async () => {
   assert.equal(await other, 'confirmed');
   assert.equal(await g.request({ senderId: 1, requester: EVIL, key: 'a', text: 'A' }), 'declined', 'not asked again');
   assert.equal(shown.length, 2);
+  // A minute later the user can be asked again.
+  clock += 60001;
+  const later = g.request({ senderId: 1, requester: EVIL, key: 'a', text: 'A' });
+  await new Promise(setImmediate);
+  assert.equal(shown.length, 3);
+  answers[2].resolve({ confirmed: true });
+  assert.equal(await later, 'confirmed');
 });
 
 test('the user can ignore a server, and too many waiting pages are dropped', async () => {
