@@ -1,5 +1,30 @@
 # Haven Desktop Changelog
 
+## v1.6.1
+
+### Fixed
+- **X11 mode no longer stops Haven Desktop from opening (Haven #5741).** In
+  1.6.0, turning on Run in X11 mode on Linux could make every launch quit.
+  Haven now starts its X11 copy itself, and if an X11 start ever fails, the
+  next launch turns X11 mode off, opens normally and says so. Launching
+  Haven again also brings back a window hidden in the tray.
+- **Joining a server by its public IP address works again (#62).** The
+  server's own certificate gets the usual trust question instead of being
+  refused before it was asked, from the Join screen and from the server
+  picker. An http:// address on the HTTPS port is retried as https://.
+- **A damaged saved server list no longer stops servers from opening.**
+
+### Changed
+- **Server pages can no longer change your server list without asking you.**
+  Adding, removing, renaming or changing the icon of another server, or
+  opening a server you do not have, now shows the app's own question naming
+  the change and which server asked. Reordering and a server reporting its
+  own name need no question. A request you turn down can be asked again
+  after a minute, and you can ignore a server's requests until Haven
+  restarts.
+- **A name you type when adding a server is kept as your own**, and a saved
+  order can only move servers already in your list.
+
 ## v1.6.0
 
 ### Added
