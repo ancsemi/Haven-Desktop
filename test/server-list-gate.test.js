@@ -96,6 +96,18 @@ test('opening a server that is not listed is asked about first', () => {
   assert.equal(plan.prompt.kind, 'open');
   assert.equal(gate.planPageRequest(s, { kind: 'open', url: 'https://unknown.example.com' }, EVIL).action, 'ask');
   assert.deepEqual(gate.planPageRequest(s, { kind: 'open', url: 'nonsense' }, EVIL), { action: 'ignore', result: false });
+  assert.deepEqual(gate.planPageRequest(s, { kind: 'open', url: 'https://' }, EVIL), { action: 'ignore', result: false });
+});
+
+test('a one-word host on the local network opens like any other server', () => {
+  const s = sample();
+  for (const url of ['http://nas:3000', 'https://homeserver:3000']) {
+    const plan = gate.planPageRequest(s, { kind: 'open', url }, EVIL);
+    assert.equal(plan.action, 'ask', url);
+    assert.equal(plan.prompt.url, url);
+  }
+  // Already open in the app: opens again without a question.
+  assert.deepEqual(gate.planPageRequest(s, { kind: 'open', url: 'http://nas:3000/' }, EVIL, { openUrls: ['http://nas:3000'] }), { action: 'apply' });
 });
 
 test('text a page chose cannot fake dialog lines or reverse them', () => {

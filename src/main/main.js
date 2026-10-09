@@ -1596,7 +1596,10 @@ async function requestServerListChange(e, request) {
   if (!sender) return { applied: false, result: 'denied', saved: false };
   let list = readServerList(store);
   if (!sender.local) {
-    const plan = planPageRequest(list, request, sender.url);
+    // A server already open in the app opens again without a question,
+    // even one the list cannot keep (a one-word host such as http://nas:3000).
+    const planOptions = { openUrls: [...serverViews.keys()] };
+    const plan = planPageRequest(list, request, sender.url, planOptions);
     if (plan.action === 'ignore') return { applied: false, result: plan.result, saved: false };
     if (plan.action === 'ask') {
       const asker = list.history.find(h => h.url === sender.url);
@@ -1605,7 +1608,7 @@ async function requestServerListChange(e, request) {
       if (answer !== 'confirmed') return { applied: false, result: answer, saved: false };
       // The list may have changed while the question was open.
       list = readServerList(store);
-      const again = planPageRequest(list, request, sender.url);
+      const again = planPageRequest(list, request, sender.url, planOptions);
       if (again.action === 'ignore') return { applied: false, result: again.result, saved: false };
     }
   }

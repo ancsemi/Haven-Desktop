@@ -51,6 +51,13 @@ function displayName(name, url) {
   return safeText(isAddressName(name, url) ? hostOf(url) : name);
 }
 
+/** An http(s) address with a host, written out with its scheme. */
+function isWebAddress(raw) {
+  if (typeof raw !== 'string' || !/^https?:\/\//i.test(raw.trim())) return false;
+  try { return !!new URL(raw.trim()).hostname; }
+  catch { return false; } // not an address at all
+}
+
 function findEntry(state, url) {
   return state.history.find(h => h.url === url) || null;
 }
@@ -83,13 +90,14 @@ function ask(prompt) {
  *   request: { kind: 'add' | 'remove' | 'rename' | 'open', url, name?, opts? }
  *   requesterUrl: the address of the server whose page asked (a key of the
  *     app's server views, already normalized)
+ *   openUrls: servers open in the app right now (normalized)
  *
  * Returns one of
  *   { action: 'ignore', result }  nothing changes; result goes back to the page
  *   { action: 'apply' }           safe to apply without asking
  *   { action: 'ask', key, prompt } apply only once the user says yes
  */
-function planPageRequest(state, request, requesterUrl) {
+function planPageRequest(state, request, requesterUrl, { openUrls = [] } = {}) {
   const kind = request && request.kind;
   const url = normalizeServerUrl(request && request.url);
   const valid = !!url && isValidServerHost(url);
@@ -137,10 +145,13 @@ function planPageRequest(state, request, requesterUrl) {
   }
 
   if (kind === 'open') {
-    if (!valid) return ignore(false);
+    // Any web address opens, including a one-word host on the local
+    // network (http://nas:3000), as it did before the question.
+    if (!isWebAddress(request && request.url)) return ignore(false);
     // Opening a server adds it to the list (or brings it back), so a server
-    // that is not listed is asked about first.
-    if (entry) return { action: 'apply' };
+    // that is not listed, or not already open in the app, is asked about
+    // first.
+    if (findEntry(state, url) || openUrls.includes(url)) return { action: 'apply' };
     return ask({ kind: 'open', url });
   }
 
