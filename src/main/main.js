@@ -1605,8 +1605,13 @@ function serverListSender(e) {
 /** Make a change to the server list for a page, asking the user when the
  *  rules say so. Resolves to { applied, result, saved }: result is what the
  *  list function returned, or why nothing changed ('declined', 'busy',
- *  'blocked', 'denied'). */
-async function requestServerListChange(e, request) {
+ *  'blocked', 'denied'). action is what the app's preload saw when the
+ *  page called: { user } the page marked the change as the user's own,
+ *  { fresh } the user clicked or typed in the page just now. */
+async function requestServerListChange(e, request, action) {
+  const user = !!action && action.user === true;
+  const fresh = !!action && action.fresh === true;
+  request = { ...request, user };
   const sender = serverListSender(e);
   if (!sender) return { applied: false, result: 'denied', saved: false };
   let list = readServerList(store);
@@ -1619,7 +1624,7 @@ async function requestServerListChange(e, request) {
     if (plan.action === 'ask') {
       const asker = list.history.find(h => h.url === sender.url);
       const text = promptText(plan.prompt, { name: asker?.name, url: sender.url }, t);
-      const answer = await _serverListGate.request({ senderId: sender.id, requester: sender.url, key: plan.key, text });
+      const answer = await _serverListGate.request({ senderId: sender.id, requester: sender.url, key: plan.key, text, fresh });
       if (answer !== 'confirmed') return { applied: false, result: answer, saved: false };
       // The list may have changed while the question was open.
       list = readServerList(store);
@@ -3875,10 +3880,11 @@ function registerIPC() {
   });
   ipcMain.on('nav:back-to-welcome', () => resetToWelcome());
   // Opening a server adds it to the list, so a page opening one that is not
-  // listed asks the user first.
-  ipcMain.on('nav:switch-server', async (e, serverUrl) => {
+  // listed asks the user first. A click is always the user's own; fresh
+  // says whether it came just now (see app-preload.js).
+  ipcMain.on('nav:switch-server', async (e, serverUrl, action) => {
     if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
-    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl });
+    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl }, action);
     if (applied && mainWindow) switchToServer(normalizeServerUrl(serverUrl));
   });
 
@@ -3903,9 +3909,9 @@ function registerIPC() {
   // ── Change Primary Server (from login page server picker) ──
   // The picker lives in a server's own page, so a server that is not listed
   // is asked about like any other page request.
-  ipcMain.on('nav:change-primary-server', async (e, serverUrl) => {
+  ipcMain.on('nav:change-primary-server', async (e, serverUrl, action) => {
     if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
-    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl });
+    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl }, action);
     if (!applied || !mainWindow) return;
     try {
       const newUrl = normalizeServerUrl(serverUrl);
@@ -3951,17 +3957,20 @@ function registerIPC() {
   // A page adds, removes or renames a server only with the user's yes in
   // the app's own dialog (requestServerListChange); a page may report its
   // own server's name. The answers keep their old shapes for older pages.
+  // action (added by app-preload.js): { user, fresh }, see
+  // requestServerListChange; removals and renames the page does not mark as
+  // the user's are a page syncing on its own and change nothing.
   // add: opts.userInitiated is the user's own Add Server; without it nothing
   // is added. Resolves to 'added', 'exists', 'refused', 'invalid',
   // 'declined', 'busy' or 'blocked'.
-  ipcMain.handle('server-history:add', async (e, url, name, opts) => {
-    const { result } = await requestServerListChange(e, { kind: 'add', url, name, opts });
+  ipcMain.handle('server-history:add', async (e, url, name, opts, action) => {
+    const { result } = await requestServerListChange(e, { kind: 'add', url, name, opts }, action);
     return result === 'denied' ? 'refused' : result;
   });
   // Resolves to the list after the request, with the server still in it
   // when the user said no.
-  ipcMain.handle('server-history:remove', async (e, url) => {
-    const { applied } = await requestServerListChange(e, { kind: 'remove', url });
+  ipcMain.handle('server-history:remove', async (e, url, action) => {
+    const { applied } = await requestServerListChange(e, { kind: 'remove', url }, action);
     if (applied) closeBackgroundServerView(url);
     return readServerList(store).history;
   });
@@ -3969,8 +3978,8 @@ function registerIPC() {
   // server's own name (false); without it the name is the one the page's
   // own server reports, which never replaces one the user chose. Resolves
   // to true when the list changed.
-  ipcMain.handle('server-history:update-name', async (e, url, name, opts) => {
-    const { applied, saved } = await requestServerListChange(e, { kind: 'rename', url, name, opts });
+  ipcMain.handle('server-history:update-name', async (e, url, name, opts, action) => {
+    const { applied, saved } = await requestServerListChange(e, { kind: 'rename', url, name, opts }, action);
     return !!(applied && saved);
   });
   // The shared server list: servers in the user's order, removed servers and

@@ -87,7 +87,10 @@ function ask(prompt) {
 /**
  * Decide what happens to a server page's request.
  *
- *   request: { kind: 'add' | 'remove' | 'rename' | 'open', url, name?, opts? }
+ *   request: { kind: 'add' | 'remove' | 'rename' | 'open', url, name?, opts?, user? }
+ *     user: the page says the user asked for this (Manage Servers). Pages
+ *     that know the app asks mark the changes the user makes; anything
+ *     unmarked is a page syncing on its own and never brings up a question.
  *   requesterUrl: the address of the server whose page asked (a key of the
  *     app's server views, already normalized)
  *   openUrls: servers open in the app right now (normalized)
@@ -103,6 +106,7 @@ function planPageRequest(state, request, requesterUrl, { openUrls = [] } = {}) {
   const valid = !!url && isValidServerHost(url);
   const entry = valid ? findEntry(state, url) : null;
   const opts = (request && request.opts && typeof request.opts === 'object') ? request.opts : {};
+  const byUser = !!request && request.user === true;
 
   if (kind === 'add') {
     if (!valid) return ignore('invalid');
@@ -116,6 +120,9 @@ function planPageRequest(state, request, requesterUrl, { openUrls = [] } = {}) {
 
   if (kind === 'remove') {
     if (!entry) return ignore(null);
+    // Unmarked: a page that does not know the app asks (Haven 4.19.0 and
+    // earlier) handing over its own removals while syncing.
+    if (!byUser) return ignore(null);
     return ask({ kind: 'remove', url, name: displayName(entry.name, url) });
   }
 
@@ -126,6 +133,9 @@ function planPageRequest(state, request, requesterUrl, { openUrls = [] } = {}) {
       // The name a server reports: only its own page may say it.
       return (requesterUrl && url === requesterUrl) ? { action: 'apply' } : ignore(false);
     }
+    // Unmarked: an older page pushing its saved names and icons while
+    // syncing. Its list keeps its version; the shared one is not changed.
+    if (!byUser) return ignore(false);
     const trial = { history: [{ ...entry }], removed: [], order: [] };
     if (!updateServerName(trial, url, request.name, options)) return ignore(false);
     const after = trial.history[0];
@@ -227,26 +237,22 @@ function promptText(prompt, requester, t) {
  *   - one open question per page; anything else that page asks meanwhile is
  *     dropped ('busy')
  *   - one dialog at a time, with only a few pages waiting their turn
- *   - a change the user said no to is not asked about again for a minute
- *     (so a page that repeats it on every sync does not ask each time, and
- *     the user can still change their mind), and the user can tell the app
- *     to ignore a server's requests until it restarts
+ *   - a change the user said no to is not asked about again by that server
+ *     until the app restarts, however often its page repeats it, unless
+ *     the user asks for it again (fresh: a click or key press just now in
+ *     the page), so a misclicked no is not final
+ *   - the user can tell the app to ignore a server's requests until it
+ *     restarts
  *
  * ask(text) shows the dialog and resolves to { confirmed, block }. request()
  * resolves to 'confirmed', 'declined', 'busy' or 'blocked'. A dialog that
  * fails counts as a no.
  */
-function createRequestGate({ ask: showQuestion, maxWaiting = 4, declineMs = 60000, now = Date.now, warn = console.warn }) {
+function createRequestGate({ ask: showQuestion, maxWaiting = 4, warn = console.warn }) {
   const asking = new Set();
-  const declined = new Map(); // requester + change -> when the no runs out
+  const declined = new Set(); // requester + change the user said no to
   const blocked = new Set();
-  const saidNo = (id) => {
-    const until = declined.get(id);
-    if (until === undefined) return false;
-    if (until > now()) return true;
-    declined.delete(id);
-    return false;
-  };
+  const saidNo = (id) => declined.has(id);
   let waiting = 0;
   let turn = Promise.resolve();
 
@@ -262,14 +268,16 @@ function createRequestGate({ ask: showQuestion, maxWaiting = 4, declineMs = 6000
     }
     if (answer && answer.block) blocked.add(requester);
     if (answer && answer.confirmed === true) return 'confirmed';
-    declined.set(requester + '\n' + key, now() + declineMs);
+    declined.add(requester + '\n' + key);
     return 'declined';
   }
 
   return {
     isBlocked: (requester) => blocked.has(requester),
-    request({ senderId, requester, key, text }) {
+    request({ senderId, requester, key, text, fresh = false }) {
       if (blocked.has(requester)) return Promise.resolve('blocked');
+      // The user asked for it again just now: ask again.
+      if (fresh === true) declined.delete(requester + '\n' + key);
       if (saidNo(requester + '\n' + key)) return Promise.resolve('declined');
       if (asking.has(senderId) || waiting >= maxWaiting) return Promise.resolve('busy');
       asking.add(senderId);

@@ -164,7 +164,7 @@ test('main and the preloads use the shared list', () => {
   const main = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8');
   assert.match(main, /ipcMain\.handle\('server-list:get'/);
   assert.match(main, /ipcMain\.handle\('server-list:set-order'/);
-  assert.match(main, /requestServerListChange\(e, \{ kind: 'add', url, name, opts \}\)/);
+  assert.match(main, /requestServerListChange\(e, \{ kind: 'add', url, name, opts \}, action\)/);
   assert.match(main, /markConnected\(_list, url\)/);
   assert.doesNotMatch(main, /length > 20\) _?hist(ory)?\.shift/);
 });
@@ -173,8 +173,8 @@ test('server pages get the shared list from the preload', () => {
   const preload = fs.readFileSync(path.join(__dirname, '../src/main/app-preload.js'), 'utf8');
   assert.match(preload, /getServerList: \(\) => ipcRenderer\.invoke\('server-list:get'\)/);
   assert.match(preload, /setServerOrder: \(urls\) => ipcRenderer\.invoke\('server-list:set-order'/);
-  assert.match(preload, /addServerHistory: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:add', url, name, opts\)/);
-  assert.match(preload, /updateServerName: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:update-name', url, name, opts\)/);
+  assert.match(preload, /addServerHistory: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:add', url, name, opts, serverListAction\(opts\)\)/);
+  assert.match(preload, /updateServerName: \(url, name, opts\) => ipcRenderer\.invoke\('server-history:update-name', url, name, opts, serverListAction\(opts\)\)/);
   assert.match(preload, /sendSync\('server-list:get-sync'\)/);
   // A change on one page reaches the others without a reload.
   assert.match(preload, /ipcRenderer\.on\('server-list:changed'[\s\S]{0,200}haven-server-list-changed/);

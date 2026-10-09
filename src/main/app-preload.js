@@ -29,6 +29,30 @@ const nativeStorageSetItem = typeof Storage !== 'undefined' ? Storage.prototype.
 const nativeStorageRemoveItem = typeof Storage !== 'undefined' ? Storage.prototype.removeItem : null;
 let suppressServerLocaleSync = false;
 
+// Whether the user clicked or typed in this page in the last few seconds.
+// A server list question the user said no to is asked again only then (see
+// server-list-gate.js). Read through the browser's own getter, kept here
+// before any page script runs, so a page cannot fake it; when it cannot be
+// read, the answer is no.
+const userActedJustNow = (() => {
+  try {
+    const getter = Object.getOwnPropertyDescriptor(UserActivation.prototype, 'isActive').get;
+    const activation = navigator.userActivation;
+    const apply = Reflect.apply;
+    return () => apply(getter, activation, []) === true;
+  } catch (err) {
+    console.warn('[Haven Desktop] user activation is not available here', err?.message || err);
+    return () => false;
+  }
+})();
+
+/** What the app's server list question needs to know about a page's call:
+ *  whether the page marked it as the user's own ({ user: true } in its
+ *  options) and whether the user acted just now. */
+function serverListAction(opts) {
+  return { user: !!(opts && typeof opts === 'object' && opts.user === true), fresh: userActedJustNow() };
+}
+
 function readServerLocalePreference() {
   try { return window.localStorage.getItem(SERVER_LOCALE_KEY); }
   catch { return null; }
@@ -843,7 +867,7 @@ window.addEventListener('DOMContentLoaded', () => {
             return;
           }
 
-          ipcRenderer.send('nav:change-primary-server', check.url);
+          ipcRenderer.send('nav:change-primary-server', check.url, serverListAction({ user: true }));
         } catch {
           setI18nText(errorEl, 'serverPicker.error.connectionFailed');
           errorEl.style.display = 'block';
@@ -896,7 +920,7 @@ window.addEventListener('DOMContentLoaded', () => {
           info.appendChild(nameSpan);
           info.appendChild(urlSpan);
           info.addEventListener('click', () => {
-            ipcRenderer.send('nav:change-primary-server', entry.url);
+            ipcRenderer.send('nav:change-primary-server', entry.url, serverListAction({ user: true }));
           });
 
           const removeBtn = document.createElement('button');
@@ -905,7 +929,7 @@ window.addEventListener('DOMContentLoaded', () => {
           setI18nTitle(removeBtn, 'serverPicker.removeHistory');
           removeBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            await ipcRenderer.invoke('server-history:remove', entry.url);
+            await ipcRenderer.invoke('server-history:remove', entry.url, serverListAction({ user: true }));
             await loadRecentServers();
           });
 
@@ -1730,7 +1754,7 @@ window.havenDesktop = {
   },
 
   /** Switch to another Haven server inside the app window (hot-swap) */
-  switchServer: (url) => ipcRenderer.send('nav:switch-server', url),
+  switchServer: (url) => ipcRenderer.send('nav:switch-server', url, serverListAction({ user: true })),
 
   /** Go back to the welcome / setup screen */
   backToWelcome: () => ipcRenderer.send('nav:back-to-welcome'),
@@ -1801,12 +1825,16 @@ window.havenDesktop = {
    *  renames or changes the icon of a server, or opens one that is not
    *  listed, so the page does not ask a second time. Removing resolves to
    *  the list with the server still in it when the user said no; adding
-   *  resolves to 'declined', 'busy' or 'blocked' when nothing was added. */
+   *  resolves to 'declined', 'busy' or 'blocked' when nothing was added.
+   *  The page marks the removals and edits the user makes with { user: true }
+   *  in their options; unmarked ones are taken for syncing and ignored. */
   serverListGated: true,
   /** opts.userInitiated: the user added it (Add Server), which brings back a
    *  server removed earlier; other adds of a removed server are refused. */
-  addServerHistory: (url, name, opts) => ipcRenderer.invoke('server-history:add', url, name, opts),
-  removeServerHistory: (url) => ipcRenderer.invoke('server-history:remove', url),
+  addServerHistory: (url, name, opts) => ipcRenderer.invoke('server-history:add', url, name, opts, serverListAction(opts)),
+  /** opts.user: the user removed it (Manage Servers). Without it the app
+   *  takes the call for a page syncing on its own, and nothing changes. */
+  removeServerHistory: (url, opts) => ipcRenderer.invoke('server-history:remove', url, serverListAction(opts)),
 
   /** The shared server list every server page shows:
    *  { servers: [{ url, name, customName?, icon?, customIcon? }] in the
@@ -1817,8 +1845,9 @@ window.havenDesktop = {
   /** Rename a server for every page. opts.custom true: the user's own name
    *  (opts.icon: the user's own icon, or null); false: back to the server's
    *  own name; left out: the server's own name, which never replaces the
-   *  user's. */
-  updateServerName: (url, name, opts) => ipcRenderer.invoke('server-history:update-name', url, name, opts),
+   *  user's. opts.user: the user made this edit; a name or icon for another
+   *  server without it is a page syncing on its own, and nothing changes. */
+  updateServerName: (url, name, opts) => ipcRenderer.invoke('server-history:update-name', url, name, opts, serverListAction(opts)),
   /** Synchronous snapshot of the shared list at page load, or null. */
   initialServerList: (() => {
     try { return ipcRenderer.sendSync('server-list:get-sync') || null; }

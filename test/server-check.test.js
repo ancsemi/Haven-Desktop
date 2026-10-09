@@ -224,6 +224,6 @@ test('the server picker uses the same check and opens the address that answered'
   const picker = preload.slice(at, preload.indexOf('async function loadRecentServers', at));
   assert.match(picker, /await checkServer\(url, \{/);
   assert.match(picker, /ipcRenderer\.invoke\('server-check:begin', u\)/);
-  assert.match(picker, /ipcRenderer\.send\('nav:change-primary-server', check\.url\)/);
+  assert.match(picker, /ipcRenderer\.send\('nav:change-primary-server', check\.url, serverListAction\(\{ user: true \}\)\)/);
   assert.doesNotMatch(picker, /fetch\(url \+ '\/api\/health'/);
 });
