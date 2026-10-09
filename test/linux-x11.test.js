@@ -55,3 +55,19 @@ test('main starts the copy directly, never takes the lock while quitting, and re
   const preload = fs.readFileSync(path.join(__dirname, '../src/main/app-preload.js'), 'utf8');
   assert.match(preload, /setLinuxForceX11:\s*\(v\)\s*=> ipcRenderer\.invoke\('desktop:set-linux-force-x11', v\)/);
 });
+
+test('a working X11 setup is not turned off by a second launch, a quick quit or turning the setting on again (#5741)', () => {
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8').replace(/\r\n/g, '\n');
+  const between = (start, length) => { const at = main.indexOf(start); assert.ok(at > 0, start); return main.slice(at, at + length); };
+  // Launching Haven again while the X11 copy runs.
+  assert.match(between("app.on('second-instance', (_event, argv) => {", 500), /if \(isX11Copy\(process\.argv\) \|\| isX11Copy\(argv\)\) clearX11Pending\(\);/);
+  // Quitting the X11 copy within a few seconds of opening it.
+  assert.match(between("app.on('before-quit', () => {", 300), /if \(isX11Copy\(process\.argv\)\) clearX11Pending\(\);/);
+  // Turning the setting on or off in Settings.
+  assert.match(between("ipcMain.handle('desktop:set-linux-force-x11'", 300), /clearX11Pending\(\);/);
+  // A start that never comes up is only cleared by these, so it is still
+  // found next time: the launch that starts the copy never clears it.
+  const start = between("} else if (x11Plan.action === 'start-x11') {", 400);
+  assert.doesNotMatch(start.slice(0, start.indexOf('} catch')), /clearX11Pending|linuxX11Pending'\)/);
+  assert.equal((main.match(/clearX11Pending\b/g) || []).length, 5, 'definition, timer, second launch, quit, setting');
+});

@@ -162,6 +162,13 @@ if (process.platform === 'linux') {
 }
 app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
 
+// The last X11 start is known to have worked (or no longer matters), so the
+// next launch tries X11 mode again instead of turning it off. A start that
+// never comes up never gets here, and the next launch still finds it.
+function clearX11Pending() {
+  if (store.get('linuxX11Pending') !== undefined) store.delete('linuxX11Pending');
+}
+
 let currentLocale = 'en';
 
 function getSystemLanguages() {
@@ -423,7 +430,12 @@ if (exitingForX11) {
     setTimeout(() => process.exit(0), 3000).unref();
   }
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // Haven launched again while X11 mode is on: the launch marks an X11
+    // start and its X11 copy lands here. This copy running in X11, or that
+    // copy getting this far, shows X11 starts work, so the next launch must
+    // not give up on X11 mode (Haven #5741).
+    if (isX11Copy(process.argv) || isX11Copy(argv)) clearX11Pending();
     const win = mainWindow || welcomeWindow;
     // show(): a window closed to the tray is hidden, and focus() alone
     // leaves it hidden, so launching Haven again looked like nothing happened.
@@ -601,7 +613,7 @@ app.whenReady().then(async () => {
   // The X11 copy is up. Still running a few seconds later means the start
   // worked, so the next launch tries X11 again rather than giving up.
   if (isX11Copy(process.argv) && store.get('linuxX11Pending')) {
-    setTimeout(() => store.delete('linuxX11Pending'), 5000);
+    setTimeout(clearX11Pending, 5000);
   }
   if (x11StartFailed) {
     setTimeout(() => {
@@ -1137,6 +1149,9 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   app.isQuitting = true;
+  // The X11 copy quitting soon after it opened is the user closing it, not
+  // a failed X11 start (Haven #5741).
+  if (isX11Copy(process.argv)) clearX11Pending();
   serverManager?.stopServer();
   pipeWireStreamRouter?.stop();
   audioCapture?.cleanup();
@@ -3787,6 +3802,9 @@ function registerIPC() {
   // takes a restart.
   ipcMain.handle('desktop:set-linux-force-x11', (_e, enabled) => {
     store.set('linuxForceX11', !!enabled);
+    // A choice made now starts fresh: an old failed-start marker must not
+    // turn X11 mode straight back off at the next launch.
+    clearX11Pending();
     return { requiresRestart: true };
   });
 
