@@ -1,13 +1,13 @@
-# ⬡ Haven Desktop — User Guide
+# ⬡ Haven Desktop: User Guide
 
-Welcome to **Haven Desktop**, the standalone desktop client for [Haven](https://github.com/ancsemi/Haven). Everything the browser version can do — plus per-app audio, device switching, and native notifications.
+Welcome to **Haven Desktop**, the standalone desktop client for [Haven](https://github.com/ancsemi/Haven). Everything the browser version can do, plus per-app audio, device switching, and native notifications.
 
 ---
 
 ## 📋 What You Need
 
 - **Windows 10** (build 19041+) or **Windows 11**, or **Linux** (with PulseAudio or PipeWire)
-- A running Haven server to connect to — or Haven installed locally if you want to host
+- A running Haven server to connect to, or Haven installed locally if you want to host
 
 > **Don't have a server?** The desktop app can detect and start one for you automatically, or guide you through setting one up from scratch.
 
@@ -18,7 +18,7 @@ Welcome to **Haven Desktop**, the standalone desktop client for [Haven](https://
 ### Windows
 
 1. Download the `.exe` installer from the [Latest Release](https://github.com/ancsemi/Haven-Desktop/releases/latest)
-2. Double-click the `.exe` — Haven installs and launches automatically
+2. Double-click the `.exe` and Haven installs and launches automatically
 3. That's it. No terminal, no dependencies, no setup wizards.
 
 The installer creates a desktop shortcut and start menu entry. Uninstall from **Settings → Apps** like any other program.
@@ -30,7 +30,7 @@ chmod +x Haven*.AppImage
 ./Haven*.AppImage
 ```
 
-Or just double-click in most desktop environments. No installation needed — AppImages are portable.
+Or just double-click in most desktop environments. No installation needed: AppImages are portable.
 
 Builds after 1.4.28 run without libfuse2, which distributions such as Fedora and Ubuntu 24.04 no longer ship. If an older build says it requires FUSE, start it with `./Haven*.AppImage --appimage-extract-and-run` instead.
 
@@ -48,13 +48,13 @@ Or double-click the `.deb` to install via your system's package manager. Haven a
 
 When you open Haven Desktop for the first time, you'll see a welcome screen with two options:
 
-### Option 1 — Host My Server
+### Option 1: Host My Server
 
 Choose this if you run your own Haven server.
 
 1. Click **Host My Server**
 2. Haven searches common locations for a local Haven server (`server.js`)
-3. If found, click **Start Server** — Haven starts it and connects automatically
+3. If found, click **Start Server**: Haven starts it and connects automatically
 4. If not found, click **Browse for server directory** to point Haven to it
 5. Or click **Start Fresh Server Setup** to download and set up Haven from scratch
 
@@ -63,7 +63,7 @@ Haven detects your server in these locations (in order):
 - A sibling `Haven/` folder next to the desktop app
 - `~/Haven`, `~/Desktop/Haven`, `~/Documents/Haven`
 
-### Option 2 — Join a Server
+### Option 2: Join a Server
 
 Choose this if someone else is hosting.
 
@@ -81,21 +81,21 @@ Check **"Remember my choice"** to skip the welcome screen on future launches. Ha
 
 ## ✨ Features Unique to Desktop
 
-These features are **only** available in Haven Desktop — not in the browser version.
+These features are **only** available in Haven Desktop, not in the browser version.
 
 ### 🔊 Per-Application Audio
 
-Share audio from a **single application** during screen share — no other audio leaks through.
+Share audio from a **single application** during screen share. No other audio leaks through.
 
 **How it works:**
 1. Join a voice channel and click **Share Screen**
 2. Haven shows a custom picker with your screens, windows, and running apps
 3. Select a screen/window to share video from
 4. Under **Application Audio**, select the specific app whose audio you want to share (e.g. a game, Spotify, a browser tab)
-5. Click **Share** — your friends hear only that app's audio
+5. Click **Share** and your friends hear only that app's audio
 
 **Technical details:**
-- **Windows:** Uses WASAPI Process Loopback (same API as Discord) — requires Windows 10 build 19041+ (May 2020 Update)
+- **Windows:** Uses WASAPI Process Loopback (same API as Discord) and requires Windows 10 build 19041+ (May 2020 Update)
 - **Linux:** Creates a PulseAudio virtual null sink, routes the target app's audio to it, and captures from the sink monitor
 
 > If you don't select a specific app, system audio is shared as usual.
@@ -107,7 +107,7 @@ Switch your microphone or speakers mid-call without leaving voice chat.
 1. Click **Settings** while in a voice channel
 2. Under **Audio Input**, select a different microphone
 3. Under **Audio Output**, select different speakers or headphones
-4. Changes take effect immediately — no need to rejoin voice
+4. Changes take effect immediately (no need to rejoin voice)
 
 ### 🔔 Desktop Notifications
 
@@ -119,11 +119,11 @@ Haven Desktop uses native OS-level notifications instead of browser notification
 
 ### 🔽 Minimize to Tray
 
-Closing Haven doesn't quit it — the app minimizes to your system tray. Click the tray icon to bring it back, or right-click for options:
+Closing Haven doesn't quit it: the app minimizes to your system tray. Click the tray icon to bring it back, or right-click for options:
 
-- **Show Haven** — bring the window back
-- **Server Running / Stopped** — current server status
-- **Quit Haven** — fully exit the app and stop any running server
+- **Show Haven**: bring the window back
+- **Server Running / Stopped**: current server status
+- **Quit Haven**: fully exit the app and stop any running server
 
 ---
 
@@ -133,11 +133,11 @@ Screen sharing in Haven Desktop works the same as the browser version, with the 
 
 1. In a voice channel, click **🖥️ Share Screen**
 2. The picker overlay appears showing:
-   - **Screens** — your full monitors
-   - **Application Windows** — individual app windows
-   - **Application Audio** — running apps you can isolate audio from
+   - **Screens**: your full monitors
+   - **Application Windows**: individual app windows
+   - **Application Audio**: running apps you can isolate audio from
 3. Select a video source, optionally select an audio app, and click **Share**
-4. Multiple users can share simultaneously — each stream appears in a tiled grid
+4. Multiple users can share simultaneously, and each stream appears in a tiled grid
 
 When the user whose audio is being captured stops their screen share, the per-app audio pipeline is automatically cleaned up.
 
@@ -163,7 +163,7 @@ Haven looks for a `server.js` file alongside a `package.json` with `"name": "hav
 
 ### HTTPS Detection
 
-Haven Desktop detects whether your server starts with HTTPS or HTTP by watching the server's output for "HTTPS enabled". The protocol is chosen automatically — no manual configuration needed.
+Haven Desktop detects whether your server starts with HTTPS or HTTP by watching the server's output for "HTTPS enabled". The protocol is chosen automatically (no manual configuration needed).
 
 ---
 
@@ -192,7 +192,7 @@ Haven Desktop stores its preferences (mode, server URL, window size) in the stan
 
 ### Haven Server Data
 
-Your server data (messages, uploads, config) is stored separately in the Haven data directory — see the [Haven User Guide](https://github.com/ancsemi/Haven/blob/main/GUIDE.md#backing-up-your-data) for details.
+Your server data (messages, uploads, config) is stored separately in the Haven data directory. See the [Haven User Guide](https://github.com/ancsemi/Haven/blob/main/GUIDE.md#backing-up-your-data) for details.
 
 ---
 
@@ -208,12 +208,12 @@ Your server data (messages, uploads, config) is stored separately in the Haven d
   - **Windows:** Visual Studio Build Tools 2019+ with "Desktop development with C++"
   - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
 
-### Windows — No Terminal
+### Windows (No Terminal)
 
 1. Install the Windows prerequisites listed above
-2. Double-click **`Setup.bat`** — installs Node dependencies and builds the native components
-3. Double-click **`Start Haven Desktop.bat`** — launches the app in dev mode
-4. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
+2. Double-click **`Setup.bat`**: installs Node dependencies and builds the native components
+3. Double-click **`Start Haven Desktop.bat`**: launches the app in dev mode
+4. Double-click **`Build Installer.bat`**: creates a distributable `.exe` in `dist/`
 
 ### Terminal
 
@@ -313,10 +313,10 @@ PCM data arrives via IPC → `AudioWorkletNode` processes it → `MediaStreamDes
 
 ## 📝 License
 
-Same license as Haven — AGPL-3.0. See [LICENSE](../Haven/LICENSE).
+Same license as Haven: AGPL-3.0. See [LICENSE](../Haven/LICENSE).
 
 ---
 
 <p align="center">
-  <b>⬡ Haven Desktop</b> — Private chat, reimagined for your desktop.
+  <b>⬡ Haven Desktop</b>: Private chat, reimagined for your desktop.
 </p>

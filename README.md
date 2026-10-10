@@ -4,10 +4,10 @@
 
 > Bug reports and feedback are always welcome, please [open an issue](https://github.com/ancsemi/Haven-Desktop/issues) if something breaks or feels off.
 
-Haven Desktop is a standalone Electron application that connects to any [Haven](https://github.com/ancsemi/Haven) server — with features that go beyond the browser.
+Haven Desktop is a standalone Electron application that connects to any [Haven](https://github.com/ancsemi/Haven) server, with features that go beyond the browser.
 
 > **⬡ You need a Haven server to use this app.**
-> Haven Desktop is a client — it connects to a Haven server running on your (or a friend's) machine.
+> Haven Desktop is a client: it connects to a Haven server running on your (or a friend's) machine.
 > If you don't have one yet, **[download Haven](https://github.com/ancsemi/Haven)** first and follow the [setup guide](https://github.com/ancsemi/Haven/blob/main/GUIDE.md).
 
 ---
@@ -23,9 +23,9 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | **Linux** (.deb) | [Latest Release](https://github.com/ancsemi/Haven-Desktop/releases/latest) |
 
 > **Windows:** Double-click the `.exe` → Haven installs and launches automatically.
-> **Linux AppImage:** `chmod +x Haven*.AppImage && ./Haven*.AppImage` — or just double-click in most desktop environments.
+> **Linux AppImage:** `chmod +x Haven*.AppImage && ./Haven*.AppImage`, or just double-click in most desktop environments.
 > Builds after 1.4.28 run without libfuse2. If an older build says it requires FUSE, start it with `./Haven*.AppImage --appimage-extract-and-run` instead.
-> **Linux .deb:** `sudo dpkg -i haven*.deb` — or double-click to install via your package manager.
+> **Linux .deb:** `sudo dpkg -i haven*.deb`, or double-click to install via your package manager.
 
 ---
 
@@ -33,7 +33,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 
 | Feature | Description |
 |---|---|
-| **Per-Application Audio** | Share audio from a **single application** during screen share — just like Discord. Powered by native WASAPI (Windows) and PulseAudio (Linux) hooks. |
+| **Per-Application Audio** | Share audio from a **single application** during screen share, just like Discord. Powered by native WASAPI (Windows) and PulseAudio (Linux) hooks. |
 | **Screen-Share Encoder Controls** | Choose the codec before streaming. Screen sharing requests H.264 and reports whether Chromium confirms hardware acceleration. |
 | **Audio Device Switching** | Switch your microphone and speaker mid-call without leaving voice chat. |
 | **Desktop Notifications** | Native OS-level notifications via the taskbar / system tray. |
@@ -65,12 +65,12 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
   - **Windows:** Visual Studio Build Tools 2019+ with the "Desktop development with C++" workload
   - **Linux:** `build-essential`, `libpulse-dev`, `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libxt-dev`, `libxrandr-dev`, `libxfixes-dev`
 
-### Quick Start (Windows — No Terminal)
+### Quick Start (Windows, No Terminal)
 
 1. Install the Windows prerequisites listed above
-2. Double-click **`Setup.bat`** — installs npm dependencies and builds the native components
-3. Double-click **`Start Haven Desktop.bat`** — launches the app
-4. Double-click **`Build Installer.bat`** — creates a distributable `.exe` in `dist/`
+2. Double-click **`Setup.bat`**: installs npm dependencies and builds the native components
+3. Double-click **`Start Haven Desktop.bat`**: launches the app
+4. Double-click **`Build Installer.bat`**: creates a distributable `.exe` in `dist/`
 
 ### Quick Start (Terminal)
 
@@ -184,7 +184,7 @@ Haven Desktop is just the client. **You need a Haven server to connect to.**
 
 ## 📝 License
 
-Same license as Haven — AGPL-3.0. See [LICENSE](https://github.com/ancsemi/Haven/blob/main/LICENSE).
+Same license as Haven: AGPL-3.0. See [LICENSE](https://github.com/ancsemi/Haven/blob/main/LICENSE).
 
 ---
 
