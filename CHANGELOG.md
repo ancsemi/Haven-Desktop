@@ -1,5 +1,17 @@
 # Haven Desktop Changelog
 
+## v1.6.2
+
+### Fixed
+- **The update banner shows up reliably (#63).** The app remembers an update
+  it found and shows it on every server page once the page has loaded, and it
+  checks again every few hours.
+- **Push to talk does nothing outside a voice call (#64).** The key no longer
+  plays the mute sound or changes your mute setting when you are not in voice.
+
+### Changed
+- README and docs cleanup.
+
 ## v1.6.1
 
 ### Fixed
