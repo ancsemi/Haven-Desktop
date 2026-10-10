@@ -1,7 +1,5 @@
 # Haven Desktop
 
-**Private chat, reimagined for your desktop.**
-
 > Bug reports and feedback are always welcome, please [open an issue](https://github.com/ancsemi/Haven-Desktop/issues) if something breaks or feels off.
 
 Haven Desktop is a standalone Electron application that connects to any [Haven](https://github.com/ancsemi/Haven) server, with features that go beyond the browser.
@@ -12,7 +10,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 
 ---
 
-## 📥 Download & Install
+## Download & Install
 
 **Just download, run, done.** No terminal, no setup, no dependencies.
 
@@ -29,7 +27,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 | Feature | Description |
 |---|---|
@@ -38,13 +36,13 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | **Audio Device Switching** | Switch your microphone and speaker mid-call without leaving voice chat. |
 | **Desktop Notifications** | Native OS-level notifications via the taskbar / system tray. |
 | **Host or Join** | Run your own Haven server from the app, or connect to someone else's. Auto-detects local servers. |
-| **One-Click Install** | NSIS installer (Windows) and AppImage / .deb (Linux). Download, run, done. |
+| **One-Click Install** | NSIS installer (Windows) and AppImage / .deb (Linux). |
 | **Minimize to Tray** | Stays running quietly in your system tray. |
 | **Rich Presence** | See what everyone is playing and listening to in the member list and on their profile. Games via **Steam**; music via **Last.fm** (which covers Spotify, Apple Music, YouTube Music, Navidrome and Plex in one connection), Spotify directly, or Haven's own player. Optional, hidden while you're Invisible, never saved to the database. |
 
 ---
 
-## 🖥️ Supported Platforms
+## Supported Platforms
 
 - **Windows 10** (build 19041+) / **Windows 11**
 - **Linux** (PulseAudio or PipeWire with `pipewire-pulse`)
@@ -53,7 +51,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 
 ---
 
-## 🛠️ Building from Source
+## Building from Source
 
 > **Most users don't need this.** Just download the installer above. This section is for developers who want to contribute or build locally.
 
@@ -114,36 +112,19 @@ GitHub Actions builds the Windows `.exe` and Linux `.AppImage` / `.deb`, then pu
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 Haven-Desktop/
 ├── src/
-│   ├── main/
-│   │   ├── main.js             # Electron main process
-│   │   ├── preload.js          # Welcome window preload
-│   │   ├── app-preload.js      # App window preload (per-app audio, screen picker)
-│   │   ├── server-manager.js   # Detect, start, stop Haven server
-│   │   └── audio-capture.js    # Native addon loader / manager
-│   └── renderer/
-│       ├── welcome.html        # Welcome / setup screen
-│       ├── welcome.css
-│       └── welcome.js
-├── native/
-│   ├── binding.gyp             # Native addon build config
-│   └── src/
-│       ├── addon.cpp           # N-API entry point
-│       ├── audio_capture.h     # Cross-platform interface
-│       ├── win/
-│       │   ├── wasapi_capture.h
-│       │   └── wasapi_capture.cpp   # Windows WASAPI process loopback
-│       └── linux/
-│           ├── pulse_capture.h
-│           └── pulse_capture.cpp    # Linux PulseAudio capture
-├── assets/                     # Icons
+│   ├── main/        # Electron main process, preloads and their helper modules
+│   ├── renderer/    # Welcome and setup screens
+│   └── i18n/        # Desktop app translations
+├── native/          # Per-app audio addon (WASAPI on Windows, PulseAudio on Linux)
+├── assets/          # Icons
+├── test/            # node --test suites
 ├── package.json
-├── electron-builder.yml
-└── README.md
+└── electron-builder.yml
 ```
 
 ### How Per-App Audio Works
@@ -159,7 +140,7 @@ PCM data arrives via IPC → `AudioWorkletNode` processes it → `MediaStreamDes
 
 ---
 
-## 💬 Feedback & Bug Reports
+## Feedback & Bug Reports
 
 Your feedback directly shapes the app. If something doesn't work, looks wrong, or could be better:
 
@@ -170,7 +151,7 @@ Every report helps.
 
 ---
 
-## ⬡ Haven Server
+## Haven Server
 
 Haven Desktop is just the client. **You need a Haven server to connect to.**
 
@@ -182,7 +163,7 @@ Haven Desktop is just the client. **You need a Haven server to connect to.**
 
 ---
 
-## 📝 License
+## License
 
 Same license as Haven: AGPL-3.0. See [LICENSE](https://github.com/ancsemi/Haven/blob/main/LICENSE).
 

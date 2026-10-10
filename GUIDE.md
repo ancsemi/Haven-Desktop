@@ -318,5 +318,5 @@ Same license as Haven: AGPL-3.0. See [LICENSE](../Haven/LICENSE).
 ---
 
 <p align="center">
-  <b>⬡ Haven Desktop</b>: Private chat, reimagined for your desktop.
+  <b>⬡ Haven Desktop</b>
 </p>
