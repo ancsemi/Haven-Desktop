@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Cross-platform Audio Capture Interface
+// Haven Desktop: Cross-platform Audio Capture Interface
 // ═══════════════════════════════════════════════════════════
 #pragma once
 
@@ -20,8 +20,8 @@ struct AudioApp {
 };
 
 // Callback: receives mono float32 PCM samples at 48 kHz
-//   data       – pointer to sample buffer
-//   frameCount – number of samples
+//   data:        pointer to sample buffer
+//   frameCount:  number of samples
 using AudioDataCb = std::function<void(const float* data, size_t frameCount)>;
 
 // Status events emitted by the native capture path so JS can
@@ -68,7 +68,7 @@ public:
                               AudioDataCb     dataCb,
                               CaptureStatusCb statusCb) = 0;
 
-    // Backwards-compatible shim — IncludeProcess, no status callback.
+    // Backwards-compatible shim: IncludeProcess, no status callback.
     bool StartCapture(uint32_t pid, AudioDataCb cb) {
         return StartCapture(pid, CaptureMode::IncludeProcess, "", std::move(cb), nullptr);
     }
@@ -77,7 +77,7 @@ public:
     virtual void                  Cleanup()                    = 0;
 };
 
-// Factory — returns the right implementation per OS
+// Factory: returns the right implementation per OS
 IAudioCapture* CreateAudioCapture();
 
 } // namespace haven

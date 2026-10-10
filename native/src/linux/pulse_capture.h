@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Linux PulseAudio Per-App Audio Capture
+// Haven Desktop: Linux PulseAudio Per-App Audio Capture
 //
 // Isolates audio from a single application by:
 //   1) Creating a virtual null sink

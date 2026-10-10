@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Welcome Window Preload
+// Haven Desktop: Welcome Window Preload
 // Exposes IPC bridges for the welcome / setup screen.
 // ═══════════════════════════════════════════════════════════
 

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Main Process
+// Haven Desktop: Main Process
 // ═══════════════════════════════════════════════════════════
 
 const { handleClosedOutput } = require('./stdio-errors');
@@ -96,7 +96,7 @@ const store = new Store({
     linuxVaapiBypass:  false, // skip Chromium's VA-API driver blocklist on Linux (off by default)
     linuxForceX11:     false, // run through X11 (XWayland) instead of native Wayland (Haven #5721)
     videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
-    serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
+    serverHistory:  [],       // [{url, name, lastConnected}] of recent server connections
     serverListRemoved: [],    // servers the user removed; pages may not add them back
     serverListOrder:   [],    // the user's server rail order, shared by every server
     language: SYSTEM_LANGUAGE,
@@ -296,30 +296,30 @@ app.commandLine.appendSwitch('disable-logging');
 // frequently (GC pauses were a significant contributor to the progressive
 // slowdown reported as "hover gets slower over 5 minutes").
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
-// Reduce GPU process memory usage — Haven doesn't need heavy GPU compositing
+// Reduce GPU process memory usage: Haven doesn't need heavy GPU compositing
 app.commandLine.appendSwitch('disable-gpu-memory-buffer-video-frames');
 // Limit image decode cache (large images/gifs can balloon memory)
 app.commandLine.appendSwitch('image-decode-ct', '3');
-// NOTE: 'disable-renderer-backgrounding' was removed — it prevented Chromium
+// NOTE: 'disable-renderer-backgrounding' was removed; it prevented Chromium
 // from throttling timers when the window was unfocused, causing all intervals
 // (clock, ping, server polling, voice analysers) to run at full speed 24/7.
 // This contributed to renderer freezes by starving the event loop.
-// #5379 — but Chromium *also* treats a window covered by another full-size
+// #5379: but Chromium *also* treats a window covered by another full-size
 // window as "occluded" and starts throttling the renderer there too, which
 // stalls the WebRTC screen-share encoder and introduces permanent A/V desync
 // for the streamer the moment they alt-tab to a maximized window. Disabling
 // the native-occlusion calculation tells Chromium to keep the renderer awake
 // when the window is merely hidden behind another window (it does NOT cover
-// the explicit-minimize case — that one is still subject to OS-level throttling).
+// the explicit-minimize case; that one is still subject to OS-level throttling).
 // Also disable IntensiveWakeUpThrottling (introduced in M87) which clamps
-// timers to 1Hz after the page is hidden for >5 minutes — catastrophic for
+// timers to 1Hz after the page is hidden for >5 minutes, catastrophic for
 // a long-running screen share if the OS ever flips the window to hidden.
 // AutofillServerCommunication is folded in here too: it suppresses the noisy
 // Chrome Autofill CDP warnings on startup, and used to be its own
 // appendSwitch('disable-features', ...) call further up, which this line was
 // quietly overwriting.
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
-// #5379 (follow-up) — the CalculateNativeWinOcclusion flag only stops
+// #5379 (follow-up): the CalculateNativeWinOcclusion flag only stops
 // Chromium from *calculating* occlusion itself. Windows' own DWM still
 // signals occlusion when another window is snap-maximized over Haven, and
 // the GPU/renderer process throttles independently of the calculation
@@ -409,7 +409,7 @@ if (exitingForX11) {
   // If this is the first attempt, wait 1.5 s for the old process to finish
   // exiting, then relaunch automatically so the user isn't forced to click
   // the icon a second time. If it still fails on the retry, another instance
-  // is genuinely running — focus it and quit.
+  // is genuinely running; focus it and quit.
   const isRetry = process.argv.includes('--relaunch-retry');
   if (!isRetry) {
     setTimeout(() => {
@@ -717,7 +717,7 @@ app.whenReady().then(async () => {
   const prefs = store.get('userPrefs');
 
   if (prefs.skipWelcome && prefs.mode && prefs.serverUrl) {
-    // Returning user — remembered preferences
+    // Returning user: remembered preferences
     if (prefs.mode === 'host' && prefs.serverPath) {
       const res = await serverManager.startServer(prefs.serverPath);
       if (!res.success) { createWelcomeWindow(); createTray(); return; }
@@ -752,13 +752,13 @@ app.whenReady().then(async () => {
 //      to register shortcut".  uiohook hooks the OS-level input event
 //      stream so the bindings work even when Haven isn't focused.
 //
-// PTT also gets press/release semantics in hold mode — the renderer
+// PTT also gets press/release semantics in hold mode: the renderer
 // listens for `voice:ptt-down` / `voice:ptt-up` and unmutes on down,
 // re-mutes on up. Toggle mode keeps the existing `voice:ptt-toggle`
 // behaviour (single tap flips the mute button state). (#184)
 let _uiohook = null;
 let _uiohookStarted = false;
-// Platform-specific hint for "the native dep didn't load" — surfaced in the
+// Platform-specific hint for "the native dep didn't load", surfaced in the
 // console so users (especially on Linux where libuiohook is a separate system
 // package) don't have to guess why bare-modifier / mouse PTT bindings silently
 // no-op. (#184 follow-up)
@@ -770,7 +770,7 @@ function _uiohookInstallHint() {
          + 'then `npm rebuild uiohook-napi` in the Haven-Desktop install dir.';
   }
   if (process.platform === 'win32') {
-    return 'Windows: uiohook-napi ships a prebuilt binary — if loading fails, '
+    return 'Windows: uiohook-napi ships a prebuilt binary; if loading fails, '
          + 'try reinstalling Haven Desktop, or `npm rebuild uiohook-napi` if you built from source.';
   }
   if (process.platform === 'darwin') {
@@ -787,7 +787,7 @@ function tryLoadUiohook() {
     _uiohook = require('uiohook-napi');
   } catch (err) {
     const hint = _uiohookInstallHint();
-    console.warn('[Shortcuts] uiohook-napi unavailable — bare modifiers and Mouse4/5 PTT bindings will be ignored.');
+    console.warn('[Shortcuts] uiohook-napi unavailable: bare modifiers and Mouse4/5 PTT bindings will be ignored.');
     console.warn('[Shortcuts]   reason:', err.message);
     if (hint) console.warn('[Shortcuts]   hint:', hint);
     _uiohook = false;
@@ -806,7 +806,7 @@ const _uiohookMouseBindings = new Map();
 const _uiohookDownState = new Set();
 
 function _accelToUiohookKeycode(accel) {
-  // uiohook UiohookKey constants — only need the bare-modifier set here.
+  // uiohook UiohookKey constants: only need the bare-modifier set here.
   if (!_uiohook) return null;
   const K = _uiohook.UiohookKey || {};
   const map = {
@@ -819,7 +819,7 @@ function _accelToUiohookKeycode(accel) {
     'Cmd':              K.Meta,
     'Super':            K.Meta,
   };
-  // uiohook reports left/right modifiers as separate keycodes — return
+  // uiohook reports left/right modifiers as separate keycodes; return
   // both so we can match either. Stored as a [primary, alt] pair.
   // uiohook names the right-hand keys *Right. The old *R names did not
   // exist, so the right-hand modifier never counted as the binding.
@@ -969,7 +969,7 @@ function _ensureUiohookStarted() {
   try {
     u.uIOhook.start();
     _uiohookStarted = true;
-    console.log('[Shortcuts] uiohook-napi started — bare modifiers + Mouse4/5 active');
+    console.log('[Shortcuts] uiohook-napi started: bare modifiers + Mouse4/5 active');
   } catch (err) {
     console.warn('[Shortcuts] uiohook-napi failed to start:', err.message);
     const hint = _uiohookInstallHint();
@@ -1149,7 +1149,7 @@ function resetToWelcome(clearPrefs = false) {
   activeServerUrl = null;
   primaryServerUrl = null;
   if (clearPrefs) {
-    // Full reset — user explicitly chose to forget their server
+    // Full reset: user explicitly chose to forget their server
     store.set('userPrefs.skipWelcome', false);
     store.set('userPrefs.serverUrl', null);
     store.set('userPrefs.mode', null);
@@ -1488,7 +1488,7 @@ function showConnectionError(failedUrl) {
 
 /** Pin every non-active server view at 0×0 (no autoResize) and size the
  *  active view to the window content area. Safe to call on every resize /
- *  maximize — idempotent. */
+ *  maximize (idempotent). */
 function syncAllServerViewBounds() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   let cw = 0, ch = 0;
@@ -1501,7 +1501,7 @@ function syncAllServerViewBounds() {
     try {
       if (isActive) {
         // Don't expand over the splash before the active view's page is
-        // ready — its dom-ready handler will expand it.
+        // ready; its dom-ready handler will expand it.
         if (!view._havenPageReady && view.getBounds().width === 0) {
           view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
           continue;
@@ -1562,7 +1562,7 @@ function switchToServer(serverUrl) {
 
   // Pull the active view's <title> up to the BrowserWindow so the OS window
   // chrome stops saying "Loading Haven…" once a real renderer is on top.
-  // (mainWindow.webContents = splash.html, whose <title> never changes — so
+  // (mainWindow.webContents = splash.html, whose <title> never changes, so
   // without this, the window title is stuck on the splash text forever.)
   try {
     const t = (view.webContents.getTitle() || '').trim();
@@ -1673,7 +1673,7 @@ function closeBackgroundServerView(serverUrl) {
 // Pre-create a BrowserView for a server WITHOUT making it the visible/active
 // view. Lets background servers run their renderer (and thus their socket
 // connections) so per-server unread badges can light up on the sidebar of
-// the active view. Idempotent — second call for the same URL is a no-op.
+// the active view. Idempotent: second call for the same URL is a no-op.
 function ensureServerView(serverUrl, { background = false } = {}) {
   const url = normalizeServerUrl(serverUrl);
   if (!mainWindow) return null;
@@ -1702,7 +1702,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     const [w, h] = mainWindow.getContentSize();
     // Start the view hidden (0×0) so the splash page underneath stays visible
     // while the renderer loads. We expand to full size only when this view
-    // is the active one and finishes loading — prevents the user from
+    // is the active one and finishes loading. That prevents the user from
     // staring at a blank dark rectangle for 30-40 s on cold-start
     // cross-tunnel handshakes. Background-preloaded views stay at 0×0
     // until the user actually switches to them (see switchToServer).
@@ -1723,7 +1723,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         safeSend(view.webContents, 'i18n:became-active', getI18nState());
       } catch {}
     };
-    // Safety net — even if the active server is unreachable, drop the splash
+    // Safety net: even if the active server is unreachable, drop the splash
     // after 20 s so the user sees the BrowserView's own error page instead
     // of an eternal spinner.
     const _expandTimer = setTimeout(_expandIfActive, 20000);
@@ -1858,7 +1858,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       try { attachContextMenu(child.webContents, child); } catch {}
     });
 
-    // ── Page load timeout — if no content after 15 s, offer to go back ──
+    // ── Page load timeout: if no content after 15 s, offer to go back ──
     // Background-preloaded views are silent: they never show user dialogs.
     // If they fail to load, they're cleaned up quietly so unread-badge
     // pre-loading doesn't surface as a scary popup on launch.
@@ -1876,7 +1876,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       ).catch(() => false);
       if (isHaven || !mainWindow || mainWindow.isDestroyed()) return;
       if (background) {
-        // Silent cleanup — don't bother the user about a background preload
+        // Silent cleanup: don't bother the user about a background preload
         mainWindow?.removeBrowserView(view);
         try { view.webContents.destroy(); } catch {}
         serverViews.delete(url);
@@ -1886,13 +1886,13 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         return;
       }
       {
-        // No more dialog — the previous "Keep Loading" option just stranded
+        // No more dialog: the previous "Keep Loading" option just stranded
         // the user on a non-Haven page while the retry loop hammered a dead
         // server.  When the page resolves to something that isn't Haven we
         // just bail immediately, surface a toast on the destination, and
         // either bounce back to the primary server (if this was a secondary
-        // hop) or to the welcome screen.  Five seconds of trying is plenty
-        // — anything beyond that is the server being broken, not slow.
+        // hop) or to the welcome screen.  Five seconds of trying is plenty:
+        // anything beyond that is the server being broken, not slow.
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         if (isSecondary) {
           mainWindow?.removeBrowserView(view);
@@ -1929,11 +1929,11 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           return;
         }
       } catch { return; } // view already torn down
-      // Check if the page actually has content (async — never blocks renderer or main)
+      // Check if the page actually has content (async, never blocks renderer or main)
       view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
         if (background) {
-          // Background preload silently failed to load \u2014 just clean up
+          // Background preload silently failed to load; just clean up
           mainWindow?.removeBrowserView(view);
           try { view.webContents.destroy(); } catch {}
           serverViews.delete(url);
@@ -1969,19 +1969,19 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     };
     setTimeout(checkLoad, 15000);
 
-    // ── Handle load failures — only reset to welcome for the primary server ──
+    // ── Handle load failures: only reset to welcome for the primary server ──
     // Retry briefly on transient errors (server restart, brief outage) before
     // giving up and dumping the user back to the welcome screen.
     let _failRetryCount = 0;
-    const MAX_FAIL_RETRIES = 1; // ~1 s budget — longer waits stranded users on dead servers
+    const MAX_FAIL_RETRIES = 1; // ~1 s budget (longer waits stranded users on dead servers)
     view.webContents.on('did-fail-load', (_e, errorCode, errorDesc, validatedUrl, isMainFrame) => {
-      // Ignore subframe failures (iframes, ads, etc.) — only the main page matters.
+      // Ignore subframe failures (iframes, ads, etc.); only the main page matters.
       if (isMainFrame === false) return;
       console.error(`[Haven Desktop] Failed to load ${url}: ${errorCode} ${errorDesc}`);
       // -3 ABORTED = navigation cancelled (e.g. another nav started). Ignore.
       if (errorCode === -3) return;
 
-      // Background preload views never retry — they're best-effort badge
+      // Background preload views never retry: they're best-effort badge
       // pollers. Let the existing background-cleanup branch below handle them.
       const TRANSIENT = new Set([
         -102, // CONNECTION_REFUSED
@@ -2002,7 +2002,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         setTimeout(() => {
           // The view may have been torn down (window closed, server switched,
           // crash recovery, etc.) between scheduling and firing. Guard every
-          // hop — webContents itself becomes undefined after .destroy().
+          // hop: webContents itself becomes undefined after .destroy().
           if (!mainWindow || mainWindow.isDestroyed?.()) return;
           if (!view || !view.webContents) return;
           try { if (view.webContents.isDestroyed()) return; } catch { return; }
@@ -2013,7 +2013,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
 
       loadResolved = true;
       if (url !== primaryServerUrl) {
-        // A peer/secondary server failed — clean up and return to the primary view silently
+        // A peer/secondary server failed: clean up and return to the primary view silently
         mainWindow?.removeBrowserView(view);
         try { view.webContents.destroy(); } catch {}
         serverViews.delete(url);
@@ -2022,7 +2022,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         recomputeTaskbarBadge();
         if (primaryServerUrl && serverViews.has(primaryServerUrl)) {
           switchToServer(primaryServerUrl);
-          // Only show the toast for user-initiated peer connections — not for
+          // Only show the toast for user-initiated peer connections, not for
           // silent background preloads, which fail frequently on launch when
           // servers are briefly unreachable and should never surface errors.
           if (!background) {
@@ -2141,7 +2141,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       // try to IPC into the now-dead renderer frame.
       if (_logTimer) { clearTimeout(_logTimer); _logTimer = null; _logBuf = ''; }
 
-      // Stop monitoring intervals — the renderer is dead, executing JS or
+      // Stop monitoring intervals: the renderer is dead, executing JS or
       // querying memory on it will throw.
       if (_memCheckInterval) { clearInterval(_memCheckInterval); _memCheckInterval = null; }
       if (_healthCheckInterval) { clearInterval(_healthCheckInterval); _healthCheckInterval = null; }
@@ -2153,7 +2153,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
 
       if (_crashCount > MAX_CRASH_RETRIES) {
         // Nuclear recovery: tear down the BrowserView entirely and rebuild it
-        console.warn(`[Haven Desktop] Renderer crashed ${_crashCount} times — rebuilding BrowserView for ${url}`);
+        console.warn(`[Haven Desktop] Renderer crashed ${_crashCount} times, rebuilding BrowserView for ${url}`);
         try {
           mainWindow?.removeBrowserView(view);
           try { view.webContents.destroy(); } catch {}
@@ -2202,7 +2202,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // Checks renderer memory every 30 s.  Soft DOM trim at 500 MB,
     // hard reload only at 1536 MB with a 5 min cooldown to prevent
     // reload loops on media-heavy channels.  Hard reload is skipped
-    // entirely when the user is in voice or screen sharing — reloading
+    // entirely when the user is in voice or screen sharing; reloading
     // while capturing would abruptly drop the call for all participants.
     const MEM_THRESHOLD_MB = 1536;
     const MEM_WARN_MB      = 500;
@@ -2210,7 +2210,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     const MEM_RELOAD_COOLDOWN = 300000; // 5 min between hard reloads
     let _memCheckInterval = null;
     let _lastMemReload = 0;           // timestamp of last memory reload
-    const _memTrend = [];           // [{ts, mb}] — last 20 readings (~10 min)
+    const _memTrend = [];           // [{ts, mb}] of the last 20 readings (~10 min)
     const MEM_TREND_MAX = 20;
     const _startMemCheck = () => {
       _memCheckInterval = setInterval(async () => {
@@ -2220,7 +2220,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       }
       if (activeServerUrl !== url) return; // only check active view
       try {
-        // Use app.getAppMetrics() to find renderer memory by PID —
+        // Use app.getAppMetrics() to find renderer memory by PID:
         // getProcessMemoryInfo().private returns 0 on some Electron/Windows combos.
         const rendererPid = view.webContents.getOSProcessId();
         const allMetrics = app.getAppMetrics();
@@ -2233,9 +2233,9 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         if (_memTrend.length > MEM_TREND_MAX) _memTrend.shift();
 
         if (memMB > MEM_THRESHOLD_MB) {
-          // Hard reload — but only if we haven't reloaded recently to prevent loops
+          // Hard reload, but only if we haven't reloaded recently to prevent loops
           if (Date.now() - _lastMemReload < MEM_RELOAD_COOLDOWN) {
-            console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB — skipping reload (cooldown active), trimming DOM instead`);
+            console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB: skipping reload (cooldown active), trimming DOM instead`);
           } else {
             // Skip hard reload if the user is in an active voice or screen share session.
             // Reloading mid-call would abruptly kick them (and their screen share partner)
@@ -2250,20 +2250,20 @@ function ensureServerView(serverUrl, { background = false } = {}) {
               ).catch(() => false);
             } catch { inVoice = false; }
             if (inVoice) {
-              console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB — skipping hard reload because user is in voice/screen share, trimming DOM instead`);
+              console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB: skipping hard reload because user is in voice/screen share, trimming DOM instead`);
             } else {
-              console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
+              console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB, clearing caches & reloading`);
               _lastMemReload = Date.now();
               try { view.webContents.session.clearCache().catch(() => {}); } catch {}
               try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
-              return; // skip soft trim — we're reloading
+              return; // skip soft trim; we're reloading
             }
           }
         }
 
         if (memMB > MEM_WARN_MB) {
           // Soft intervention: trim excess DOM nodes + revoke blob URLs.
-          // CRITICAL: Do NOT use getBoundingClientRect() here — it forces
+          // CRITICAL: Do NOT use getBoundingClientRect() here; it forces
           // a synchronous layout recalculation for EVERY element, which
           // starves the renderer event loop and causes complete UI freezes.
           try {
@@ -2296,7 +2296,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // Sometimes the renderer goes blank without firing 'render-process-gone'
     // (e.g. GPU process crash, OOM).  Check if the renderer process is
     // crashed and reload if so.  IMPORTANT: we no longer use
-    // executeJavaScript() for this — injecting JS into a renderer that's
+    // executeJavaScript() for this: injecting JS into a renderer that's
     // already busy/stalled blocks the main process event loop and makes
     // the freeze WORSE.  isCrashed() is a synchronous C++ call on the
     // main process side that doesn't touch the renderer at all.
@@ -2364,7 +2364,7 @@ function handleWindowOpen(url) {
     if (/^https?:$/.test(parsed.protocol)) {
       // Only switch within the app for servers already registered in this session.
       // Unknown external URLs (including friends' Haven servers) open in the system
-      // browser — trying to auto-load them risks a failed navigation that resets the session.
+      // browser; trying to auto-load them risks a failed navigation that resets the session.
       const normalizedUrl = normalizeServerUrl(url);
       // Switching marks a server connected, so a removed one is not brought
       // back this way.
@@ -2421,10 +2421,10 @@ function safeSend(wc, channel, ...args) {
     if (!wc || wc.isDestroyed()) return;
     const frame = wc.mainFrame;
     if (!frame) return;
-    // Use the WebFrameMain directly — avoids the extra webContents dispatch
+    // Use the WebFrameMain directly; it avoids the extra webContents dispatch
     // layer that logs a native error even when we catch the JS exception.
     frame.send(channel, ...args);
-  } catch { /* frame disposed between check and send — harmless */ }
+  } catch { /* frame disposed between check and send; harmless */ }
 }
 
 // ── Notification Badge ───────────────────────────────────────
@@ -2479,8 +2479,8 @@ function createBadgeIcon() {
     }
   }
 
-  // White "!" centered at x=15.5 (4px wide: px 14–17).
-  // Bar: y 8–17 (10px).  Gap: y 18–21.  Dot: y 22–24 (3px).
+  // White "!" centered at x=15.5 (4px wide: px 14-17).
+  // Bar: y 8-17 (10px).  Gap: y 18-21.  Dot: y 22-24 (3px).
   const paint = (px, py) => {
     if (px < 0 || px >= s || py < 0 || py >= s) return;
     const idx = (py * s + px) * 4;
@@ -2495,7 +2495,7 @@ function createBadgeIcon() {
 
 function setNotificationBadge() {
   if (!mainWindow) return;
-  // Overlay/dock badge: always show when there are unreads (even if window is focused —
+  // Overlay/dock badge: always show when there are unreads (even if window is focused:
   // the user may be in a different channel and hasn't seen the new message yet).
   if (process.platform === 'win32' && badgeIcon) mainWindow.setOverlayIcon(badgeIcon, t('badge.newMessages'));
   if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(1);
@@ -3125,7 +3125,7 @@ function registerScreenShareHandler() {
         return;
       }
       if (!selected) {
-        // Truly nothing usable — log so we can tell this apart from a normal cancel.
+        // Truly nothing usable: log so we can tell this apart from a normal cancel.
         console.warn(`[ScreenShare] could not resolve selected source ${result.sourceId} after re-enumeration; aborting`);
         safeCallback({});
         return;
@@ -3543,7 +3543,7 @@ function registerIPC() {
   ipcMain.on('notification-badge', (e, hasUnread) => {
     // Identify which server sent this signal by matching the sender's
     // webContents.  Fall back to URL matching in case the webContents
-    // identity changed (e.g. after a renderer reload) — without this
+    // identity changed (e.g. after a renderer reload); without this
     // fallback a background server's notifications go unrecorded and the
     // sidebar dot for that server never lights up on any other open view.
     let senderUrl = null;
@@ -3567,7 +3567,7 @@ function registerIPC() {
 
     // Broadcast the latest map to EVERY open view (not just the active one).
     // Background views still render their server bars and need to update
-    // their dots too — and the active view filter previously dropped the
+    // their dots too, and the active view filter previously dropped the
     // signal whenever the sender happened to be the active view.
     // Includes a parallel name map so the renderer can surface an
     // "unread elsewhere" fallback icon for servers that aren't in the
@@ -3663,7 +3663,7 @@ function registerIPC() {
 
   // ── Clipboard: write image ───────────────────────────
   // Renderer-side navigator.clipboard.write([new ClipboardItem({...})])
-  // is unreliable for arbitrary remote images in Electron — the
+  // is unreliable for arbitrary remote images in Electron: the
   // user-gesture token gets dropped across the async fetch + decode,
   // and Chromium silently rejects the write with NotAllowedError.
   // Bypass it entirely by handing the image bytes to the main process
@@ -3697,7 +3697,7 @@ function registerIPC() {
         img = nativeImage.createFromBuffer(Buffer.from(b64, 'base64'));
       }
       if (!img || img.isEmpty()) return { ok: false, reason: 'decoded-empty' };
-      // Prefer clipboard.write({ image }) — on Windows this also clears
+      // Prefer clipboard.write({ image }): on Windows this also clears
       // stale CF_HTML / CF_TEXT formats that can make Paste in some apps
       // prefer an old text clip over the new image.
       try {
@@ -3819,7 +3819,7 @@ function registerIPC() {
     return true;
   });
 
-  // #35 — G-Sync / VRR FPS-drop workaround. Both flags are Chromium
+  // #35: G-Sync / VRR FPS-drop workaround. Both flags are Chromium
   // command-line switches applied at app boot, so flipping them requires a
   // restart to take effect. The renderer surfaces a toast saying so.
   ipcMain.handle('desktop:set-disable-gpu-vsync', (_e, enabled) => {
@@ -3874,12 +3874,12 @@ function registerIPC() {
     // Report registration outcome per-shortcut, with a reason when a bind
     // didn't take so the renderer can surface a useful toast instead of
     // the generic "may already be in use" message (#184).
-    //   'ok'                   — registered successfully
-    //   'uiohook-unavailable'  — bind needs uiohook-napi (Mouse4/5 or bare
+    //   'ok':                    registered successfully
+    //   'uiohook-unavailable':   bind needs uiohook-napi (Mouse4/5 or bare
     //                             modifier) and the optional native dep
     //                             didn't load (most common on Linux without
     //                             libuiohook installed)
-    //   'conflict'             — Electron's globalShortcut couldn't claim
+    //   'conflict':              Electron's globalShortcut couldn't claim
     //                             the combo (already taken by the OS or
     //                             another app)
     const uiohookOk = !!(_uiohook && _uiohookStarted);
@@ -4051,13 +4051,13 @@ function registerIPC() {
   // ── JavaScript dialog overrides for BrowserView (issue #6) ──
 
   ipcMain.on('dialog:alert', (event, { message }) => {
-    // Focus the window so the modal dialog is always visible — if it spawns
+    // Focus the window so the modal dialog is always visible; if it spawns
     // behind the app, the user can't dismiss it and the app appears frozen.
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
-    // showMessageBoxSync is intentionally synchronous here — confirm/alert/prompt
+    // showMessageBoxSync is intentionally synchronous here: confirm/alert/prompt
     // are modal by spec, so blocking is expected.  The REAL freeze causes were
     // the getBoundingClientRect reflow storm and executeJavaScript health checks,
     // not these dialog calls.
@@ -4086,7 +4086,7 @@ function registerIPC() {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
-    // Native Electron dialog — no cscript.exe, no execSync, no 5-minute timeout.
+    // Native Electron dialog: no cscript.exe, no execSync, no 5-minute timeout.
     const r = dialog.showMessageBoxSync(mainWindow, {
       type: 'question',
       buttons: [t('dialog.cancel'), t('dialog.ok')],

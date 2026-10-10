@@ -1,9 +1,9 @@
 @echo off
-title Haven Desktop — Setup
+title Haven Desktop: Setup
 color 0D
 echo.
 echo  =============================================
-echo   Haven Desktop — First-Time Setup
+echo   Haven Desktop: First-Time Setup
 echo  =============================================
 echo.
 
@@ -98,7 +98,7 @@ echo.
 :: break the link step on Node 26), then falls back to a plain node-gyp build.
 node "./scripts/build-native.js"
 
-:: node-gyp sends info to stderr so exit code can be wrong — check the file
+:: node-gyp sends info to stderr so exit code can be wrong; check the file
 if exist "native\build\Release\haven_audio.node" (
     color 0A
     echo.
@@ -111,7 +111,7 @@ color 0E
 echo.
 echo  !! Native audio addon failed to build.
 echo  Per-app audio isolation will NOT be available.
-echo  The app will still work — just with system audio.
+echo  The app will still work, just with system audio.
 echo.
 echo  To fix: install Visual Studio Build Tools 2022
 echo  https://visualstudio.microsoft.com/visual-cpp-build-tools/

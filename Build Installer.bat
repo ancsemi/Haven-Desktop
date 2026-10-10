@@ -1,9 +1,9 @@
 @echo off
-title Haven Desktop — Build Installer
+title Haven Desktop: Build Installer
 color 0B
 echo.
 echo  =============================================
-echo   Haven Desktop — Build Windows Installer
+echo   Haven Desktop: Build Windows Installer
 echo  =============================================
 echo.
 

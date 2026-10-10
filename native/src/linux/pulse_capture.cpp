@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Linux PulseAudio Per-App Audio Capture
+// Haven Desktop: Linux PulseAudio Per-App Audio Capture
 //
 // Strategy:
 //   1. Enumerate sink inputs → each has a PID + app name
@@ -118,7 +118,7 @@ static bool isOwnProcess(uint32_t pid, uint32_t rootPid) {
     return false;
 }
 
-// Synchronous PulseAudio helper — runs main loop until callback signals done
+// Synchronous PulseAudio helper: runs main loop until callback signals done
 struct PaSync {
     pa_mainloop*     ml  = nullptr;
     pa_mainloop_api* api = nullptr;
@@ -165,7 +165,7 @@ struct SinkInputInfo {
 
 // File-scope struct used by the sink-input enumeration callback.
 // Replaces an old trick of manual pointer arithmetic to reach the
-// "done" flag — that relied on the compiler placing no padding after
+// "done" flag. That relied on the compiler placing no padding after
 // the vector, which is UB-adjacent and crashed on some PipeWire hosts.
 struct SinkInputEnumData {
     std::vector<SinkInputInfo> inputs;

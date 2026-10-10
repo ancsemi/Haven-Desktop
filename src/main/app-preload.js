@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — App Window Preload
+// Haven Desktop: App Window Preload
 //
 // Loaded when the Haven web app runs inside the desktop shell.
 // Provides:
@@ -8,7 +8,7 @@
 //  • Native desktop notifications
 //  • Audio device enumeration & hot-switching
 //  • Transparent getDisplayMedia() override (Haven's voice.js
-//    calls the same API — our code intercepts and enhances it)
+//    calls the same API; our code intercepts and enhances it)
 // ═══════════════════════════════════════════════════════════
 
 const { ipcRenderer } = require('electron');
@@ -282,7 +282,7 @@ let _activeDisplayVideoTrack = null;
 // Latch for the GPU-confirmed badge. Every viewer peer reports its own stats
 // on its own timer and they all write to the same badge (last-wins), so once
 // any negotiated report proves hardware encoding for the current screen track
-// the badge stays confirmed until the track ends — instead of flickering
+// the badge stays confirmed until the track ends, instead of flickering
 // between confirmed/software as competing peer reports land.
 let _gpuConfirmedTrack = null;
 let _videoEncoderConfig = {
@@ -627,7 +627,7 @@ else window.addEventListener('DOMContentLoaded', injectBraidDesktopCss, { once: 
 // ── Dialog overrides (confirm / alert / prompt) ───────────
 // BrowserView doesn't support native browser dialogs.  We forward them
 // to the main process via sendSync, which blocks the renderer while the
-// OS dialog is visible.  This is intentionally synchronous — confirm()
+// OS dialog is visible.  This is intentionally synchronous: confirm()
 // and prompt() are modal by spec and callers expect a return value.
 //
 // The main process focuses the app window before showing the dialog, so
@@ -657,18 +657,18 @@ window.addEventListener('DOMContentLoaded', () => {
   try { localStorage.removeItem('haven_voice_channel'); } catch {}
 });
 
-// ─── Desktop Status Bar — guaranteed visible ─────────────────────────────
+// ─── Desktop Status Bar (guaranteed visible) ─────────────────────────────
 // The server's responsive CSS hides #status-bar at narrow viewport widths
 // (for mobile).  Windows DPI scaling can shrink the BrowserView's CSS
 // viewport below that threshold.  We solve this by injecting a fixed-position
-// bar at the bottom of the page from the preload — entirely independent of
+// bar at the bottom of the page from the preload, entirely independent of
 // the server's CSS layout.  We clone the server bar's live text nodes so
 // the data (ping, version, channel, online count) stays in sync.
 window.addEventListener('DOMContentLoaded', () => {
   // Inject the CSS once
   const css = document.createElement('style');
   css.textContent = `
-    /* Switch Server button on login page — fixed above the status bar */
+    /* Switch Server button on login page (fixed above the status bar) */
     #haven-switch-server-btn {
       position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
       z-index: 9998; padding: 8px 24px;
@@ -948,7 +948,7 @@ window.addEventListener('DOMContentLoaded', () => {
 //
 // BrowserView does not support the HTML5 Fullscreen API.
 // requestFullscreen() silently resolves but the element never
-// actually enters DOM fullscreen state — :fullscreen CSS never
+// actually enters DOM fullscreen state; :fullscreen CSS never
 // applies and the visual doesn't change.  We implement fullscreen
 // entirely manually: a CSS class for visual fullscreen + IPC to
 // toggle the Electron window's native fullscreen.
@@ -1062,7 +1062,7 @@ ipcRenderer.on('voice:ptt-toggle',    () => _pttToggleOnce('hook'));
 
 // PTT hold mode (#184): main fires -down on key/mouse press and -up on
 // release. We unmute on press and re-mute on release iff that state
-// transition is needed — the mute button is a toggle, so we only click
+// transition is needed: the mute button is a toggle, so we only click
 // it when its current visual state doesn't match the desired one.
 // The mic state is read from the app itself when it is there (window.app,
 // the object Haven's client exposes), and only from the mute button's class
@@ -1271,7 +1271,7 @@ ipcRenderer.on('audio:capture-data', (_event, payload) => {
     } else if (pcmData instanceof ArrayBuffer) {
       samples = new Float32Array(pcmData);
     } else if (ArrayBuffer.isView(pcmData)) {
-      // Buffer/Uint8Array — copy to a fresh aligned ArrayBuffer to avoid
+      // Buffer/Uint8Array: copy to a fresh aligned ArrayBuffer to avoid
       // RangeError when byteOffset is not 4-byte-aligned.
       const bytes = new Uint8Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength);
       const aligned = new ArrayBuffer(bytes.length);
@@ -1382,7 +1382,7 @@ async function buildAudioPipeline(isCancelled = () => false) {
   // (AudioWorklet blob URLs can fail in some Electron/BrowserView contexts)
   try {
     _audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
-    // Explicitly resume — BrowserView contexts may start suspended
+    // Explicitly resume: BrowserView contexts may start suspended
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
     if (isCancelled()) return false;
 
@@ -1447,10 +1447,10 @@ async function buildAudioPipeline(isCancelled = () => false) {
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
     window._havenAppAudioStream = _audioDestination.stream;
 
-    // Monitor AudioContext — BrowserView can re-suspend unexpectedly
+    // Monitor AudioContext: BrowserView can re-suspend unexpectedly
     window._havenAudioCtxMonitor = setInterval(() => {
       if (_audioCtx && _audioCtx.state === 'suspended') {
-        console.warn('[Haven Desktop] AudioContext suspended — resuming');
+        console.warn('[Haven Desktop] AudioContext suspended, resuming');
         _audioCtx.resume().catch(() => {});
       }
     }, 2000);
@@ -1524,10 +1524,10 @@ async function buildAudioPipeline(isCancelled = () => false) {
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
     window._havenAppAudioStream = _audioDestination.stream;
 
-    // Monitor AudioContext — BrowserView can re-suspend unexpectedly
+    // Monitor AudioContext: BrowserView can re-suspend unexpectedly
     window._havenAudioCtxMonitor = setInterval(() => {
       if (_audioCtx && _audioCtx.state === 'suspended') {
-        console.warn('[Haven Desktop] AudioContext suspended — resuming');
+        console.warn('[Haven Desktop] AudioContext suspended, resuming');
         _audioCtx.resume().catch(() => {});
       }
     }, 2000);
@@ -1574,17 +1574,17 @@ function teardownAudioPipeline(captureId = _activeAudioCaptureId) {
 //
 // After Electron's handler resolves with a video stream, we
 // swap the system-loopback audio track for our per-app track.
-// Haven's voice.js calls the same standard API — zero changes
+// Haven's voice.js calls the same standard API: zero changes
 // needed on the server/browser code.
 //
 // NOTE: navigator.mediaDevices is not available at preload
-// time — it only exists once the renderer page has loaded.
+// time; it only exists once the renderer page has loaded.
 // We defer the override until DOMContentLoaded.
 // ═══════════════════════════════════════════════════════════
 
 function installGetDisplayMediaOverride() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    // Not ready yet (rare, but possible) — retry briefly
+    // Not ready yet (rare, but possible); retry briefly
     setTimeout(installGetDisplayMediaOverride, 100);
     return;
   }
@@ -1896,13 +1896,13 @@ window.havenDesktop = {
 
   /** Report which server URLs this view can actually display in its sidebar.
    *  Main filters the taskbar overlay so it only counts unreads from
-   *  servers at least one open view can surface — preventing phantom
+   *  servers at least one open view can surface, preventing phantom
    *  badges from background-preloaded servers the user never added on
    *  the active origin. (#5269) */
   reportKnownServerUrls: (urls) => ipcRenderer.send('report-known-server-urls', urls),
 };
 
-console.log('[Haven Desktop] App preload ready — per-app audio & enhanced features active');
+console.log('[Haven Desktop] App preload ready: per-app audio & enhanced features active');
 
 // ═══════════════════════════════════════════════════════════
 // Auto-Update Banner

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Audio Capture Manager
+// Haven Desktop: Audio Capture Manager
 //
 // Provides per-application audio capture via native addons:
 //   • Windows  →  WASAPI Process Loopback (build 19041+)
@@ -47,7 +47,7 @@ class AudioCaptureManager {
       } catch { /* try next */ }
     }
 
-    console.warn('[AudioCapture] Native addon not found — per-app audio unavailable.');
+    console.warn('[AudioCapture] Native addon not found; per-app audio unavailable.');
     console.warn('[AudioCapture] Run  npm run build:native  to compile it.');
   }
 
@@ -80,7 +80,7 @@ class AudioCaptureManager {
     if (!status?.message) return status;
     const rawMessage = status.message;
     const exact = new Map([
-      ['OpenProcess failed for target PID — process may have exited or be protected', 'audio.status.openProcessFailed'],
+      ['OpenProcess failed for target PID: process may have exited or be protected', 'audio.status.openProcessFailed'],
       ['WASAPI activation timed out (>12s)', 'audio.status.wasapiTimeout'],
       ['capture stopped', 'audio.status.captureStopped'],
       ['ActivateAudioInterfaceAsync returned failure (process loopback API may be unavailable)', 'audio.status.wasapiUnavailable'],
@@ -91,8 +91,8 @@ class AudioCaptureManager {
       ['GetService(IAudioCaptureClient) failed', 'audio.status.wasapiServiceFailed'],
       ['IAudioClient::Start failed', 'audio.status.wasapiStartFailed'],
       ['WASAPI process loopback active', 'audio.status.wasapiActive'],
-      ['GetNextPacketSize repeatedly failed — aborting capture', 'audio.status.wasapiPacketFailed'],
-      ['GetBuffer repeatedly failed — aborting capture', 'audio.status.wasapiBufferFailed'],
+      ['GetNextPacketSize repeatedly failed, aborting capture', 'audio.status.wasapiPacketFailed'],
+      ['GetBuffer repeatedly failed, aborting capture', 'audio.status.wasapiBufferFailed'],
       ['Exclude-mode capture is not supported on Linux (PulseAudio/PipeWire)', 'audio.status.linuxExcludeUnsupported'],
       ['pulse capture stopped', 'audio.status.pulseStopped'],
       ['pa_context_connect failed (PulseAudio/PipeWire daemon not reachable)', 'audio.status.pulseUnavailable'],
@@ -101,7 +101,12 @@ class AudioCaptureManager {
       ['Native audio capture stopped producing data', 'audio.status.captureStalled'],
     ]);
 
-    let messageKey = exact.get(rawMessage);
+    // An addon built before these messages lost their dashes still sends the
+    // old wording, so map it onto the current keys.
+    const legacyMessage = rawMessage
+      .replace('target PID \u2014 process', 'target PID: process')
+      .replace('failed \u2014 aborting', 'failed, aborting');
+    let messageKey = exact.get(rawMessage) || exact.get(legacyMessage);
     let messageValues = {};
     if (!messageKey) {
       const wasapiMatch = /^activating (EXCLUDE|INCLUDE)-mode process loopback for PID (\d+)$/.exec(rawMessage);
@@ -204,7 +209,7 @@ class AudioCaptureManager {
       const s = this._localizeStatus(nativeStatus);
       this._lastStatus = s;
       if (s && s.kind === 'failed') this._initFailed = true;
-      console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}) — ${nativeStatus?.message}`);
+      console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}): ${nativeStatus?.message}`);
       if (onStatus) {
         try { onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
       }
@@ -225,7 +230,7 @@ class AudioCaptureManager {
       this._watchdog = this._setInterval(() => {
         if (this._capturing && this._generation === generation &&
             this._now() - this._lastDataAt > this._watchdogStallMs) {
-          console.warn('[AudioCapture] No data received in 11s — stopping capture');
+          console.warn('[AudioCapture] No data received in 11s, stopping capture');
           statusWrap({
             kind: 'failed',
             message: 'Native audio capture stopped producing data',

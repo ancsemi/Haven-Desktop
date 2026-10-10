@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Server Manager
+// Haven Desktop: Server Manager
 //
 // Detects, starts, and manages a local Haven server process.
 // ═══════════════════════════════════════════════════════════
@@ -197,7 +197,7 @@ class ServerManager {
     if (this.serverProcess) {
       const pid = this.serverProcess.pid;
       try {
-        // On Windows, SIGTERM doesn't always work — use taskkill for the process tree
+        // On Windows, SIGTERM doesn't always work; use taskkill for the process tree
         if (process.platform === 'win32' && pid) {
           const { execSync } = require('child_process');
           try { execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' }); } catch {}

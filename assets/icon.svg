@@ -16,7 +16,7 @@
   <polygon points="256,36 450,148 450,364 256,476 62,364 62,148"
     fill="none" stroke="url(#hex)" stroke-width="28" stroke-linejoin="round"
     filter="url(#glow)"/>
-  <!-- H lettermark — vertically centered using dominant-baseline -->
+  <!-- H lettermark, vertically centered using dominant-baseline -->
   <text x="256" y="256" text-anchor="middle" dominant-baseline="central"
     font-family="Arial,Helvetica,sans-serif" font-weight="bold" font-size="200"
     fill="url(#hex)" opacity=".95">H</text>

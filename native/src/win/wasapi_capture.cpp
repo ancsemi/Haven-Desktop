@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Windows WASAPI Per-Process Audio Capture
+// Haven Desktop: Windows WASAPI Per-Process Audio Capture
 //
 // Captures audio from a single process using the Windows
 // build 19041+ Process Loopback API.
@@ -17,7 +17,7 @@
 
 #include "wasapi_capture.h"
 
-// Windows headers — order matters
+// Windows headers: order matters
 #include <initguid.h>
 #include <windows.h>
 #include <mmreg.h>
@@ -461,7 +461,7 @@ bool WasapiCapture::IsSupported() const {
 // Enumerates audio sessions via WASAPI session manager.
 // Includes BOTH active AND inactive sessions so the picker can
 // show apps that are paused/silent (a paused YouTube tab still
-// has a session — users routinely want to resume + share it).
+// has a session; users routinely want to resume + share it).
 std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
     std::vector<AudioApp> result;
 
@@ -512,7 +512,7 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
             }
 
             // Skip system sounds and Haven Desktop itself (sharing our own
-            // audio just creates a feedback loop — see issue #5305).
+            // audio just creates a feedback loop; see issue #5305).
             if (ctrl2->IsSystemSoundsSession() == S_OK) {
                 ctrl2->Release(); ctrl->Release(); continue;
             }
@@ -533,7 +533,7 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
             app.name   = ProcessNameFromPid(pid);
             app.identity = ProcessIdentityFromPid(pid);
             app.active = (state == AudioSessionStateActive);
-            // Skip sessions for processes we can't even name — usually short-lived
+            // Skip sessions for processes we can't even name: usually short-lived
             // helpers that already exited.
             if (app.name == "Unknown" || app.identity.empty()) {
                 ctrl2->Release(); ctrl->Release(); continue;
@@ -612,7 +612,7 @@ bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
     if (!targetProcess) {
         DWORD err = GetLastError();
         emitStatus(CaptureStatusKind::Failed,
-            "OpenProcess failed for target PID — process may have exited or be protected",
+            "OpenProcess failed for target PID: process may have exited or be protected",
             err);
         return false;
     }
@@ -851,7 +851,7 @@ void WasapiCapture::captureLoop() {
     }
     m_startCv.notify_all();
 
-    // Init succeeded — let StartCapture return true.
+    // Init succeeded; let StartCapture return true.
     {
         char dbg[320];
         _snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
@@ -896,7 +896,7 @@ void WasapiCapture::captureLoop() {
             if (FAILED(hr)) {
                 if (++consecutiveErrors >= 50) {
                     emitStatus(CaptureStatusKind::Failed,
-                        "GetNextPacketSize repeatedly failed — aborting capture", hr);
+                        "GetNextPacketSize repeatedly failed, aborting capture", hr);
                     m_running = false;
                 }
                 break;
@@ -912,7 +912,7 @@ void WasapiCapture::captureLoop() {
             if (FAILED(hr)) {
                 if (++consecutiveErrors >= 50) {
                     emitStatus(CaptureStatusKind::Failed,
-                        "GetBuffer repeatedly failed — aborting capture", hr);
+                        "GetBuffer repeatedly failed, aborting capture", hr);
                     m_running = false;
                 }
                 break;

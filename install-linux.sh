@@ -1,5 +1,5 @@
 #!/bin/bash
-# Haven Desktop — Linux Desktop Integration
+# Haven Desktop: Linux Desktop Integration
 # Run this after downloading the AppImage to set up:
 #   - Application menu entry
 #   - Desktop icon

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — Welcome Screen Logic
+// Haven Desktop: Welcome Screen Logic
 // ═══════════════════════════════════════════════════════════
 
 (function () {
@@ -75,12 +75,12 @@
   $('#btn-min').onclick   = () => window.haven.window.minimize();
   $('#btn-close').onclick = () => window.haven.window.close();
 
-  // ═══════ Page 1 — Choose Mode ═══════════════════════════
+  // ═══════ Page 1: Choose Mode ═══════════════════════════
 
   $('#card-host').onclick = () => { showPage('#page-host'); detectServer(); };
   $('#card-join').onclick = () => { showPage('#page-join'); $('#server-url').focus(); loadRecentServers(); };
 
-  // ═══════ Page 2a — Host Flow ════════════════════════════
+  // ═══════ Page 2a: Host Flow ════════════════════════════
 
   $('#host-back').onclick = () => showPage('#page-choose');
   $('#btn-retry').onclick = () => detectServer();
@@ -126,7 +126,7 @@
     await startServer(dir);
   };
 
-  // Fresh server setup — link to Haven repo / instructions
+  // Fresh server setup: link to Haven repo / instructions
   $('#btn-setup-new').onclick = () => {
     window.haven.openExternal('https://github.com/ancsemi/Haven#one-click-setup');
   };
@@ -178,7 +178,7 @@
     }
   }
 
-  // ═══════ Page 2b — Join Flow ════════════════════════════
+  // ═══════ Page 2b: Join Flow ════════════════════════════
 
   const urlInput   = $('#server-url');
   const connectBtn = $('#btn-connect');
@@ -270,7 +270,7 @@
       return;
     }
 
-    // Strip to origin (protocol + host + port) — prevents double-path issues
+    // Strip to origin (protocol + host + port) to prevent double-path issues
     // e.g. "https://174.49.177.46:3000/app" → "https://174.49.177.46:3000"
     let serverUrl = parsed.origin;
     urlInput.value = serverUrl;

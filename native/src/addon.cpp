@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Haven Desktop — N-API Addon Entry Point
+// Haven Desktop: N-API Addon Entry Point
 //
 // Exports:
 //   isSupported()                → boolean
@@ -167,7 +167,7 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
     if (!ok) {
         if (g_tsfn)        { g_tsfn.Release();        g_tsfn = {}; }
         if (g_statusTsfn)  { g_statusTsfn.Release();  g_statusTsfn = {}; }
-        // Don't throw — the status callback (if provided) already reported
+        // Don't throw; the status callback (if provided) already reported
         // the reason. Returning false is sufficient and lets JS act on it.
         return Napi::Boolean::New(env, false);
     }
