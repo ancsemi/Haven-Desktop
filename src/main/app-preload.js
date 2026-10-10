@@ -1076,18 +1076,31 @@ function _pttState() {
   if (voice && typeof voice.isMuted === 'boolean') {
     return { app, isMuted: voice.isMuted, inVoice: !!voice.inVoice, source: 'app' };
   }
-  const btn = document.getElementById('voice-mute-btn') || document.getElementById('voice-mute-btn-header');
-  if (!btn) return null;
+  // Haven hides both mute buttons (inline display:none) while you are not in
+  // voice, so a shown one means you are in a call.
+  const buttons = [document.getElementById('voice-mute-btn'), document.getElementById('voice-mute-btn-header')].filter(Boolean);
+  if (!buttons.length) return null;
+  const shown = buttons.find(b => b.style?.display !== 'none');
+  const btn = shown || buttons[0];
   const pressed = btn.getAttribute('aria-pressed');
   const isMuted = (pressed === 'true' || pressed === 'false')
     ? pressed === 'true'
     : (btn.classList.contains('muted') || btn.classList.contains('is-muted'));
-  return { app, isMuted, inVoice: null, source: 'button', btn };
+  return { app, isMuted, inVoice: !!shown, source: 'button', btn };
+}
+// Push to talk only acts in a voice call. Outside one the key used to flip
+// the saved mute state and play the mute sound, which made it look as if
+// you were in voice when you were not (Haven-Desktop #64).
+function _pttOutOfVoice(s, what) {
+  if (s.inVoice !== false) return false;
+  console.log(`[PTT] ${what}: not in voice, ignored`);
+  return true;
 }
 function _pttSetTalking(shouldTalk, via = 'key') {
   const s = _pttState();
   const edge = shouldTalk ? 'down' : 'up';
   if (!s) { console.log(`[PTT] ${via} ${edge}: no voice state on the page yet, ignored`); return; }
+  if (_pttOutOfVoice(s, `${via} ${edge}`)) return;
   // shouldTalk → want unmuted. Flip only when the state has to change, so
   // the input hook and the page's own key handler never fight.
   const needFlip = shouldTalk ? s.isMuted : !s.isMuted;
@@ -1110,6 +1123,7 @@ function _pttToggleOnce(via) {
   _pttLastToggle = now;
   const s = _pttState();
   if (!s) { console.log(`[PTT] ${via} toggle: no voice state on the page yet, ignored`); return; }
+  if (_pttOutOfVoice(s, `${via} toggle`)) return;
   console.log(`[PTT] ${via} toggle: muted=${s.isMuted} inVoice=${s.inVoice} via ${s.source}`);
   if (s.app && typeof s.app._toggleMute === 'function') {
     try { s.app._toggleMute(); return; } catch (err) { console.warn('[PTT] _toggleMute threw:', err); }

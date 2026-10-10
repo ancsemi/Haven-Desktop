@@ -13,11 +13,11 @@ const SOURCE = fs.readFileSync(path.join(__dirname, '../src/main/app-preload.js'
 const START = SOURCE.indexOf('// ─── Global voice shortcut triggers');
 const END = SOURCE.indexOf('// ─── Server badge state updates', START);
 
-async function loadPtt(config) {
+async function loadPtt(config, { inVoice = true, buttons = null } = {}) {
   const ipc = new Map();
   const listeners = new Map();
   let now = 1000;
-  const app = { voice: { isMuted: true, inVoice: true }, toggles: 0 };
+  const app = { voice: { isMuted: true, inVoice }, toggles: 0 };
   app._toggleMute = () => { app.voice.isMuted = !app.voice.isMuted; app.toggles++; };
   const context = vm.createContext({
     ipcRenderer: {
@@ -25,13 +25,13 @@ async function loadPtt(config) {
       invoke: async (channel) => (channel === 'shortcuts:get' ? config : null),
     },
     window: {
-      app,
+      app: buttons ? undefined : app,
       addEventListener: (type, fn) => {
         if (!listeners.has(type)) listeners.set(type, []);
         listeners.get(type).push(fn);
       },
     },
-    document: { getElementById: () => null },
+    document: { getElementById: (id) => (buttons && buttons[id]) || null },
     console: { log() {}, warn() {} },
     Date: { now: () => now },
   });
@@ -92,4 +92,43 @@ test('other keys do nothing', async () => {
   const p = await loadPtt({ ptt: 'F8', pttMode: 'toggle' });
   p.key('keydown', 'F9');
   assert.equal(p.app.toggles, 0);
+});
+
+// Haven-Desktop #64: outside a call the key used to flip the mic and play
+// the mute sound.
+test('out of voice: hold mode does nothing, from the page or the hook', async () => {
+  const p = await loadPtt({ ptt: 'F8', pttMode: 'hold' }, { inVoice: false });
+  p.key('keydown', 'F8');
+  p.key('keyup', 'F8');
+  p.hook('voice:ptt-down');
+  p.hook('voice:ptt-up');
+  assert.equal(p.app.toggles, 0);
+  assert.equal(p.app.voice.isMuted, true, 'the saved mute state is left alone');
+});
+
+test('out of voice: toggle mode does nothing', async () => {
+  const p = await loadPtt({ ptt: 'F8', pttMode: 'toggle' }, { inVoice: false });
+  p.key('keydown', 'F8');
+  p.wait(400);
+  p.hook('voice:ptt-toggle');
+  assert.equal(p.app.toggles, 0);
+});
+
+test('older pages without the app object: a hidden mute button means not in voice', async () => {
+  const makeButton = (display) => {
+    const b = { style: { display }, clicks: 0, classList: { contains: () => true } };
+    b.getAttribute = () => null;
+    b.click = () => { b.clicks++; };
+    return b;
+  };
+  const hidden = { 'voice-mute-btn': makeButton('none'), 'voice-mute-btn-header': makeButton('none') };
+  const out = await loadPtt({ ptt: 'F8', pttMode: 'hold' }, { buttons: hidden });
+  out.hook('voice:ptt-down');
+  assert.equal(hidden['voice-mute-btn'].clicks + hidden['voice-mute-btn-header'].clicks, 0);
+
+  const inCall = { 'voice-mute-btn': makeButton('none'), 'voice-mute-btn-header': makeButton('') };
+  const p = await loadPtt({ ptt: 'F8', pttMode: 'hold' }, { buttons: inCall });
+  p.hook('voice:ptt-down');
+  assert.equal(inCall['voice-mute-btn-header'].clicks, 1, 'the shown button is the one pressed');
+  assert.equal(inCall['voice-mute-btn'].clicks, 0);
 });
