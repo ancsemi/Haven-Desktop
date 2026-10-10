@@ -56,8 +56,11 @@ function isWaylandSession(platform = process.platform, env = process.env) {
 
 // ── Auto-Updater (electron-updater) ───────────────────────
 let autoUpdater;
-try { ({ autoUpdater } = require('electron-updater')); } catch {}
+try { ({ autoUpdater } = require('electron-updater')); }
+catch (err) { console.warn('[AutoUpdate] electron-updater could not be loaded, update checks are off:', err.message); }
 let _manualUpdateCheck = false; // set by Help > Check for Updates (Haven #5627)
+const { createUpdateState, CHECK_INTERVAL_MS: UPDATE_CHECK_INTERVAL_MS } = require('./update-state');
+const updateState = createUpdateState();
 
 // ── Constants ─────────────────────────────────────────────
 
@@ -636,11 +639,19 @@ app.whenReady().then(async () => {
   });
 
   // ── Auto-update check (issue #3) ──────────────────────
+  // The answer is kept in updateState and sent to every open page; a page
+  // that loads later asks for it (update:state), so the banner no longer
+  // depends on the server page having loaded before GitHub answered (#63).
   if (autoUpdater) {
     autoUpdater.autoDownload = false;
     autoUpdater.on('update-available', (info) => {
+      const asked = _manualUpdateCheck;
       _manualUpdateCheck = false;
-      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:available', { version: info.version });
+      if (updateState.available(info.version, asked)) {
+        sendToUpdatePages('update:available', { version: info.version });
+      } else if (asked && updateState.forPage()?.status === 'downloaded') {
+        sendToUpdatePages('update:downloaded');
+      }
     });
     // The start-up check stays quiet when nothing is new; a check the user
     // asked for from the menu says so. (Haven #5627)
@@ -650,20 +661,26 @@ app.whenReady().then(async () => {
       showUpdateBox('info', t('update.upToDate', { version: app.getVersion() }));
     });
     autoUpdater.on('download-progress', (progress) => {
-      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:download-progress', { percent: Math.round(progress.percent) });
+      sendToUpdatePages('update:download-progress', { percent: Math.round(progress.percent) });
     });
     autoUpdater.on('update-downloaded', () => {
-      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:downloaded');
+      updateState.downloaded();
+      sendToUpdatePages('update:downloaded');
     });
     autoUpdater.on('error', (err) => {
       console.error('[AutoUpdate] Error:', err.message);
-      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:error', { message: err.message });
+      // Only a download in progress has a banner waiting on the result; a
+      // background check that fails (offline, say) stays in the log.
+      if (updateState.isDownloading()) sendToUpdatePages('update:error', { message: err.message });
       if (_manualUpdateCheck) {
         _manualUpdateCheck = false;
         showUpdateBox('error', t('update.error', { error: err.message }));
       }
     });
-    autoUpdater.checkForUpdates().catch(() => {});
+    runBackgroundUpdateCheck();
+    // People leave Haven running in the tray for days, so a check made only
+    // at launch can miss a release for a long time (#63).
+    if (app.isPackaged) setInterval(runBackgroundUpdateCheck, UPDATE_CHECK_INTERVAL_MS);
   }
 
   // ── Linux desktop integration (issue #3) ──────────────
@@ -2559,6 +2576,19 @@ function showUpdateBox(type, message) {
   try { parent ? dialog.showMessageBox(parent, opts) : dialog.showMessageBox(opts); } catch {}
 }
 
+// Every open server page and the welcome window get update news, not just
+// the active page: a server opened in the background, or one you switch to
+// later, shows the banner too. (#63)
+function sendToUpdatePages(channel, ...args) {
+  for (const view of serverViews.values()) safeSend(view?.webContents, channel, ...args);
+  if (welcomeWindow && !welcomeWindow.isDestroyed()) safeSend(welcomeWindow.webContents, channel, ...args);
+}
+
+function runBackgroundUpdateCheck() {
+  if (!autoUpdater || !updateState.shouldCheck()) return;
+  autoUpdater.checkForUpdates().catch(() => { /* logged by the updater's error handler */ });
+}
+
 function checkForUpdatesFromMenu() {
   if (!autoUpdater || !app.isPackaged) {
     showUpdateBox('info', app.isPackaged
@@ -3418,9 +3448,17 @@ function registerIPC() {
   // ── Auto-Update ───────────────────────────────────────
   ipcMain.handle('update:download', async () => {
     if (!autoUpdater) return { errorKey: 'update.unavailable' };
+    updateState.setDownloading(true);
     try { await autoUpdater.downloadUpdate(); return { success: true }; }
     catch (err) { return { error: err.message }; }
+    finally { updateState.setDownloading(false); }
   });
+  // A page that has just loaded asks what the updater found, so the banner
+  // shows even when the check answered before the page was there. (#63)
+  ipcMain.handle('update:state', () => updateState.forPage());
+  // Closing the banner keeps it closed on every page until a newer version
+  // turns up or the user checks from the menu.
+  ipcMain.on('update:dismiss', () => updateState.dismiss());
   ipcMain.on('update:install', () => {
     if (autoUpdater) {
       serverManager?.stopServer();

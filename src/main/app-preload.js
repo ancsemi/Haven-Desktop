@@ -1936,16 +1936,20 @@ console.log('[Haven Desktop] App preload ready — per-app audio & enhanced feat
     close.textContent = '✕';
     setI18nTitle(close, 'update.close');
     close.style.cssText = 'background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:16px;padding:0 4px;margin-left:4px;';
-    close.onclick = removeBanner;
+    close.onclick = () => { removeBanner(); ipcRenderer.send('update:dismiss'); };
     bannerEl.appendChild(close);
-    document.body.prepend(bannerEl);
+    // The news can arrive while the page is still loading, before there is
+    // a body to put the banner in (#63).
+    const el = bannerEl;
+    if (document.body) document.body.prepend(el);
+    else document.addEventListener('DOMContentLoaded', () => { if (bannerEl === el) document.body.prepend(el); }, { once: true });
   }
 
   function removeBanner() {
     if (bannerEl) { bannerEl.remove(); bannerEl = null; }
   }
 
-  ipcRenderer.on('update:available', (_e, { version }) => {
+  function showAvailable(version) {
     createBanner(
       'update.available',
       { version },
@@ -1963,24 +1967,38 @@ console.log('[Haven Desktop] App preload ready — per-app audio & enhanced feat
         }
       }
     );
-  });
+  }
 
-  ipcRenderer.on('update:download-progress', (_e, { percent }) => {
-    const msg = document.getElementById('haven-update-msg');
-    setI18nText(msg, 'update.downloadingProgress', { percent });
-  });
-
-  ipcRenderer.on('update:downloaded', () => {
+  function showDownloaded() {
     createBanner(
       'update.downloaded',
       null,
       'update.restartNow',
       () => ipcRenderer.send('update:install')
     );
+  }
+
+  ipcRenderer.on('update:available', (_e, { version }) => showAvailable(version));
+
+  ipcRenderer.on('update:download-progress', (_e, { percent }) => {
+    const msg = document.getElementById('haven-update-msg');
+    setI18nText(msg, 'update.downloadingProgress', { percent });
   });
+
+  ipcRenderer.on('update:downloaded', () => showDownloaded());
 
   ipcRenderer.on('update:error', (_e, { message }) => {
     const msg = document.getElementById('haven-update-msg');
     setI18nText(msg, 'update.error', { error: message });
   });
+
+  // Ask what the updater already found: the start-up check usually answers
+  // before this page has loaded, and the message it sent then is lost (#63).
+  // A popup opened from a server page (a picture in its own window) is left
+  // out; its server page has the banner.
+  if (!window.opener) ipcRenderer.invoke('update:state').then((state) => {
+    if (bannerEl || !state) return;
+    if (state.status === 'downloaded') showDownloaded();
+    else if (state.status === 'available') showAvailable(state.version);
+  }).catch(err => console.warn('[AutoUpdate] could not read the update state:', err?.message || err));
 })();

@@ -139,7 +139,7 @@ window.haven = {
   }
   function removeBanner() { if (bannerEl) { bannerEl.remove(); bannerEl = null; } }
 
-  ipcRenderer.on('update:available', (_e, { version }) => {
+  function showAvailable(version) {
     createBanner('update.available', { version }, 'update.now', async () => {
       const btn = document.getElementById('haven-update-btn');
       const msg = document.getElementById('haven-update-msg');
@@ -149,12 +149,20 @@ window.haven = {
       if (res?.errorKey) setI18nText(msg, res.errorKey);
       else if (res?.error) setI18nText(msg, 'update.failed', { error: res.error });
     });
-  });
+  }
+  function showDownloaded() {
+    createBanner('update.downloaded', null, 'update.restartNow', () => ipcRenderer.send('update:install'));
+  }
+  ipcRenderer.on('update:available', (_e, { version }) => showAvailable(version));
   ipcRenderer.on('update:download-progress', (_e, { percent }) => {
     const msg = document.getElementById('haven-update-msg');
     setI18nText(msg, 'update.downloadingProgress', { percent });
   });
-  ipcRenderer.on('update:downloaded', () => {
-    createBanner('update.downloaded', null, 'update.restartNow', () => ipcRenderer.send('update:install'));
-  });
+  ipcRenderer.on('update:downloaded', () => showDownloaded());
+  // The check may have answered before this window opened (#63).
+  ipcRenderer.invoke('update:state').then((state) => {
+    if (bannerEl || !state) return;
+    if (state.status === 'downloaded') showDownloaded();
+    else if (state.status === 'available') showAvailable(state.version);
+  }).catch(err => console.warn('[AutoUpdate] could not read the update state:', err?.message || err));
 })();
