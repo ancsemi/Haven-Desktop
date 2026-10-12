@@ -1486,13 +1486,17 @@ function showConnectionError(failedUrl) {
 
 // ── Multi-Server View Management ────────────────────────────
 
-// Experiment for the window edges that stopped resizing on Windows (right,
-// bottom and that corner only, since the move to Electron 42). Setting
-// HAVEN_VIEW_INSET to a few pixels keeps the server page that far from the
-// right and bottom edges, to see whether the page is what covers them. Off
-// (0) unless set; at most 8.
-const VIEW_INSET = Math.max(0, Math.min(8, parseInt(process.env.HAVEN_VIEW_INSET || '0', 10) || 0));
-if (VIEW_INSET) console.log(`[Haven] Server view inset ${VIEW_INSET}px (HAVEN_VIEW_INSET)`);
+// On Windows the server page covered the window's right and bottom resize
+// edges (and that corner) after the move to Electron 42: the cursor flickered
+// and the edge could not be grabbed. Keeping the page 1 pixel short of those
+// edges hands them back to the window frame. HAVEN_VIEW_INSET overrides the
+// gap (0 turns it off, at most 8).
+const VIEW_INSET = (() => {
+  const set = parseInt(process.env.HAVEN_VIEW_INSET, 10);
+  if (Number.isFinite(set)) return Math.max(0, Math.min(8, set));
+  return process.platform === 'win32' ? 1 : 0;
+})();
+
 function fullViewBounds(cw, ch) {
   return { x: 0, y: 0, width: Math.max(1, cw - VIEW_INSET), height: Math.max(1, ch - VIEW_INSET) };
 }
