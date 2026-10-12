@@ -1882,6 +1882,7 @@ window.havenDesktop = {
     setStartOnLogin:  (v)     => ipcRenderer.invoke('desktop:set-start-on-login', v),
     setStartHidden:   (v)     => ipcRenderer.invoke('desktop:set-start-hidden', v),
     setMinimizeToTray:(v)     => ipcRenderer.invoke('desktop:set-minimize-to-tray', v),
+    setFlashTaskbar:  (v)     => ipcRenderer.invoke('desktop:set-flash-taskbar', v),
     setForceSDR:      (v)     => ipcRenderer.invoke('desktop:set-force-sdr', v),
     setHideMenuBar:   (v)     => ipcRenderer.invoke('desktop:set-hide-menu-bar', v),
     setDisableGpuVsync:  (v)  => ipcRenderer.invoke('desktop:set-disable-gpu-vsync', v),

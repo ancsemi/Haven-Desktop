@@ -89,6 +89,7 @@ const store = new Store({
     startOnLogin:   false,    // launch Haven Desktop on OS login
     startHidden:    false,    // start minimized to tray (when startOnLogin is enabled)
     minimizeToTray: false,    // close button hides to tray instead of quitting
+    flashTaskbar:   true,     // flash the taskbar button for a notification while in the background
     forceSDR:       false,    // force sRGB color profile (fixes HDR over-saturation)
     hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
     disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
@@ -3552,8 +3553,12 @@ function registerIPC() {
     // Setting it here caused a race: the renderer would clear the badge (unreads=0)
     // right before notify() re-set it, leaving a phantom taskbar badge forever.
     // The taskbar flash does belong here: it goes with a notification, and
-    // focusing the window stops it. (Haven #5693)
-    try { if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true); } catch {}
+    // focusing the window stops it. (Haven #5693) It can be switched off in
+    // Settings: on KDE it shows as a highlight that stays until Haven is
+    // opened.
+    if (store.get('flashTaskbar') !== false) {
+      try { if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true); } catch (err) { console.warn('[Haven] taskbar flash failed:', err?.message || err); }
+    }
     return true;
   });
 
@@ -3779,6 +3784,7 @@ function registerIPC() {
     startOnLogin:     !!store.get('startOnLogin'),
     startHidden:      !!store.get('startHidden'),
     minimizeToTray:   !!store.get('minimizeToTray'),
+    flashTaskbar:     store.get('flashTaskbar') !== false,
     forceSDR:         !!store.get('forceSDR'),
     hideMenuBar:      !!store.get('hideMenuBar'),
     disableGpuVsync:  !!store.get('disableGpuVsync'),
@@ -3845,6 +3851,16 @@ function registerIPC() {
   ipcMain.handle('desktop:set-disable-gpu-vsync', (_e, enabled) => {
     store.set('disableGpuVsync', !!enabled);
     return { requiresRestart: true };
+  });
+
+  // Flash the taskbar for a notification. Turning it off also ends a flash
+  // already going.
+  ipcMain.handle('desktop:set-flash-taskbar', (_e, enabled) => {
+    store.set('flashTaskbar', !!enabled);
+    if (!enabled && mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.flashFrame(false); } catch (err) { console.warn('[Haven] could not stop the taskbar flash:', err?.message || err); }
+    }
+    return { requiresRestart: false };
   });
 
   ipcMain.handle('desktop:set-unlimit-frame-rate', (_e, enabled) => {
