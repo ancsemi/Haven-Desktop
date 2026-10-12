@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.6.3
+
+### Fixed
+- **The window's right and bottom edges can be grabbed to resize it again on
+  Windows.** The server page covered those edges since the move to Electron
+  42, so the cursor flickered and the edge would not take hold. The page now
+  stops 1 pixel short of them (not while maximized or full screen).
+
 ## v1.6.2
 
 ### Fixed
