@@ -1486,6 +1486,17 @@ function showConnectionError(failedUrl) {
 
 // ── Multi-Server View Management ────────────────────────────
 
+// Experiment for the window edges that stopped resizing on Windows (right,
+// bottom and that corner only, since the move to Electron 42). Setting
+// HAVEN_VIEW_INSET to a few pixels keeps the server page that far from the
+// right and bottom edges, to see whether the page is what covers them. Off
+// (0) unless set; at most 8.
+const VIEW_INSET = Math.max(0, Math.min(8, parseInt(process.env.HAVEN_VIEW_INSET || '0', 10) || 0));
+if (VIEW_INSET) console.log(`[Haven] Server view inset ${VIEW_INSET}px (HAVEN_VIEW_INSET)`);
+function fullViewBounds(cw, ch) {
+  return { x: 0, y: 0, width: Math.max(1, cw - VIEW_INSET), height: Math.max(1, ch - VIEW_INSET) };
+}
+
 /** Pin every non-active server view at 0×0 (no autoResize) and size the
  *  active view to the window content area. Safe to call on every resize /
  *  maximize (idempotent). */
@@ -1506,7 +1517,7 @@ function syncAllServerViewBounds() {
           view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
           continue;
         }
-        view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+        view.setBounds(fullViewBounds(cw, ch));
         // Native auto-resize follows Wayland configure events even when the
         // corresponding BrowserWindow resize event reports stale dimensions.
         view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
@@ -1554,7 +1565,7 @@ function switchToServer(serverUrl) {
       // Only expand once the view's page is ready; otherwise its dom-ready
       // handler does it, so the splash stays up until there is a page.
       if (view._havenPageReady) {
-        view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+        view.setBounds(fullViewBounds(cw, ch));
         view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
       }
     }
@@ -1717,7 +1728,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       if (activeServerUrl !== url) return;
       try {
         const [cw, ch] = mainWindow.getContentSize();
-        view.setBounds({ x: 0, y: 0, width: cw, height: ch });
+        view.setBounds(fullViewBounds(cw, ch));
         view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
         mainWindow.setTopBrowserView(view);
         safeSend(view.webContents, 'i18n:became-active', getI18nState());
