@@ -1497,8 +1497,13 @@ const VIEW_INSET = (() => {
   return process.platform === 'win32' ? 1 : 0;
 })();
 
+// A maximized or full-screen window has no edges to grab, so the gap would
+// only show as a thin strip; the page fills it then (maximize and full
+// screen both resize the views).
 function fullViewBounds(cw, ch) {
-  return { x: 0, y: 0, width: Math.max(1, cw - VIEW_INSET), height: Math.max(1, ch - VIEW_INSET) };
+  const edges = mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMaximized() && !mainWindow.isFullScreen();
+  const inset = edges ? VIEW_INSET : 0;
+  return { x: 0, y: 0, width: Math.max(1, cw - inset), height: Math.max(1, ch - inset) };
 }
 
 /** Pin every non-active server view at 0×0 (no autoResize) and size the
