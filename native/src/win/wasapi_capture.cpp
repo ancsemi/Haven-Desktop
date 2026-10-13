@@ -246,8 +246,11 @@ static std::string WideToUtf8(const wchar_t* wide) {
 }
 
 // ── Helper: get process name from PID ─────────────────────
+// Only the limited query right: reading the image name needs nothing more,
+// and games that run elevated or behind anti-cheat refuse PROCESS_VM_READ,
+// which left them nameless and so missing from the picker (#5760).
 static std::string ProcessNameFromPid(DWORD pid) {
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) return "Unknown";
     wchar_t buf[MAX_PATH] = {};
     DWORD sz = MAX_PATH;
