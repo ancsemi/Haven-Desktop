@@ -556,6 +556,49 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
     return result;
 }
 
+// ── GetWindowProcesses ─────────────────────────────────────
+// The process behind each shareable window, so the picker can offer the
+// window's own audio whether or not it is playing anything right now (a
+// game that goes quiet when it loses focus still has a window). Process
+// loopback capture targets the PID, not an audio session, so a silent
+// process can be captured and picks up as soon as it makes sound (#5760).
+std::vector<WindowProcess> GetWindowProcesses(const std::vector<uint64_t>& hwnds) {
+    std::vector<WindowProcess> result;
+    const DWORD ourPid = GetCurrentProcessId();
+    const auto processParents = SnapshotProcessParents();
+
+    struct ChildSearch { DWORD framePid; DWORD found; };
+    for (uint64_t raw : hwnds) {
+        HWND hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(raw));
+        if (!IsWindow(hwnd)) continue;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == 0) continue;
+        std::string name = ProcessNameFromPid(pid);
+        // A Store app's top-level window belongs to ApplicationFrameHost;
+        // the app itself owns a window inside it.
+        if (_stricmp(name.c_str(), "ApplicationFrameHost") == 0) {
+            ChildSearch search{pid, 0};
+            EnumChildWindows(hwnd, [](HWND child, LPARAM param) -> BOOL {
+                auto* s = reinterpret_cast<ChildSearch*>(param);
+                DWORD childPid = 0;
+                GetWindowThreadProcessId(child, &childPid);
+                if (childPid != 0 && childPid != s->framePid) { s->found = childPid; return FALSE; }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&search));
+            if (search.found == 0) continue;
+            pid = search.found;
+            name = ProcessNameFromPid(pid);
+        }
+        // Never Haven itself: sharing our own audio only makes an echo.
+        if (pid == ourPid || IsProcessInTree(pid, ourPid, processParents)) continue;
+        std::string identity = ProcessIdentityFromPid(pid);
+        if (name == "Unknown" || identity.empty()) continue;
+        result.push_back({raw, pid, name, identity});
+    }
+    return result;
+}
+
 // ── emitStatus helper ──────────────────────────────────────
 void WasapiCapture::emitStatus(CaptureStatusKind kind, const std::string& msg, int64_t code) {
     {

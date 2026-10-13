@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { normalizeAudioMode, pairWindowAudio, windowHandleOf } = require('../src/main/screen-share-audio');
 const test = require('node:test');
 const { isTrustedMainFrame } = require('../src/main/ipc-security');
 
@@ -40,6 +41,9 @@ for (const platform of ['win32', 'linux']) {
       },
       resolveSelectedSource: async () => source,
       resolveAudioSelection: () => ({ type: 'none', app: null }),
+      normalizeAudioMode,
+      pairWindowAudio,
+      windowHandleOf,
       prepareStandardScreenShare: async () => ({ audioReady: false }),
       safeSend() {},
       console: { log() {}, warn() {}, error: (...args) => { throw new Error(args.join(' ')); } },

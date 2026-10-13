@@ -7,7 +7,47 @@ const {
   createAudioCaptureController,
   resolveAudioSelection,
   shouldDropAudioPacket,
+  normalizeAudioMode,
+  pairWindowAudio,
+  windowHandleOf,
 } = require('../src/main/screen-share-audio');
+
+test('the shared window is paired with its process, and that process may be captured while silent (#5760)', () => {
+  const sources = [
+    { id: 'screen:0:0' },
+    { id: 'window:1001:0' },
+    { id: 'window:1002:0' },
+    { id: 'window:1003:0' },
+  ];
+  const audio = [{ pid: 42, name: 'Music', identity: 'music:1' }];
+  const windows = [
+    { hwnd: 1001, pid: 42, name: 'Music', identity: 'music:1' },
+    { hwnd: 1002, pid: 77, name: 'Game', identity: 'game:1' },
+    { hwnd: 1003, pid: 0, name: 'Bad', identity: 'x' },
+    { hwnd: 9999, pid: 88, name: 'Not shared', identity: 'y' },
+  ];
+  const { windowAudio, capturable } = pairWindowAudio(sources, audio, windows);
+  assert.deepEqual(windowAudio, { 'window:1001:0': { pid: 42, name: 'Music' }, 'window:1002:0': { pid: 77, name: 'Game' } });
+  assert.deepEqual(capturable.map(a => a.pid), [42, 77]);
+  assert.equal(capturable[1].active, false);
+  // The game is accepted by the same gate as a listed app; a PID main never
+  // listed still is not.
+  assert.equal(resolveAudioSelection(77, capturable, {}).app.pid, 77);
+  assert.equal(resolveAudioSelection(88, capturable, {}).type, 'none');
+  // The picker's own list stays as it was.
+  assert.equal(audio.length, 1);
+});
+
+test('window handles come only from window sources, and the audio mode falls back to the shared window', () => {
+  assert.equal(windowHandleOf('window:123:0'), 123);
+  assert.equal(windowHandleOf('screen:1:0'), null);
+  assert.equal(windowHandleOf('window:abc:0'), null);
+  assert.equal(windowHandleOf(null), null);
+  assert.equal(normalizeAudioMode('system'), 'system');
+  assert.equal(normalizeAudioMode('none'), 'none');
+  assert.equal(normalizeAudioMode(undefined), 'window');
+  assert.equal(normalizeAudioMode('42'), 'window');
+});
 
 const apps = [{ pid: 42, name: 'Music' }];
 

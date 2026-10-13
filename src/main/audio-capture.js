@@ -76,6 +76,17 @@ class AudioCaptureManager {
     catch (e) { console.error('[AudioCapture] getAudioApplications:', e); return []; }
   }
 
+  /**
+   * The process behind each window handle (Windows only; [] elsewhere, or
+   * with an audio module built before this existed).
+   * @returns {Array<{hwnd:number, pid:number, name:string, identity:string}>}
+   */
+  getWindowProcesses(hwnds) {
+    if (!this._addon || typeof this._addon.getWindowProcesses !== 'function') return [];
+    try { return this._addon.getWindowProcesses(hwnds); }
+    catch (e) { console.warn('[AudioCapture] getWindowProcesses:', e.message); return []; }
+  }
+
   _localizeStatus(status) {
     if (!status?.message) return status;
     const rawMessage = status.message;

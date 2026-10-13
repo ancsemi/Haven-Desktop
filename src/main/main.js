@@ -27,7 +27,10 @@ const {
 const { PipeWireStreamRouter } = require('./pipewire-stream-router');
 const {
   createAudioCaptureController,
+  normalizeAudioMode,
+  pairWindowAudio,
   resolveAudioSelection,
+  windowHandleOf,
 } = require('./screen-share-audio');
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
@@ -97,6 +100,7 @@ const store = new Store({
     linuxVaapiBypass:  false, // skip Chromium's VA-API driver blocklist on Linux (off by default)
     linuxForceX11:     false, // run through X11 (XWayland) instead of native Wayland (Haven #5721)
     videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
+    screenShareAudioMode: 'window', // share picker audio: 'window' | 'system' | 'none' (#5760)
     serverHistory:  [],       // [{url, name, lastConnected}] of recent server connections
     serverListRemoved: [],    // servers the user removed; pages may not add them back
     serverListOrder:   [],    // the user's server rail order, shared by every server
@@ -2790,7 +2794,8 @@ function getScreenPickerCopy() {
     'automaticEncoder', 'unavailable', 'hardwareEncodingAvailable',
     'hardwareEncodingUnavailable', 'h265Available',
     'h265Unavailable', 'silent', 'silentDescription', 'noPreview', 'cancel',
-    'share', 'continue',
+    'share', 'continue', 'windowAudio', 'windowAudioFrom', 'windowAudioFallbackSystem',
+    'windowAudioFallbackNone',
   ];
   return Object.fromEntries(keys.map(key => [key, t(`screenPicker.${key}`)]));
 }
@@ -3095,6 +3100,17 @@ function registerScreenShareHandler() {
         moduleOutdated: audioModuleOutdated,
       };
 
+      // The shared window's own audio (#5760): which process is behind each
+      // window, playing or not. Windows only; elsewhere the list is empty.
+      let windowAudio = {};
+      let capturableApps = audioApps;
+      if (process.platform === 'win32' && nativeAudioAvailable) {
+        const handles = sources.map(s => windowHandleOf(s.id)).filter(Boolean);
+        const paired = pairWindowAudio(sources, audioApps, audioCapture.getWindowProcesses(handles));
+        windowAudio = paired.windowAudio;
+        capturableApps = paired.capturable;
+      }
+
       const sourceData = sources.map(s => ({
         id:         s.id,
         name:       s.name,
@@ -3118,6 +3134,8 @@ function registerScreenShareHandler() {
         audioCapabilities,
         portalOnly: wayland && sourceData.length === 1,
         videoEncoder,
+        windowAudio,
+        audioMode: normalizeAudioMode(store.get('screenShareAudioMode')),
       };
 
       const result = await requestScreenPicker(targetContents, pickerData, { requestFrame });
@@ -3132,6 +3150,11 @@ function registerScreenShareHandler() {
         'videoEncoderPreference',
         normalizeVideoEncoderPreference(result.videoEncoderPreference)
       );
+      // The audio mode is remembered; one particular app picked from the
+      // list is not (its process is gone next time).
+      if (['window', 'system', 'none'].includes(result.audioMode)) {
+        store.set('screenShareAudioMode', result.audioMode);
+      }
 
       // desktopCapturer already received the portal-selected source on
       // Wayland; re-enumerating here would open the system picker again. The
@@ -3159,7 +3182,7 @@ function registerScreenShareHandler() {
       // Unknown, stale, or forged values resolve to no audio.
       let audioSelection = resolveAudioSelection(
         result.audioAppPid,
-        audioApps,
+        capturableApps,
         audioCapabilities
       );
       let selectedAudioApp = audioSelection.app;

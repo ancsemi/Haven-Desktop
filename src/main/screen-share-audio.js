@@ -1,3 +1,47 @@
+// The share picker's audio modes. 'window' shares the audio of whichever
+// window is being shared (#5760), and is where the picker starts unless the
+// person picked something else last time.
+const AUDIO_MODES = ['window', 'system', 'none'];
+
+function normalizeAudioMode(value) {
+  return AUDIO_MODES.includes(value) ? value : 'window';
+}
+
+// "window:<HWND>:<n>" on Windows: the window handle as a number.
+function windowHandleOf(sourceId) {
+  const match = /^window:(\d+):/.exec(String(sourceId || ''));
+  if (!match) return null;
+  const handle = Number(match[1]);
+  return Number.isSafeInteger(handle) && handle > 0 ? handle : null;
+}
+
+// Pairs each shared-window source with the process behind it. Returns the
+// pairs for the picker ({sourceId: {pid, name}}) and the full list of PIDs
+// that may be captured: the audio apps plus those window processes, which
+// may have no audio session at the moment (a game that goes quiet when it
+// loses focus). Main builds both lists, so a picker answer outside them is
+// still refused.
+function pairWindowAudio(sources, audioApps, windowProcesses) {
+  const byHandle = new Map();
+  for (const w of Array.isArray(windowProcesses) ? windowProcesses : []) {
+    if (!w || !Number.isSafeInteger(w.hwnd) || !Number.isSafeInteger(w.pid) || w.pid <= 0) continue;
+    if (typeof w.identity !== 'string' || !w.identity) continue;
+    byHandle.set(w.hwnd, w);
+  }
+  const windowAudio = {};
+  const capturable = [...audioApps];
+  for (const source of Array.isArray(sources) ? sources : []) {
+    const handle = windowHandleOf(source && source.id);
+    const owner = handle && byHandle.get(handle);
+    if (!owner) continue;
+    windowAudio[source.id] = { pid: owner.pid, name: owner.name || String(owner.pid) };
+    if (!capturable.some(app => app.pid === owner.pid)) {
+      capturable.push({ pid: owner.pid, name: owner.name, identity: owner.identity, active: false, fromWindow: true });
+    }
+  }
+  return { windowAudio, capturable };
+}
+
 function resolveAudioSelection(value, audioApps, capabilities) {
   if (value === 'system' && capabilities?.system === true) {
     return { type: 'system', app: null };
@@ -119,8 +163,12 @@ function createAudioCaptureController(stopCapture) {
 }
 
 module.exports = {
+  AUDIO_MODES,
   BoundedPcmRing,
   createAudioCaptureController,
+  normalizeAudioMode,
+  pairWindowAudio,
   resolveAudioSelection,
   shouldDropAudioPacket,
+  windowHandleOf,
 };

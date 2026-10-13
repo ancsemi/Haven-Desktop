@@ -64,8 +64,16 @@ picker.onData(data => {
   // matching the previous picker. Only fall back to None when system
   // capture is unavailable.
   const systemAvailable = audioCapabilities.system === true;
+  // The shared window's own audio (#5760): main pairs each window with the
+  // process behind it. Offered whenever any window could be paired, and
+  // chosen by default unless something else was picked last time.
+  const windowAudio = data.windowAudio && typeof data.windowAudio === 'object' ? data.windowAudio : {};
+  const windowAudioAvailable = audioCapabilities.application === true && Object.keys(windowAudio).length > 0;
+  const fallbackAudio = systemAvailable ? 'system' : 'none';
   let selectedSource = portalOnly ? sources[0].id : null;
-  let selectedAudio = systemAvailable ? 'system' : 'none';
+  let selectedAudio = data.audioMode === 'none' ? 'none'
+    : (data.audioMode === 'system' && systemAvailable) ? 'system'
+      : windowAudioAvailable ? 'window' : fallbackAudio;
   let selectedEncoder = normalizePreference(encoder.preference);
   share.disabled = !selectedSource;
 
@@ -78,6 +86,18 @@ picker.onData(data => {
     button.setAttribute('aria-pressed', 'true');
     selectedSource = sourceId;
     share.disabled = false;
+    updateWindowAudioNote();
+  };
+
+  // Under the modes: whose audio "the shared window" means right now.
+  const updateWindowAudioNote = () => {
+    const note = document.getElementById('window-audio-note');
+    if (!note) return;
+    if (selectedAudio !== 'window' || !selectedSource) { note.textContent = ''; return; }
+    const owner = windowAudio[selectedSource];
+    note.textContent = owner
+      ? String(copy.windowAudioFrom || '').replace('{name}', owner.name || '')
+      : (fallbackAudio === 'system' ? copy.windowAudioFallbackSystem : copy.windowAudioFallbackNone) || '';
   };
 
   if (!portalOnly) {
@@ -153,6 +173,7 @@ picker.onData(data => {
     button.classList.add('selected');
     button.setAttribute('aria-pressed', 'true');
     selectedAudio = value;
+    updateWindowAudioNote();
   };
   const addAudioOption = (parent, label, value, selected = false, icon = null) => {
     const button = document.createElement('button');
@@ -174,6 +195,9 @@ picker.onData(data => {
     return button;
   };
 
+  if (windowAudioAvailable) {
+    addAudioOption(modes, copy.windowAudio, 'window', selectedAudio === 'window');
+  }
   addAudioOption(modes, copy.noAudio, 'none', selectedAudio === 'none');
   if (audioCapabilities.system === true) {
     addAudioOption(modes, copy.systemAudio, 'system', selectedAudio === 'system');
@@ -215,17 +239,25 @@ picker.onData(data => {
     ? copy.audioUnavailable
     : (audioCapabilities.moduleOutdated === true ? copy.audioModuleOutdated : ''));
 
+  updateWindowAudioNote();
+
   let submitted = false;
   const submit = cancelled => {
     if (submitted) return;
     submitted = true;
+    // "The shared window" becomes that window's process, or the fallback
+    // for a whole screen (or a window that could not be paired).
+    const audioAppPid = selectedAudio === 'window'
+      ? (windowAudio[selectedSource]?.pid || fallbackAudio)
+      : selectedAudio;
     picker.submit(cancelled ? {
       requestId: data.requestId,
       cancelled: true,
     } : {
       requestId: data.requestId,
       sourceId: selectedSource,
-      audioAppPid: selectedAudio,
+      audioAppPid,
+      audioMode: typeof selectedAudio === 'string' ? selectedAudio : undefined,
       videoEncoderPreference: selectedEncoder,
     });
   };

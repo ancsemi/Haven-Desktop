@@ -23,6 +23,16 @@
 
 namespace haven {
 
+// The process that owns a window, for offering a shared window's own audio.
+struct WindowProcess {
+    uint64_t    hwnd;
+    uint32_t    pid;
+    std::string name;
+    std::string identity;
+};
+
+std::vector<WindowProcess> GetWindowProcesses(const std::vector<uint64_t>& hwnds);
+
 class WasapiCapture : public IAudioCapture {
 public:
     WasapiCapture();

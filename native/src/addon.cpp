@@ -7,10 +7,14 @@
 //   startCapture(pid, callback) → undefined
 //   stopCapture()               → undefined
 //   cleanup()                   → undefined
+//   getWindowProcesses(hwnds)   → Array<{hwnd, pid, name, identity}> (Windows; [] elsewhere)
 // ═══════════════════════════════════════════════════════════
 
 #include <napi.h>
 #include "audio_capture.h"
+#ifdef PLATFORM_WINDOWS
+#include "win/wasapi_capture.h"
+#endif
 #include <memory>
 #include <cstring>
 #include <chrono>
@@ -258,6 +262,38 @@ static Napi::Value OptOutOfDucking(const Napi::CallbackInfo& info) {
 }
 #endif
 
+// ── getWindowProcesses(hwnds) ──────────────────────────────
+// The process behind each window handle (#5760). Only Windows can map a
+// shared window to its process; elsewhere the list is empty.
+static Napi::Value GetWindowProcessesJs(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+#ifdef PLATFORM_WINDOWS
+    std::vector<uint64_t> hwnds;
+    if (info.Length() >= 1 && info[0].IsArray()) {
+        Napi::Array input = info[0].As<Napi::Array>();
+        for (uint32_t i = 0; i < input.Length() && i < 512; i++) {
+            Napi::Value v = input[i];
+            if (!v.IsNumber()) continue;
+            double d = v.As<Napi::Number>().DoubleValue();
+            if (d > 0 && d < 9007199254740992.0) hwnds.push_back(static_cast<uint64_t>(d));
+        }
+    }
+    auto found = haven::GetWindowProcesses(hwnds);
+    Napi::Array arr = Napi::Array::New(env, found.size());
+    for (size_t i = 0; i < found.size(); i++) {
+        Napi::Object obj = Napi::Object::New(env);
+        obj.Set("hwnd", Napi::Number::New(env, static_cast<double>(found[i].hwnd)));
+        obj.Set("pid", Napi::Number::New(env, found[i].pid));
+        obj.Set("name", Napi::String::New(env, found[i].name));
+        obj.Set("identity", Napi::String::New(env, found[i].identity));
+        arr[i] = obj;
+    }
+    return arr;
+#else
+    return Napi::Array::New(env, 0);
+#endif
+}
+
 // ── Module init ────────────────────────────────────────────
 static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("isSupported",           Napi::Function::New(env, IsSupported));
@@ -266,6 +302,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("stopCapture",           Napi::Function::New(env, StopCapture));
     exports.Set("cleanup",              Napi::Function::New(env, Cleanup));
     exports.Set("optOutOfDucking",       Napi::Function::New(env, OptOutOfDucking));
+    exports.Set("getWindowProcesses",    Napi::Function::New(env, GetWindowProcessesJs));
     return exports;
 }
 
