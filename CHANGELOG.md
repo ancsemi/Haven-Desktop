@@ -1,5 +1,20 @@
 # Haven Desktop Changelog
 
+## v1.7.0
+
+### Added
+- **Mute any server from the server bar.** Right-click a server's icon to
+  mute it, or mute it except for @mentions. DMs still come through, and
+  muted servers show a 🔕 mark. Needs Haven server 4.23.0 or newer.
+- **Share the sound of the window you are sharing (Haven #5760).** The share
+  picker has a new audio choice, Audio from the shared window, which picks up
+  the app behind the window you share. It is on by default and remembered.
+- **The taskbar flash on notifications can be switched off** in Settings.
+
+### Fixed
+- **Games running as administrator or behind anti-cheat show up in the share
+  audio list (Haven #5760).**
+
 ## v1.6.3
 
 ### Fixed
