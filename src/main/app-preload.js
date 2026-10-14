@@ -1895,6 +1895,17 @@ window.havenDesktop = {
   /** Query per-server unread badge state for notification dots */
   getServerBadges: () => ipcRenderer.invoke('get-server-badges'),
 
+  /** Server mute, shared by every server page: { origin: 'all' | 'mentions' }.
+   *  set(url, mode) with mode null unmutes. onChanged(cb) hears every change. */
+  serverMute: {
+    getAll: () => ipcRenderer.invoke('server-mute:get-all'),
+    set: (url, mode) => ipcRenderer.invoke('server-mute:set', String(url || ''), mode == null ? null : String(mode)),
+    onChanged: (cb) => {
+      if (typeof cb !== 'function') return;
+      ipcRenderer.on('server-mute:changed', (_e, data) => { try { cb(data); } catch (err) { console.warn('[Haven] server mute listener failed:', err.message); } });
+    },
+  },
+
   /** Report which server URLs this view can actually display in its sidebar.
    *  Main filters the taskbar overlay so it only counts unreads from
    *  servers at least one open view can surface, preventing phantom

@@ -101,6 +101,7 @@ const store = new Store({
     linuxForceX11:     false, // run through X11 (XWayland) instead of native Wayland (Haven #5721)
     videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
     screenShareAudioMode: 'window', // share picker audio: 'window' | 'system' | 'none' (#5760)
+    serverMutes: {},          // server origin → 'all' | 'mentions' (server mute, set from any server's icon)
     serverHistory:  [],       // [{url, name, lastConnected}] of recent server connections
     serverListRemoved: [],    // servers the user removed; pages may not add them back
     serverListOrder:   [],    // the user's server rail order, shared by every server
@@ -4097,6 +4098,34 @@ function registerIPC() {
     const before = JSON.stringify(list);
     setOrder(list, urls);
     return saveServerList(list, before);
+  });
+
+  // ── Server mute ───────────────────────────────────────
+  // Muting a server is the server's own account setting (it decides its
+  // notifications, and its push). Desktop keeps a copy per server so any
+  // server's sidebar can show which are muted, and so muting another server
+  // from its icon reaches that server's page, which then saves it there.
+  const MUTE_MODES = ['all', 'mentions'];
+  const muteKey = (url) => {
+    try { return new URL(String(url)).origin; } catch { return null; } // not a URL: refused
+  };
+  ipcMain.handle('server-mute:get-all', (e) => {
+    if (!serverListSender(e)) return {};
+    const all = store.get('serverMutes');
+    return all && typeof all === 'object' ? { ...all } : {};
+  });
+  ipcMain.handle('server-mute:set', (e, url, mode) => {
+    if (!serverListSender(e)) return false;
+    const key = muteKey(url);
+    if (!key) return false;
+    const all = { ...(store.get('serverMutes') || {}) };
+    const next = MUTE_MODES.includes(mode) ? mode : null;
+    if ((all[key] || null) === next) return true;
+    if (next) all[key] = next; else delete all[key];
+    store.set('serverMutes', all);
+    const targets = new Set([mainWindow?.webContents, ...Array.from(serverViews.values(), view => view.webContents)]);
+    for (const contents of targets) safeSend(contents, 'server-mute:changed', { url: key, mode: next });
+    return true;
   });
 
   // ── External links ────────────────────────────────────
