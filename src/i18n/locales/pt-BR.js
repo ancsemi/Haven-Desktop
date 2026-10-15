@@ -153,6 +153,8 @@ module.exports = {
   'dialog.cancel': 'Cancelar',
   'dialog.ok': 'OK',
   'dialog.defaultValue': 'Padrão: {value}',
+  'dialog.fromServer': '{host} diz',
+
 
   'device.microphone': 'Microfone',
   'device.speaker': 'Alto-falante',

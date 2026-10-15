@@ -35,6 +35,7 @@ const {
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame } = require('./ipc-security');
+const { isTypingKeyAccelerator, dialogHost, notificationTitle } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
@@ -1024,6 +1025,15 @@ function registerVoiceShortcuts() {
   for (const b of bindings) {
     if (!b.accel) continue;
 
+    // A key that types (V, M, Space) is never taken from other apps. Push to
+    // talk held on one still works through the input hook, which only
+    // listens; a toggle on such a key would flip whenever the user typed it.
+    const typingKey = isTypingKeyAccelerator(b.accel);
+    if (typingKey && !(b.event === 'voice:ptt' && b.mode === 'hold')) {
+      console.warn(`[Shortcuts] ${b.accel} types text, so it is not used for ${b.event}`);
+      continue;
+    }
+
     // Hold mode on an ordinary key or combo. Electron's globalShortcut has no
     // key-up, so a held V or Ctrl+Space could only ever toggle. With the input
     // hook available the binding goes through it instead, which gives a real
@@ -1062,6 +1072,11 @@ function registerVoiceShortcuts() {
           });
         }
       }
+      continue;
+    }
+
+    if (typingKey) {
+      console.warn(`[Shortcuts] ${b.accel} needs the input hook for hold to talk; it is not taken as a global shortcut`);
       continue;
     }
 
@@ -1622,6 +1637,10 @@ function switchToServer(serverUrl) {
     applyAutomaticServerLocale(reportedLocale || resolveLocale(SYSTEM_LANGUAGE, getSystemLanguages()));
   }
   safeSend(view.webContents, 'i18n:became-active', getI18nState());
+  // A hidden page is not given the server list or the badges; now that it
+  // is on screen, it reads the list again and gets the current badges.
+  safeSend(view.webContents, 'server-list:changed');
+  sendServerBadges(view.webContents);
 
   // Make sure the freshly-promoted view actually fills the window. Newly
   // created views start at 0×0 (so the splash stays visible during load),
@@ -2478,6 +2497,21 @@ function getTrustedServerUrlForFrame(contents, frame, { active = false } = {}) {
     return url;
   }
   return null;
+}
+
+/** Who may read the user's server list, and the badges and mutes that name
+ *  the servers in it: the app's own screens and the server page on screen.
+ *  A hidden server page is told to read it again once it is shown. */
+function serverListReader(e) {
+  return fromAppScreen(e) || fromActiveServer(e);
+}
+
+function serverBadgePayload() {
+  return { badges: Object.fromEntries(serverBadgeState), names: buildServerNameMap() };
+}
+
+function sendServerBadges(contents) {
+  safeSend(contents, 'server-badge-update', serverBadgePayload());
 }
 
 function isLanguageSenderAllowed(contents) {
@@ -3477,7 +3511,22 @@ function applyWindowTheme({ bg, accent } = {}) {
 
 function registerIPC() {
 
-  ipcMain.on('theme:colors', (_e, payload) => applyWindowTheme(payload || {}));
+  const refused = (channel) => console.warn(`[Haven Desktop] refused ${channel} from a page that may not use it`);
+  // Calls that change this computer's settings, the clipboard or the screen
+  // answer only the server page the user is looking at, in its top frame.
+  // A hidden server page, a frame inside a page, or a page that navigated
+  // elsewhere gets `denied` back.
+  const handleFromActiveServer = (channel, fn, denied = false) => {
+    ipcMain.handle(channel, (e, ...args) => {
+      if (!fromActiveServer(e)) { refused(channel); return denied; }
+      return fn(e, ...args);
+    });
+  };
+
+  // A hidden server page repainting the window would fight the shown one.
+  ipcMain.on('theme:colors', (e, payload) => {
+    if (fromActiveServer(e)) applyWindowTheme(payload || {});
+  });
 
   // ── Internationalization ──────────────────────────────
   ipcMain.on('i18n:get-state-sync', (event) => {
@@ -3525,7 +3574,6 @@ function registerIPC() {
   // Starting a server runs the code in the folder it is given, so only the
   // welcome screen's own page may ask. A server page never can, whatever it
   // manages to reach in its preload.
-  const refused = (channel) => console.warn(`[Haven Desktop] refused ${channel} from a page that may not use it`);
   ipcMain.handle('server:detect', (e) => {
     if (!fromWelcomeScreen(e)) { refused('server:detect'); return null; }
     return serverManager.detectServer();
@@ -3619,7 +3667,7 @@ function registerIPC() {
   }));
 
   // ── Audio Devices ─────────────────────────────────────
-  ipcMain.handle('devices:get-inputs', async () => {
+  handleFromActiveServer('devices:get-inputs', async () => {
     const wc = getActiveContents();
     if (!wc) return [];
     const fallbackLabel = JSON.stringify(t('device.microphone'));
@@ -3627,9 +3675,9 @@ function registerIPC() {
       navigator.mediaDevices.enumerateDevices()
         .then(d => d.filter(x => x.kind==='audioinput').map(x => ({ deviceId:x.deviceId, label:x.label||${fallbackLabel}+' '+x.deviceId.slice(0,8), groupId:x.groupId })))
     `);
-  });
+  }, []);
 
-  ipcMain.handle('devices:get-outputs', async () => {
+  handleFromActiveServer('devices:get-outputs', async () => {
     const wc = getActiveContents();
     if (!wc) return [];
     const fallbackLabel = JSON.stringify(t('device.speaker'));
@@ -3637,23 +3685,32 @@ function registerIPC() {
       navigator.mediaDevices.enumerateDevices()
         .then(d => d.filter(x => x.kind==='audiooutput').map(x => ({ deviceId:x.deviceId, label:x.label||${fallbackLabel}+' '+x.deviceId.slice(0,8), groupId:x.groupId })))
     `);
-  });
+  }, []);
 
   // ── Notifications ─────────────────────────────────────
+  // Any open server may notify, hidden ones included (that is what keeps
+  // their unreads live), but only from its own top frame, and a hidden
+  // server's notification names it so it cannot pass for another.
   ipcMain.handle('notify', (e, opts) => {
+    const serverUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!serverUrl) { refused('notify'); return false; }
+    opts = opts && typeof opts === 'object' ? opts : {};
     const n = new Notification({
-      title: opts.title || 'Haven',
-      body:  opts.body  || '',
+      title: notificationTitle(opts.title, {
+        active: serverUrl === activeServerUrl,
+        serverName: buildServerNameMap()[serverUrl] || dialogHost(serverUrl),
+      }),
+      body:  String(opts.body || '').slice(0, 1000),
       icon:  ICON_PATH,
-      silent: opts.silent || false,
+      silent: opts.silent === true,
     });
     n.show();
     n.on('click', () => {
       mainWindow?.show();
       mainWindow?.focus();
       // Tell the renderer which channel to navigate to
-      if (opts.channelCode) {
-        try { e.sender.send('notification-clicked', opts.channelCode); } catch {}
+      if (typeof opts.channelCode === 'string' && opts.channelCode) {
+        safeSend(e.sender, 'notification-clicked', opts.channelCode.slice(0, 200));
       }
     });
 
@@ -3674,67 +3731,29 @@ function registerIPC() {
   // Tracks per-server unread state so one server clearing its badge doesn't
   // accidentally clear another server's unreads.
   ipcMain.on('notification-badge', (e, hasUnread) => {
-    // Identify which server sent this signal by matching the sender's
-    // webContents.  Fall back to URL matching in case the webContents
-    // identity changed (e.g. after a renderer reload); without this
-    // fallback a background server's notifications go unrecorded and the
-    // sidebar dot for that server never lights up on any other open view.
-    let senderUrl = null;
-    for (const [url, view] of serverViews) {
-      if (view.webContents === e.sender) { senderUrl = url; break; }
-    }
-    if (!senderUrl) {
-      try {
-        const senderRaw = e.sender.getURL();
-        const senderNorm = normalizeServerUrl(senderRaw);
-        if (senderNorm) {
-          for (const [url] of serverViews) {
-            if (normalizeServerUrl(url) === senderNorm) { senderUrl = url; break; }
-          }
-        }
-      } catch {}
-    }
-    if (senderUrl) serverBadgeState.set(senderUrl, !!hasUnread);
-
+    // Each server view reports its own unreads, from its own top frame. A
+    // view keeps its webContents across reloads, so the sender is matched by
+    // identity only; a popup or a page that navigated elsewhere cannot
+    // speak for a server.
+    const senderUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!senderUrl) return;
+    serverBadgeState.set(senderUrl, !!hasUnread);
     recomputeTaskbarBadge();
+    // The map names every server the user has, so only the page on screen
+    // gets it; a page that comes on screen later is sent it then
+    // (switchToServer).
+    if (activeServerUrl) sendServerBadges(serverViews.get(activeServerUrl)?.webContents);
 
-    // Broadcast the latest map to EVERY open view (not just the active one).
-    // Background views still render their server bars and need to update
-    // their dots too, and the active view filter previously dropped the
-    // signal whenever the sender happened to be the active view.
-    // Includes a parallel name map so the renderer can surface an
-    // "unread elsewhere" fallback icon for servers that aren't in the
-    // active view's sidebar (curated per-server, alias URLs, etc).
-    const badgeMap = Object.fromEntries(serverBadgeState);
-    const nameMap = buildServerNameMap();
-    const payload = { badges: badgeMap, names: nameMap };
-    for (const [, view] of serverViews) {
-      try { safeSend(view.webContents, 'server-badge-update', payload); } catch {}
-    }
   });
 
   // ── Renderer reports which server URLs its sidebar can display ──
   // Used by recomputeTaskbarBadge to skip phantom unreads from background
   // servers the user has no visible icon for. (#5269)
   ipcMain.on('report-known-server-urls', (e, urls) => {
-    let senderUrl = null;
-    for (const [url, view] of serverViews) {
-      if (view.webContents === e.sender) { senderUrl = url; break; }
-    }
-    if (!senderUrl) {
-      try {
-        const senderRaw = e.sender.getURL();
-        const senderNorm = normalizeServerUrl(senderRaw);
-        if (senderNorm) {
-          for (const [url] of serverViews) {
-            if (normalizeServerUrl(url) === senderNorm) { senderUrl = url; break; }
-          }
-        }
-      } catch {}
-    }
-    if (!senderUrl) return;
+    const senderUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!senderUrl || !Array.isArray(urls)) return;
     const set = new Set();
-    for (const u of (urls || [])) {
+    for (const u of urls.slice(0, 500)) {
       const n = normalizeServerUrl(u);
       if (n) set.add(n);
     }
@@ -3745,8 +3764,9 @@ function registerIPC() {
   // ── Query per-server badge state (renderer asks for current state) ──
   // Returns { badges, names } so the renderer can show an "unread elsewhere"
   // fallback icon for servers missing from its sidebar.
-  ipcMain.handle('get-server-badges', () => {
-    return { badges: Object.fromEntries(serverBadgeState), names: buildServerNameMap() };
+  ipcMain.handle('get-server-badges', (e) => {
+    if (!serverListReader(e)) return { badges: {}, names: {} };
+    return serverBadgePayload();
   });
 
   // ── Window Controls ───────────────────────────────────
@@ -3766,10 +3786,12 @@ function registerIPC() {
 
   // ── Fullscreen (BrowserView doesn't support the HTML5 Fullscreen API natively;
   //    the preload overrides requestFullscreen / exitFullscreen via IPC) ──
-  ipcMain.on('window:enter-fullscreen', () => {
+  ipcMain.on('window:enter-fullscreen', (e) => {
+    if (!fromActiveServer(e)) return;
     if (mainWindow && !mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
   });
-  ipcMain.on('window:leave-fullscreen', () => {
+  ipcMain.on('window:leave-fullscreen', (e) => {
+    if (!fromActiveServer(e)) return;
     if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
   });
 
@@ -3806,7 +3828,7 @@ function registerIPC() {
   // Bypass it entirely by handing the image bytes to the main process
   // where Electron's `clipboard` module has no gesture restrictions.
   // Accepts either a data: URL or a raw base64 PNG/JPEG string.
-  ipcMain.handle('clipboard:write-image', async (e, payload) => {
+  handleFromActiveServer('clipboard:write-image', async (e, payload) => {
     try {
       if (!payload || typeof payload !== 'string') {
         return { ok: false, reason: 'no-payload' };
@@ -3846,11 +3868,11 @@ function registerIPC() {
     } catch (err) {
       return { ok: false, reason: String(err && err.message || err) };
     }
-  });
+  }, { ok: false, reason: 'not-allowed' });
 
   // Text fallback used when image bytes can't be obtained. Same focus
   // dance as write-image so it doesn't hit gesture locks.
-  ipcMain.handle('clipboard:write-text', async (e, text) => {
+  handleFromActiveServer('clipboard:write-text', async (e, text) => {
     try {
       if (typeof text !== 'string' || !text) return { ok: false, reason: 'no-text' };
       try {
@@ -3864,11 +3886,11 @@ function registerIPC() {
     } catch (err) {
       return { ok: false, reason: String(err && err.message || err) };
     }
-  });
+  }, { ok: false, reason: 'not-allowed' });
 
   // WebView download= is ignored for many http(s) image URLs. Haven calls
   // havenDesktop.saveImage with base64 bytes so we can show a real save dialog.
-  ipcMain.handle('dialog:save-image', async (e, { payload, filename } = {}) => {
+  handleFromActiveServer('dialog:save-image', async (e, { payload, filename } = {}) => {
     try {
       if (!payload || typeof payload !== 'string') return { ok: false, reason: 'no-payload' };
       const raw = payload.includes(',') ? payload.slice(payload.lastIndexOf(',') + 1) : payload;
@@ -3889,7 +3911,7 @@ function registerIPC() {
     } catch (err) {
       return { ok: false, reason: String(err && err.message || err) };
     }
-  });
+  }, { ok: false, reason: 'not-allowed' });
 
   // ── Desktop App Preferences ───────────────────────────
   ipcMain.handle('desktop:get-prefs', () => ({
@@ -3907,7 +3929,7 @@ function registerIPC() {
     videoEncoderPreference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
   }));
 
-  ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-start-on-login', (_e, enabled) => {
     store.set('startOnLogin', !!enabled);
     const hiddenArg = store.get('startHidden') ? ['--hidden'] : [];
     app.setLoginItemSettings({
@@ -3917,7 +3939,7 @@ function registerIPC() {
     return true;
   });
 
-  ipcMain.handle('desktop:set-start-hidden', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-start-hidden', (_e, enabled) => {
     store.set('startHidden', !!enabled);
     // Re-sync login item args so --hidden is included/excluded
     const loginEnabled = !!store.get('startOnLogin');
@@ -3930,18 +3952,18 @@ function registerIPC() {
     return true;
   });
 
-  ipcMain.handle('desktop:set-minimize-to-tray', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-minimize-to-tray', (_e, enabled) => {
     store.set('minimizeToTray', !!enabled);
     return true;
   });
 
-  ipcMain.handle('desktop:set-force-sdr', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-force-sdr', (_e, enabled) => {
     store.set('forceSDR', !!enabled);
     // force-color-profile is a Chromium command-line switch, requires restart
     return { requiresRestart: true };
   });
 
-  ipcMain.handle('desktop:set-hide-menu-bar', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-hide-menu-bar', (_e, enabled) => {
     store.set('hideMenuBar', !!enabled);
     if (mainWindow) {
       mainWindow.setAutoHideMenuBar(!!enabled);
@@ -3960,14 +3982,14 @@ function registerIPC() {
   // #35: G-Sync / VRR FPS-drop workaround. Both flags are Chromium
   // command-line switches applied at app boot, so flipping them requires a
   // restart to take effect. The renderer surfaces a toast saying so.
-  ipcMain.handle('desktop:set-disable-gpu-vsync', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-disable-gpu-vsync', (_e, enabled) => {
     store.set('disableGpuVsync', !!enabled);
     return { requiresRestart: true };
   });
 
   // Flash the taskbar for a notification. Turning it off also ends a flash
   // already going.
-  ipcMain.handle('desktop:set-flash-taskbar', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-flash-taskbar', (_e, enabled) => {
     store.set('flashTaskbar', !!enabled);
     if (!enabled && mainWindow && !mainWindow.isDestroyed()) {
       try { mainWindow.flashFrame(false); } catch (err) { console.warn('[Haven] could not stop the taskbar flash:', err?.message || err); }
@@ -3975,7 +3997,7 @@ function registerIPC() {
     return { requiresRestart: false };
   });
 
-  ipcMain.handle('desktop:set-unlimit-frame-rate', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-unlimit-frame-rate', (_e, enabled) => {
     store.set('unlimitFrameRate', !!enabled);
     return { requiresRestart: true };
   });
@@ -3984,14 +4006,14 @@ function registerIPC() {
   // VaapiOnNvidiaGPUs, VaapiIgnoreDriverChecks). Off by default; Chromium
   // command-line switches applied at app boot, so flipping it requires a
   // restart to take effect.
-  ipcMain.handle('desktop:set-linux-vaapi-bypass', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-linux-vaapi-bypass', (_e, enabled) => {
     store.set('linuxVaapiBypass', !!enabled);
     return { requiresRestart: true };
   });
 
   // Linux X11 mode (Haven #5721): a Chromium switch applied at boot, so it
   // takes a restart.
-  ipcMain.handle('desktop:set-linux-force-x11', (_e, enabled) => {
+  handleFromActiveServer('desktop:set-linux-force-x11', (_e, enabled) => {
     store.set('linuxForceX11', !!enabled);
     // A choice made now starts fresh: an old failed-start marker must not
     // turn X11 mode straight back off at the next launch.
@@ -4001,7 +4023,11 @@ function registerIPC() {
 
   // ── Desktop Shortcuts ─────────────────────────────────
   ipcMain.handle('shortcuts:get', () => store.get('desktopShortcuts') || {});
-  ipcMain.handle('shortcuts:register', (_e, updates) => {
+  // A key that types is refused for anything but hold to talk, which the
+  // input hook only listens to (see registerVoiceShortcuts).
+  const typingKeyRefused = (cfg, k, v) =>
+    !!v && isTypingKeyAccelerator(v) && !(k === 'ptt' && cfg.pttMode !== 'toggle');
+  handleFromActiveServer('shortcuts:register', (_e, updates) => {
     if (!updates || typeof updates !== 'object') return false;
     unregisterVoiceShortcuts();
     const cfg = { ...store.get('desktopShortcuts') };
@@ -4009,13 +4035,13 @@ function registerIPC() {
     // registerVoiceShortcuts() can decide whether PTT needs press/release
     // events from uiohook. (#5255 / #184)
     const allowed = new Set(['mute', 'deafen', 'ptt', 'pttMode']);
+    if (updates.pttMode === 'toggle' || updates.pttMode === 'hold') cfg.pttMode = updates.pttMode;
+    const refusedKeys = {};
     Object.entries(updates).forEach(([k, v]) => {
-      if (!allowed.has(k)) return;
-      if (k === 'pttMode') {
-        if (v === 'toggle' || v === 'hold') cfg[k] = v;
-        return;
-      }
-      if (typeof v === 'string' && v.length <= 50) cfg[k] = v;
+      if (!allowed.has(k) || k === 'pttMode') return;
+      if (typeof v !== 'string' || v.length > 50) return;
+      if (typingKeyRefused(cfg, k, v)) { refusedKeys[k] = v; return; }
+      cfg[k] = v;
     });
     store.set('desktopShortcuts', cfg);
     registerVoiceShortcuts();
@@ -4035,6 +4061,7 @@ function registerIPC() {
     Object.entries(cfg).forEach(([k, v]) => {
       if (k === 'pttMode') { result[k] = { ok: true, reason: 'ok' }; return; }
       if (!v)              { result[k] = { ok: true, reason: 'ok' }; return; }
+      if (typingKeyRefused(cfg, k, v)) { result[k] = { ok: false, reason: 'typing-key', accel: v }; return; }
       // A key the input hook took (hold mode, or one Electron refused) is
       // not in globalShortcut, so asking it would call the binding a
       // conflict and the settings page would throw the key away. (#38)
@@ -4051,11 +4078,17 @@ function registerIPC() {
           : { ok: false, reason: 'uiohook-unavailable', accel: v };
         return;
       }
+      if (isTypingKeyAccelerator(v)) {
+        // Hold to talk on a typing key only works through the input hook.
+        result[k] = { ok: false, reason: 'uiohook-unavailable', accel: v };
+        return;
+      }
       const ok = globalShortcut.isRegistered(v);
       result[k] = ok
         ? { ok: true,  reason: 'ok' }
         : { ok: false, reason: 'conflict', accel: v };
     });
+    for (const [k, v] of Object.entries(refusedKeys)) result[k] = { ok: false, reason: 'typing-key', accel: v };
     return result;
   });
 
@@ -4124,7 +4157,8 @@ function registerIPC() {
   // Sanitize on read so legacy entries with mixed casing, /app paths, or
   // garbage hostnames (e.g. someone typed "https") get cleaned up the next
   // time the renderer asks for the list.
-  ipcMain.handle('server-history:get', () => {
+  ipcMain.handle('server-history:get', (e) => {
+    if (!serverListReader(e)) return [];
     const raw = store.get('serverHistory') || [];
     const list = readServerList(store);
     if (list.history.length !== raw.length || list.history.some((c, i) => c.url !== raw[i]?.url)) {
@@ -4137,6 +4171,7 @@ function registerIPC() {
   // time. This lets the sidebar populate with the user's known servers on
   // first-join to a brand-new server before any network calls happen.
   ipcMain.on('server-history:get-sync', (e) => {
+    if (!serverListReader(e)) { e.returnValue = []; return; }
     try {
       e.returnValue = readServerList(store).history;
     } catch (err) {
@@ -4174,8 +4209,12 @@ function registerIPC() {
   });
   // The shared server list: servers in the user's order, removed servers and
   // the order, so every server page shows the same list.
-  ipcMain.handle('server-list:get', () => serverListView(readServerList(store)));
+  ipcMain.handle('server-list:get', (e) => {
+    if (!serverListReader(e)) return null;
+    return serverListView(readServerList(store));
+  });
   ipcMain.on('server-list:get-sync', (e) => {
+    if (!serverListReader(e)) { e.returnValue = null; return; }
     try {
       e.returnValue = serverListView(readServerList(store));
     } catch (err) {
@@ -4202,7 +4241,7 @@ function registerIPC() {
     try { return new URL(String(url)).origin; } catch { return null; } // not a URL: refused
   };
   ipcMain.handle('server-mute:get-all', (e) => {
-    if (!serverListSender(e)) return {};
+    if (!serverListReader(e)) return {};
     const all = store.get('serverMutes');
     return all && typeof all === 'object' ? { ...all } : {};
   });
@@ -4215,7 +4254,12 @@ function registerIPC() {
     if ((all[key] || null) === next) return true;
     if (next) all[key] = next; else delete all[key];
     store.set('serverMutes', all);
-    const targets = new Set([mainWindow?.webContents, ...Array.from(serverViews.values(), view => view.webContents)]);
+    // The page on screen shows the change, and the muted server's own page
+    // saves it there; no other hidden page learns of it.
+    const targets = new Set([getActiveContents()]);
+    for (const [url, view] of serverViews) {
+      if (muteKey(url) === key) targets.add(view.webContents);
+    }
     for (const contents of targets) safeSend(contents, 'server-mute:changed', { url: key, mode: next });
     return true;
   });
@@ -4233,54 +4277,48 @@ function registerIPC() {
 
   // ── JavaScript dialog overrides for BrowserView (issue #6) ──
 
-  ipcMain.on('dialog:alert', (event, { message }) => {
+  // The page waits on these with sendSync, as alert/confirm/prompt are
+  // modal by spec, but the app does not: the box is shown asynchronously and
+  // the answer goes back when the user picks. Only the server on screen may
+  // ask (a hidden one gets the "cancelled" answer straight away), and the
+  // title names the server asking, so one cannot pass for another.
+  const pageDialog = (event, kind, payload, cancelled, answer) => {
+    const serverUrl = getTrustedServerUrlForFrame(event.sender, event.senderFrame, { active: true });
+    if (!serverUrl || !mainWindow || mainWindow.isDestroyed()) {
+      refused(`dialog:${kind}`);
+      event.returnValue = cancelled;
+      return;
+    }
     // Focus the window so the modal dialog is always visible; if it spawns
     // behind the app, the user can't dismiss it and the app appears frozen.
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-    // showMessageBoxSync is intentionally synchronous here: confirm/alert/prompt
-    // are modal by spec, so blocking is expected.  The REAL freeze causes were
-    // the getBoundingClientRect reflow storm and executeJavaScript health checks,
-    // not these dialog calls.
-    dialog.showMessageBoxSync(mainWindow, {
-      type: 'info', buttons: [t('dialog.ok')], title: 'Haven',
-      message: String(message || ''),
-    });
-    event.returnValue = true;
-  });
-
-  ipcMain.on('dialog:confirm', (event, { message }) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-    const r = dialog.showMessageBoxSync(mainWindow, {
-      type: 'question', buttons: [t('dialog.cancel'), t('dialog.ok')],
-      defaultId: 1, cancelId: 0, title: 'Haven',
-      message: String(message || ''),
-    });
-    event.returnValue = r === 1;
-  });
-
-  ipcMain.on('dialog:prompt', (event, { message, defaultValue }) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-    // Native Electron dialog: no cscript.exe, no execSync, no 5-minute timeout.
-    const r = dialog.showMessageBoxSync(mainWindow, {
-      type: 'question',
-      buttons: [t('dialog.cancel'), t('dialog.ok')],
-      defaultId: 1, cancelId: 0,
-      title: 'Haven',
-      message: String(message || ''),
-      detail: defaultValue ? t('dialog.defaultValue', { value: defaultValue }) : undefined,
-    });
-    event.returnValue = r === 1 ? (defaultValue || '') : null;
-  });
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    const message = String(payload?.message ?? '').slice(0, 4000);
+    const defaultValue = String(payload?.defaultValue ?? '').slice(0, 1000);
+    const options = {
+      type: kind === 'alert' ? 'info' : 'question',
+      buttons: kind === 'alert' ? [t('dialog.ok')] : [t('dialog.cancel'), t('dialog.ok')],
+      defaultId: kind === 'alert' ? 0 : 1,
+      cancelId: 0,
+      noLink: true,
+      title: t('dialog.fromServer', { host: dialogHost(serverUrl) }),
+      message,
+      detail: kind === 'prompt' && defaultValue ? t('dialog.defaultValue', { value: defaultValue }) : undefined,
+    };
+    dialog.showMessageBox(mainWindow, options)
+      .then(({ response }) => { event.returnValue = answer(response, defaultValue); })
+      .catch((err) => {
+        console.warn(`[Haven Desktop] ${kind} dialog failed:`, err?.message || err);
+        event.returnValue = cancelled;
+      });
+  };
+  ipcMain.on('dialog:alert', (event, payload) => pageDialog(event, 'alert', payload, true, () => true));
+  ipcMain.on('dialog:confirm', (event, payload) => pageDialog(event, 'confirm', payload, false, r => r === 1));
+  // Native Electron dialog: no cscript.exe, no execSync, no 5-minute timeout.
+  // It has no text box, so OK answers with the page's default value.
+  ipcMain.on('dialog:prompt', (event, payload) => pageDialog(event, 'prompt', payload, null, (r, value) => (r === 1 ? value : null)));
 }
+
 
 // ═══════════════════════════════════════════════════════════
 // Linux Desktop Integration (issue #3)

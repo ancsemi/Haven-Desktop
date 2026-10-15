@@ -170,6 +170,8 @@ module.exports = {
   'dialog.cancel': 'Cancel',
   'dialog.ok': 'OK',
   'dialog.defaultValue': 'Default: {value}',
+  'dialog.fromServer': '{host} says',
+
 
   'cert.title': 'Certificate check',
   'cert.unknownMessage': "{host} is using a certificate your computer can't verify.",

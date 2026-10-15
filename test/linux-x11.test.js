@@ -64,7 +64,7 @@ test('a working X11 setup is not turned off by a second launch, a quick quit or 
   // Quitting the X11 copy within a few seconds of opening it.
   assert.match(between("app.on('before-quit', () => {", 300), /if \(isX11Copy\(process\.argv\)\) clearX11Pending\(\);/);
   // Turning the setting on or off in Settings.
-  assert.match(between("ipcMain.handle('desktop:set-linux-force-x11'", 300), /clearX11Pending\(\);/);
+  assert.match(between("handleFromActiveServer('desktop:set-linux-force-x11'", 300), /clearX11Pending\(\);/);
   // A start that never comes up is only cleared by these, so it is still
   // found next time: the launch that starts the copy never clears it.
   const start = between("} else if (x11Plan.action === 'start-x11') {", 400);

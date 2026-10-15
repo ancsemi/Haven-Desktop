@@ -44,13 +44,14 @@ test('main applies the workaround before ready, without rewriting SDR preference
 test('SDR IPC accepts both toggle states, including consecutive Windows requests', async () => {
   const getStart = main.indexOf("  ipcMain.handle('desktop:get-prefs'");
   const getEnd = main.indexOf('\n  }));', getStart) + '\n  }));'.length;
-  const setStart = main.indexOf("  ipcMain.handle('desktop:set-force-sdr'");
+  const setStart = main.indexOf("  handleFromActiveServer('desktop:set-force-sdr'");
   const setEnd = main.indexOf('\n  });', setStart) + '\n  });'.length;
   assert.ok(getStart >= 0 && getEnd > getStart && setStart >= 0 && setEnd > setStart);
   const handlers = new Map();
   let storedForceSDR = true;
   const context = {
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    handleFromActiveServer: (channel, handler) => handlers.set(channel, handler),
     process: { platform: 'win32' },
     store: {
       get: key => key === 'forceSDR' ? storedForceSDR : undefined,
