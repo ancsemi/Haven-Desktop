@@ -100,3 +100,26 @@ test('main asks the permission rules for every request and check', () => {
   assert.match(MAIN, /setPermissionCheckHandler\(\(contents, permission, requestingOrigin, details\) => \{\s*const requester = permissionRequester\(contents\);\s*return permissionAllowed\(/);
   assert.match(MAIN, /serverPopupOwners\.set\(child\.webContents, url\);/);
 });
+
+test('a server page stays on its server; embeds are frames, never the page', () => {
+  const { serverNavigation } = require('../src/main/ipc-policy');
+  const server = 'https://haven.example:3000';
+  assert.equal(serverNavigation('https://haven.example:3000/app.html?channel=x', server), 'stay');
+  assert.equal(serverNavigation('https://www.youtube.com/watch?v=1', server), 'browser');
+  assert.equal(serverNavigation('https://open.spotify.com/track/1', server), 'browser');
+  assert.equal(serverNavigation('https://haven.example/app.html', server), 'browser', 'another port is another server');
+  assert.equal(serverNavigation('ms-msdt:/id', server), 'block');
+  assert.equal(serverNavigation('file://server/share/x.exe', server), 'block');
+  assert.equal(serverNavigation('not a url', server), 'block');
+});
+
+test('server views check navigations and redirects, and popups get their own guards', () => {
+  assert.doesNotMatch(MAIN, /EMBED_ORIGINS/);
+  assert.match(MAIN, /view\.webContents\.on\('will-navigate', \(event, navUrl\) => \{\s*const verdict = serverNavigation\(navUrl, url\);/);
+  assert.match(MAIN, /view\.webContents\.on\('will-redirect', /);
+  assert.match(MAIN, /guardServerPopup\(child\.webContents\);/);
+  const popup = MAIN.slice(MAIN.indexOf('function guardServerPopup'), MAIN.indexOf('function getServerUrlForContents'));
+  assert.match(popup, /'will-navigate'/);
+  assert.match(popup, /'will-redirect'/);
+  assert.match(popup, /setWindowOpenHandler\([\s\S]*action: 'deny'/);
+});

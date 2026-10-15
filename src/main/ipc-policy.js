@@ -74,5 +74,23 @@ function permissionAllowed({ permission, requester, requestingOrigin }) {
   return false;
 }
 
-module.exports = { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed };
+/**
+ * Where a server page's top frame may go: 'stay' on its own server,
+ * 'browser' for any other web address (opened in the system browser), or
+ * 'block' for anything else, since other schemes handed to the OS can run
+ * code (ms-msdt:, search-ms:, file: and network shares). Embedded players
+ * (YouTube, Spotify, SoundCloud) load in frames, which this does not cover;
+ * the page itself never becomes one of them.
+ */
+function serverNavigation(url, serverUrl) {
+  let target;
+  let server;
+  try { target = new URL(String(url)); server = new URL(String(serverUrl)); }
+  catch { return 'block'; } // not a URL: nowhere to go
+  if (target.protocol !== 'https:' && target.protocol !== 'http:') return 'block';
+  return target.origin === server.origin ? 'stay' : 'browser';
+}
+
+module.exports = { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, serverNavigation };
+
 

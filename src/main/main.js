@@ -35,7 +35,7 @@ const {
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame, getHttpOrigin } = require('./ipc-security');
-const { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed } = require('./ipc-policy');
+const { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, serverNavigation } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
@@ -1318,14 +1318,18 @@ function applyDevTaskbarIcon(win) {
 // local files the app loads itself, so the page may not go anywhere else: a
 // link dragged onto the window used to open a remote page there, with that
 // bridge still attached. Web links go to the system browser instead.
+// Only web links go to the system browser. Anything else handed to the OS
+// shell can run code on Windows (ms-msdt:, search-ms:, file: and network
+// shares).
+function openWebLink(url) {
+  let parsed = null;
+  try { parsed = new URL(url); } catch { return; } // not a URL: nothing to open
+  if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+    shell.openExternal(parsed.href).catch(err => console.warn('[Haven] could not open a link:', err.message));
+  }
+}
+
 function keepOnLocalFiles(contents) {
-  const openWebLink = (url) => {
-    let parsed = null;
-    try { parsed = new URL(url); } catch { return; } // not a URL: nothing to open
-    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
-      shell.openExternal(parsed.href).catch(err => console.warn('[Haven] could not open a link:', err.message));
-    }
-  };
   contents.on('will-navigate', (event, url) => {
     event.preventDefault();
     openWebLink(url);
@@ -1979,6 +1983,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // the same menu (Haven #5663).
     view.webContents.on('did-create-window', (child) => {
       serverPopupOwners.set(child.webContents, url);
+      guardServerPopup(child.webContents);
       try { attachContextMenu(child.webContents, child); } catch {}
     });
 
@@ -2174,28 +2179,24 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     view.webContents.on('did-finish-load', () => { _failRetryCount = 0; });
 
     // ── Open external links in default browser (issue #5) ──
-    // Allow navigations to known embed origins (SoundCloud, Spotify, YouTube)
-    // so iframes work correctly instead of hijacking the main view.
-    const EMBED_ORIGINS = [
-      'https://w.soundcloud.com',
-      'https://open.spotify.com',
-      'https://www.youtube.com',
-      'https://www.youtube-nocookie.com',
-    ];
+    // The server page stays on its own server. will-navigate covers only the
+    // top frame, so embedded players (SoundCloud, Spotify, YouTube) still
+    // load in their frames; the page itself never turns into one of them.
+    // A redirect gets the same rule, so a link on the server cannot bounce
+    // the page somewhere else.
     view.webContents.on('will-navigate', (event, navUrl) => {
-      let parsed = null;
-      try { parsed = new URL(navUrl); } catch {}
-      try {
-        if (parsed && parsed.origin === new URL(url).origin) return;
-        if (parsed && EMBED_ORIGINS.includes(parsed.origin)) return;
-      } catch {}
+      const verdict = serverNavigation(navUrl, url);
+      if (verdict === 'stay') return;
       event.preventDefault();
-      // Only web links go to the system browser. Anything else handed to the
-      // OS shell can run code on Windows (ms-msdt:, search-ms:, file: and
-      // network shares), and a server page can navigate wherever it likes.
-      if (parsed && (parsed.protocol === 'https:' || parsed.protocol === 'http:')) {
-        shell.openExternal(parsed.href).catch(() => {});
-      }
+      if (verdict === 'browser') openWebLink(navUrl);
+    });
+    view.webContents.on('will-redirect', (event, redirectUrl, _isInPlace, isMainFrame) => {
+      const mainFrame = event.isMainFrame ?? isMainFrame;
+      if (mainFrame === false) return;
+      const verdict = serverNavigation(event.url || redirectUrl, url);
+      if (verdict === 'stay') return;
+      event.preventDefault();
+      if (verdict === 'browser') openWebLink(event.url || redirectUrl);
     });
 
     // Intercept window.open → switch servers or open external.
@@ -2502,7 +2503,28 @@ function handleWindowOpen(url) {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
 }
 
+// A window a server page opened (a picture, a game, the Steam or Spotify
+// sign-in round trip) has no preload and no bridge, so it may browse the
+// web, but nothing else: no other schemes, and no further windows of its
+// own (those go to the system browser).
+function guardServerPopup(contents) {
+  const webOnly = (event, target) => {
+    let parsed = null;
+    try { parsed = new URL(String(target)); } catch { /* not a URL: blocked below */ }
+    if (parsed && (parsed.protocol === 'https:' || parsed.protocol === 'http:')) return;
+    event.preventDefault();
+  };
+  contents.on('will-navigate', (event, target) => webOnly(event, target));
+  contents.on('will-redirect', (event, target) => webOnly(event, event.url || target));
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.setWindowOpenHandler(({ url: target }) => {
+    openWebLink(target);
+    return { action: 'deny' };
+  });
+}
+
 function getServerUrlForContents(contents) {
+
   for (const [url, view] of serverViews) {
     if (view.webContents === contents) return url;
   }
