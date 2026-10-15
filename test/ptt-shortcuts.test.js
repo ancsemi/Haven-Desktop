@@ -1,7 +1,8 @@
 'use strict';
 
-// Runs the push to talk section of the app preload with stand-ins for
-// Electron and the page, and checks what reaches the mic (Haven #5724).
+// Runs the push to talk section of the page world (app-page-world.js) with
+// stand-ins for the preload's bridge and the page, and checks what reaches
+// the mic (Haven #5724).
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -9,9 +10,9 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const SOURCE = fs.readFileSync(path.join(__dirname, '../src/main/app-preload.js'), 'utf8');
+const SOURCE = fs.readFileSync(path.join(__dirname, '../src/main/app-page-world.js'), 'utf8');
 const START = SOURCE.indexOf('// ─── Global voice shortcut triggers');
-const END = SOURCE.indexOf('// ─── Server badge state updates', START);
+const END = SOURCE.indexOf('// ─── Receive PCM chunks', START);
 
 async function loadPtt(config, { inVoice = true, buttons = null } = {}) {
   const ipc = new Map();
@@ -20,10 +21,8 @@ async function loadPtt(config, { inVoice = true, buttons = null } = {}) {
   const app = { voice: { isMuted: true, inVoice }, toggles: 0 };
   app._toggleMute = () => { app.voice.isMuted = !app.voice.isMuted; app.toggles++; };
   const context = vm.createContext({
-    ipcRenderer: {
-      on: (channel, fn) => ipc.set(channel, fn),
-      invoke: async (channel) => (channel === 'shortcuts:get' ? config : null),
-    },
+    on: (channel, fn) => ipc.set(channel, fn),
+    bridge: { shortcutsGet: async () => config },
     window: {
       app: buttons ? undefined : app,
       addEventListener: (type, fn) => {

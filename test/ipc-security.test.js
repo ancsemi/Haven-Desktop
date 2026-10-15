@@ -82,6 +82,12 @@ test('timed out audio preparations are cancelled and serialized in the preload',
   );
 
   assert.match(main, /requestFrame\.send\('screen:prepare-share-cancel'/);
-  assert.match(preload, /ipcRenderer\.on\('screen:prepare-share-cancel'/);
-  assert.match(preload, /_audioPreparationQueue = _audioPreparationQueue\.then\(prepare, prepare\)/);
+  // The preload hands both to the page world, which keeps the queue.
+  assert.match(preload, /'screen:prepare-share', 'screen:prepare-share-cancel',/);
+  const pageWorld = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'main', 'app-page-world.js'),
+    'utf8'
+  );
+  assert.match(pageWorld, /on\('screen:prepare-share-cancel'/);
+  assert.match(pageWorld, /_audioPreparationQueue = _audioPreparationQueue\.then\(prepare, prepare\)/);
 });

@@ -1373,7 +1373,9 @@ function createWelcomeWindow() {
     icon: ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: false,
+      // The page and the preload's bridge stay apart, so the page can only
+      // call what window.haven offers.
+      contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
     },
@@ -1785,9 +1787,14 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     view = new BrowserView({
       webPreferences: {
         preload: path.join(__dirname, 'app-preload.js'),
-        contextIsolation: false,
+        // The server page runs apart from the preload, which alone holds
+        // ipcRenderer; the page gets window.havenDesktop through
+        // contextBridge (app-preload.js). The preload still loads the app's
+        // own modules with require, so it is not sandboxed.
+        contextIsolation: true,
         nodeIntegration: false,
         sandbox: false,
+
         webSecurity: true,
         spellcheck: true,
         // Prevent Chromium from suspending AudioContext and throttling timers

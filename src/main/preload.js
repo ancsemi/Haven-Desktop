@@ -3,7 +3,9 @@
 // Exposes IPC bridges for the welcome / setup screen.
 // ═══════════════════════════════════════════════════════════
 
-const { ipcRenderer } = require('electron');
+// Runs in the preload's own world (contextIsolation): the welcome page gets
+// window.haven through contextBridge, never ipcRenderer itself.
+const { contextBridge, ipcRenderer } = require('electron');
 const { createTranslator } = require('../i18n');
 const { checkServer } = require('./server-check');
 
@@ -45,7 +47,7 @@ window.addEventListener('languagechange', () => {
   }
 });
 
-window.haven = {
+contextBridge.exposeInMainWorld('haven', {
   platform: process.platform,
 
   // ── Server Management ──────────────────────────────────
@@ -111,9 +113,10 @@ window.haven = {
   },
 
   // ── Misc ───────────────────────────────────────────────
-  openExternal: (url) => ipcRenderer.send('open-external', url),
+  openExternal: (url) => ipcRenderer.send('open-external', String(url)),
   getVersion:   ()    => ipcRenderer.invoke('app:version'),
-};
+});
+
 
 // ── Auto-Update Banner for Welcome Screen ────────────────
 (function () {
