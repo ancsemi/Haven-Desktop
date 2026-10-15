@@ -718,11 +718,15 @@ app.whenReady().then(async () => {
   // clipboard-read: Haven never reads the clipboard, and granting it let any
   // server read whatever was copied, passwords included, without asking.
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
-    callback(permissionAllowed({
-      permission,
-      requester: permissionRequester(contents),
-      requestingOrigin: getHttpOrigin(details?.requestingUrl) || getHttpOrigin(details?.securityOrigin),
-    }));
+    const requester = permissionRequester(contents);
+    const requestingOrigin = getHttpOrigin(details?.requestingUrl) || getHttpOrigin(details?.securityOrigin);
+    const allowed = permissionAllowed({ permission, requester, requestingOrigin });
+    // A server page given the mic while shown keeps it when hidden (a call
+    // goes on while the user looks at another server).
+    if (allowed && permission === 'media' && requester?.kind === 'server' && requester.active) {
+      mediaGrantOrigins.set(contents, requestingOrigin);
+    }
+    callback(allowed);
   });
   // Chromium checks some permissions with no origin at all (media, while a
   // page loads); those are the page's own, so its address stands in.
@@ -2179,7 +2183,11 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       showConnectionError(url);
     });
 
+    // A mic grant belongs to the origin it was given to (see mediaGrantOrigins).
+    view.webContents.on('did-navigate', (_e, navUrl) => forgetMediaGrantOnNavigation(view.webContents, navUrl));
+
     // Reset retry counter once a load succeeds, so a future failure starts
+
     // fresh and we don't burn the budget over many brief outages.
     view.webContents.on('did-finish-load', () => { _failRetryCount = 0; });
 
@@ -2572,12 +2580,27 @@ function sendServerBadges(contents) {
 // Windows a server page opened (a picture, a game, a sign-in round trip),
 // with the server they belong to.
 const serverPopupOwners = new WeakMap();
+// Server views given the mic or camera while shown, with the origin it was
+// for. Cleared when the view's page moves to another origin.
+const mediaGrantOrigins = new WeakMap();
+
+function forgetMediaGrantOnNavigation(contents, url) {
+  const granted = mediaGrantOrigins.get(contents);
+  if (granted && getHttpOrigin(url) !== granted) mediaGrantOrigins.delete(contents);
+}
 
 /** Who is asking for a browser permission (see permissionAllowed). */
 function permissionRequester(contents) {
   if (!contents || contents.isDestroyed?.()) return null;
   for (const [url, view] of serverViews) {
-    if (view.webContents === contents) return { kind: 'server', origin: getHttpOrigin(url), active: url === activeServerUrl };
+    if (view.webContents === contents) {
+      return {
+        kind: 'server',
+        origin: getHttpOrigin(url),
+        active: url === activeServerUrl,
+        mediaOrigin: mediaGrantOrigins.get(contents) || null,
+      };
+    }
   }
   const owner = serverPopupOwners.get(contents);
   if (owner) return { kind: 'popup', origin: getHttpOrigin(owner) };

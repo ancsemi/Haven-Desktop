@@ -96,7 +96,7 @@ test('the microphone and camera go only to the server on screen, from its own or
 });
 
 test('main asks the permission rules for every request and check', () => {
-  assert.match(MAIN, /setPermissionRequestHandler\(\(contents, permission, callback, details\) => \{\s*callback\(permissionAllowed\(/);
+  assert.match(MAIN, /setPermissionRequestHandler\(\(contents, permission, callback, details\) => \{[\s\S]{0,300}const allowed = permissionAllowed\(\{ permission, requester, requestingOrigin \}\);/);
   assert.match(MAIN, /setPermissionCheckHandler\(\(contents, permission, requestingOrigin, details\) => \{\s*const requester = permissionRequester\(contents\);\s*return permissionAllowed\(/);
   assert.match(MAIN, /serverPopupOwners\.set\(child\.webContents, url\);/);
 });
@@ -122,4 +122,25 @@ test('server views check navigations and redirects, and popups get their own gua
   assert.match(popup, /'will-navigate'/);
   assert.match(popup, /'will-redirect'/);
   assert.match(popup, /setWindowOpenHandler\([\s\S]*action: 'deny'/);
+});
+
+test('a server that got the mic while shown keeps it while hidden, for its own origin only', () => {
+  const { permissionAllowed } = require('../src/main/ipc-policy');
+  const ask = (permission, requester, requestingOrigin) => permissionAllowed({ permission, requester, requestingOrigin });
+  const inCall = { kind: 'server', origin: 'https://a.example', active: false, mediaOrigin: 'https://a.example' };
+  assert.equal(ask('media', inCall, 'https://a.example'), true, 'the call goes on behind another server');
+  assert.equal(ask('media', inCall, 'https://www.youtube.com'), false);
+  assert.equal(ask('display-capture', inCall, 'https://a.example'), false, 'screen capture stays shown only');
+  assert.equal(ask('window-management', inCall, 'https://a.example'), false);
+  const moved = { ...inCall, origin: 'https://b.example' };
+  assert.equal(ask('media', moved, 'https://a.example'), false, 'not once the view belongs to another origin');
+  assert.equal(ask('media', { ...inCall, mediaOrigin: null }, 'https://a.example'), false, 'never granted: never');
+});
+
+test('main remembers a shown grant and forgets it when the page changes origin', () => {
+  assert.match(MAIN, /if \(allowed && permission === 'media' && requester\?\.kind === 'server' && requester\.active\) \{\s*mediaGrantOrigins\.set\(contents, requestingOrigin\);/);
+  assert.match(MAIN, /mediaOrigin: mediaGrantOrigins\.get\(contents\) \|\| null,/);
+  assert.match(MAIN, /view\.webContents\.on\('did-navigate', \(_e, navUrl\) => forgetMediaGrantOnNavigation\(view\.webContents, navUrl\)\);/);
+  const forget = MAIN.slice(MAIN.indexOf('function forgetMediaGrantOnNavigation'), MAIN.indexOf('function forgetMediaGrantOnNavigation') + 250);
+  assert.match(forget, /getHttpOrigin\(url\) !== granted\) mediaGrantOrigins\.delete\(contents\)/);
 });
