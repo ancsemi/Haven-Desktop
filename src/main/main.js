@@ -1256,8 +1256,17 @@ function devTaskbarIconPath() {
       entries.writeUInt32LE(offset, at + 12);
       offset += pngs[i].length;
     });
-    const file = path.join(app.getPath('userData'), 'haven-taskbar.ico');
-    fs.writeFileSync(file, Buffer.concat([header, entries, ...pngs]));
+    // Kept outside the profile folder: the Start Menu shortcut points at this
+    // file for good, and a profile can be a throwaway one that gets deleted,
+    // which left the taskbar showing a blank page.
+    const dir = path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'Haven Desktop (source)');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'haven-taskbar.ico');
+    const data = Buffer.concat([header, entries, ...pngs]);
+    let same = false;
+    try { same = fs.readFileSync(file).equals(data); }
+    catch (err) { if (err.code !== 'ENOENT') console.warn('[Haven] could not read the taskbar icon:', err.message); }
+    if (!same) fs.writeFileSync(file, data);
     devTaskbarIcon = file;
     fixDevStartMenuShortcuts(file);
   } catch (err) {
@@ -1268,13 +1277,36 @@ function devTaskbarIconPath() {
 
 // Windows takes the taskbar icon and name for an app id from a Start Menu
 // shortcut that carries that id, ahead of anything the window sets. A copy run
-// from source can end up with one named "Electron" that has Electron's icon
-// and starts bare electron.exe. Point any shortcut for this copy at the Haven
-// icon, name and app instead.
+// from source used to end up with Electron's icon, or a blank page when the
+// shortcut pointed at an icon or a copy that no longer existed.
+//
+// So the copy you actually use (its normal profile, not a temporary one from
+// --user-data-dir, and not something run out of the temp folder) owns one
+// shortcut, "Haven Desktop (source)", and rewrites it on every launch to
+// point at itself and the Haven icon. Other shortcuts with this id that start
+// electron.exe (stale copies, test runs) are removed so they cannot win.
+// An installed Haven's own shortcut starts Haven.exe and is left alone.
+function ownsDevShortcut() {
+  if (app.commandLine.hasSwitch('user-data-dir')) return false;
+  const tmp = path.resolve(os.tmpdir()).toLowerCase();
+  const inTemp = (p) => path.resolve(p || '').toLowerCase().startsWith(tmp);
+  return !inTemp(process.execPath) && !inTemp(app.getAppPath());
+}
+
 function fixDevStartMenuShortcuts(icon) {
+  if (!ownsDevShortcut()) return;
   const { shell } = require('electron');
   const programs = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
-  const wanted = 'Haven Desktop (source).lnk';
+  const wanted = path.join(programs, 'Haven Desktop (source).lnk');
+  const options = {
+    target: process.execPath,
+    args: `"${app.getAppPath()}"${IS_DEV ? ' --dev' : ''}`,
+    cwd: app.getAppPath(),
+    description: 'Haven Desktop (run from source)',
+    icon,
+    iconIndex: 0,
+    appUserModelId: 'com.haven.desktop',
+  };
   let names = [];
   try {
     names = fs.readdirSync(programs).filter(name => name.toLowerCase().endsWith('.lnk'));
@@ -1284,24 +1316,27 @@ function fixDevStartMenuShortcuts(icon) {
   }
   for (const name of names) {
     const file = path.join(programs, name);
+    if (file.toLowerCase() === wanted.toLowerCase()) continue;
     let link;
     try { link = shell.readShortcutLink(file); }
     catch { continue; } // some shortcuts (installer "advertised" ones) cannot be read, and none of those are ours
     if (link.appUserModelId !== 'com.haven.desktop') continue;
-    if (path.resolve(link.target || '').toLowerCase() !== process.execPath.toLowerCase()) continue;
-    if (link.icon === icon && name === wanted) continue;
-    try {
-      shell.writeShortcutLink(file, 'update', {
-        args: `"${app.getAppPath()}"${IS_DEV ? ' --dev' : ''}`,
-        cwd: app.getAppPath(),
-        description: 'Haven Desktop (run from source)',
-        icon,
-        iconIndex: 0,
-      });
-      if (name !== wanted) fs.renameSync(file, path.join(programs, wanted));
-    } catch (err) {
-      console.warn('[Haven] could not update the Start Menu shortcut:', err.message);
-    }
+    if (path.basename(link.target || '').toLowerCase() !== 'electron.exe') continue;
+    try { fs.unlinkSync(file); }
+    catch (err) { console.warn('[Haven] could not remove a stale Start Menu shortcut:', err.message); }
+  }
+  let current = null;
+  try { current = shell.readShortcutLink(wanted); }
+  catch (err) { if (fs.existsSync(wanted)) console.warn('[Haven] could not read the Start Menu shortcut:', err.message); }
+  const same = current
+    && path.resolve(current.target || '').toLowerCase() === options.target.toLowerCase()
+    && current.args === options.args && current.icon === options.icon
+    && current.appUserModelId === options.appUserModelId;
+  if (same) return;
+  try {
+    shell.writeShortcutLink(wanted, current ? 'replace' : 'create', options);
+  } catch (err) {
+    console.warn('[Haven] could not write the Start Menu shortcut:', err.message);
   }
 }
 
