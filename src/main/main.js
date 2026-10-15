@@ -1283,6 +1283,60 @@ function applyDevTaskbarIcon(win) {
   }
 }
 
+// The welcome window and the app window's own splash and error pages hold
+// the bridge that can start a server on this computer. They only ever show
+// local files the app loads itself, so the page may not go anywhere else: a
+// link dragged onto the window used to open a remote page there, with that
+// bridge still attached. Web links go to the system browser instead.
+function keepOnLocalFiles(contents) {
+  const openWebLink = (url) => {
+    let parsed = null;
+    try { parsed = new URL(url); } catch { return; } // not a URL: nothing to open
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      shell.openExternal(parsed.href).catch(err => console.warn('[Haven] could not open a link:', err.message));
+    }
+  };
+  contents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    openWebLink(url);
+  });
+  contents.on('will-redirect', (event) => event.preventDefault());
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.setWindowOpenHandler(({ url }) => {
+    openWebLink(url);
+    return { action: 'deny' };
+  });
+}
+
+function contentsOf(win) {
+  return win && !win.isDestroyed() ? win.webContents : null;
+}
+
+/** An IPC call from the welcome window's own local page, in its top frame. */
+function fromWelcomeScreen(e) {
+  const own = contentsOf(welcomeWindow);
+  return !!own && e?.sender === own && isLocalScreenFrame(e.sender, e.senderFrame);
+}
+
+/** An IPC call from one of the app's own screens: the welcome window, or the
+ *  app window's splash and error pages, in their top frame. */
+function fromAppScreen(e) {
+  const sender = e?.sender;
+  if (!sender) return false;
+  const own = sender === contentsOf(welcomeWindow) || sender === contentsOf(mainWindow);
+  return own && isLocalScreenFrame(sender, e.senderFrame);
+}
+
+/** An IPC call from the top frame of the server page the user is looking at. */
+function fromActiveServer(e) {
+  return !!getTrustedServerUrlForFrame(e?.sender, e?.senderFrame, { active: true });
+}
+
+/** An IPC call from the top frame of any open server page, shown or not. */
+function fromAnyServer(e) {
+  return !!getTrustedServerUrlForFrame(e?.sender, e?.senderFrame);
+}
+
 function hideWelcome() {
   welcomeWanted = false;
   if (welcomeWindow && !welcomeWindow.isDestroyed()) welcomeWindow.hide();
@@ -1312,6 +1366,7 @@ function createWelcomeWindow() {
   });
 
   applyDevTaskbarIcon(welcomeWindow);
+  keepOnLocalFiles(welcomeWindow.webContents);
   welcomeWindow.loadFile(path.join(__dirname, '..', 'renderer', 'welcome.html'));
   welcomeWindow.once('ready-to-show', () => {
     welcomeWindow.show();
@@ -1343,6 +1398,7 @@ function createAppWindow(serverUrl) {
     });
 
     applyDevTaskbarIcon(mainWindow);
+    keepOnLocalFiles(mainWindow.webContents);
 
     // Show a splash page in the main window itself while the active server's
     // BrowserView loads. Without this the window opens to a flat dark
@@ -3466,12 +3522,29 @@ function registerIPC() {
   });
 
   // ── Server Management ─────────────────────────────────
-  ipcMain.handle('server:detect',      ()        => serverManager.detectServer());
-  ipcMain.handle('server:start',       (_e, dir) => serverManager.startServer(dir));
-  ipcMain.handle('server:stop',        ()        => serverManager.stopServer());
-  ipcMain.handle('server:status',      ()        => serverManager.getStatus());
+  // Starting a server runs the code in the folder it is given, so only the
+  // welcome screen's own page may ask. A server page never can, whatever it
+  // manages to reach in its preload.
+  const refused = (channel) => console.warn(`[Haven Desktop] refused ${channel} from a page that may not use it`);
+  ipcMain.handle('server:detect', (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:detect'); return null; }
+    return serverManager.detectServer();
+  });
+  ipcMain.handle('server:start', (e, dir) => {
+    if (!fromWelcomeScreen(e)) { refused('server:start'); return { success: false }; }
+    return serverManager.startServer(dir);
+  });
+  ipcMain.handle('server:stop', (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:stop'); return false; }
+    return serverManager.stopServer();
+  });
+  ipcMain.handle('server:status', (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:status'); return null; }
+    return serverManager.getStatus();
+  });
 
-  ipcMain.handle('server:browse', async () => {
+  ipcMain.handle('server:browse', async (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:browse'); return null; }
     const lastPath = store.get('userPrefs.serverPath');
     const r = await dialog.showOpenDialog(welcomeWindow || mainWindow, {
       title: t('dialog.selectServerDirectory'),
@@ -3481,7 +3554,8 @@ function registerIPC() {
     return r.canceled ? null : r.filePaths[0];
   });
 
-  ipcMain.handle('server:browse-file', async () => {
+  ipcMain.handle('server:browse-file', async (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:browse-file'); return null; }
     const r = await dialog.showOpenDialog(welcomeWindow || mainWindow, {
       title: t('dialog.selectServerFile'),
       properties: ['openFile'],
@@ -3491,7 +3565,10 @@ function registerIPC() {
   });
 
   // ── Auto-Update ───────────────────────────────────────
-  ipcMain.handle('update:download', async () => {
+  // Downloading and installing restart the app, so only the welcome screen
+  // and the server page on screen may ask; the banner lives on both.
+  ipcMain.handle('update:download', async (e) => {
+    if (!fromAppScreen(e) && !fromActiveServer(e)) { refused('update:download'); return { errorKey: 'update.unavailable' }; }
     if (!autoUpdater) return { errorKey: 'update.unavailable' };
     updateState.setDownloading(true);
     try { await autoUpdater.downloadUpdate(); return { success: true }; }
@@ -3500,11 +3577,18 @@ function registerIPC() {
   });
   // A page that has just loaded asks what the updater found, so the banner
   // shows even when the check answered before the page was there. (#63)
-  ipcMain.handle('update:state', () => updateState.forPage());
+  ipcMain.handle('update:state', (e) => {
+    if (!fromAppScreen(e) && !fromAnyServer(e)) return null;
+    return updateState.forPage();
+  });
   // Closing the banner keeps it closed on every page until a newer version
   // turns up or the user checks from the menu.
-  ipcMain.on('update:dismiss', () => updateState.dismiss());
-  ipcMain.on('update:install', () => {
+  ipcMain.on('update:dismiss', (e) => {
+    if (!fromAppScreen(e) && !fromAnyServer(e)) { refused('update:dismiss'); return; }
+    updateState.dismiss();
+  });
+  ipcMain.on('update:install', (e) => {
+    if (!fromAppScreen(e) && !fromActiveServer(e)) { refused('update:install'); return; }
     if (autoUpdater) {
       serverManager?.stopServer();
       autoUpdater.quitAndInstall(false, true);
@@ -3666,12 +3750,19 @@ function registerIPC() {
   });
 
   // ── Window Controls ───────────────────────────────────
-  ipcMain.on('window:minimize', () => BrowserWindow.getFocusedWindow()?.minimize());
-  ipcMain.on('window:maximize', () => {
+  // A hidden server page may not close or resize the window under the user.
+  const windowControlAllowed = (e) => fromAppScreen(e) || fromActiveServer(e);
+  ipcMain.on('window:minimize', (e) => {
+    if (windowControlAllowed(e)) BrowserWindow.getFocusedWindow()?.minimize();
+  });
+  ipcMain.on('window:maximize', (e) => {
+    if (!windowControlAllowed(e)) return;
     const w = BrowserWindow.getFocusedWindow();
     w?.isMaximized() ? w.unmaximize() : w?.maximize();
   });
-  ipcMain.on('window:close', () => BrowserWindow.getFocusedWindow()?.close());
+  ipcMain.on('window:close', (e) => {
+    if (windowControlAllowed(e)) BrowserWindow.getFocusedWindow()?.close();
+  });
 
   // ── Fullscreen (BrowserView doesn't support the HTML5 Fullscreen API natively;
   //    the preload overrides requestFullscreen / exitFullscreen via IPC) ──
@@ -3694,15 +3785,12 @@ function registerIPC() {
   // reach it: it could point the "host a server" folder at a network share it
   // controls, and the next launch would run whatever server.js it found there.
   // Server pages have their own narrow calls (prefs, shortcuts, history).
-  const fromLocalPage = (e) => {
-    try { return String(e.senderFrame?.url || '').startsWith('file://'); } catch { return false; }
-  };
   ipcMain.handle('settings:get', (e, key) => {
-    if (!fromLocalPage(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return undefined;
+    if (!fromAppScreen(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return undefined;
     return store.get(key);
   });
   ipcMain.handle('settings:set', (e, key, value)  => {
-    if (!fromLocalPage(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return false;
+    if (!fromAppScreen(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return false;
     store.set(key, value);
     return true;
   });
@@ -3976,7 +4064,11 @@ function registerIPC() {
   ipcMain.on('nav:open-app', (e, serverUrl) => {
     if (serverListSender(e)?.local) createAppWindow(serverUrl);
   });
-  ipcMain.on('nav:back-to-welcome', () => resetToWelcome());
+  // Going back to the welcome screen also stops a server this app runs.
+  ipcMain.on('nav:back-to-welcome', (e) => {
+    if (!fromAppScreen(e) && !fromActiveServer(e)) { refused('nav:back-to-welcome'); return; }
+    resetToWelcome();
+  });
   // Opening a server adds it to the list, so a page opening one that is not
   // listed asks the user first. A click is always the user's own; fresh
   // says whether it came just now (see app-preload.js).
@@ -4129,7 +4221,10 @@ function registerIPC() {
   });
 
   // ── External links ────────────────────────────────────
-  ipcMain.on('open-external', (_e, url) => {
+  // Only the app's own screens use this; server pages open links through
+  // window.open, which has its own rules.
+  ipcMain.on('open-external', (e, url) => {
+    if (!fromAppScreen(e)) { refused('open-external'); return; }
     // Only allow http/https URLs to prevent file:// or protocol handler abuse
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
       shell.openExternal(url);
