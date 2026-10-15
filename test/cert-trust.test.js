@@ -31,9 +31,32 @@ test("a remote server's own certificate is asked about once, then remembered", (
   assert.equal(certDecision({ ...cert, fingerprint: 'sha256/bbb' }, { pins: { 'haven.example.com': 'sha256/aaa' } }), 'changed');
 });
 
-test('local servers never ask, whatever their certificate', () => {
-  assert.equal(certDecision({ hostname: '192.168.1.20', errorCode: -202, fingerprint: 'sha256/new' },
-    { pins: { '192.168.1.20': 'sha256/old' } }), 'local');
+test('this computer never asks, whatever its certificate', () => {
+  for (const hostname of ['localhost', 'haven.localhost', '127.0.0.1', '127.8.0.1', '::1', '::ffff:127.0.0.1']) {
+    assert.equal(certDecision({ hostname, errorCode: -202, fingerprint: 'sha256/new' },
+      { pins: { [hostname]: 'sha256/old' } }), 'local', hostname);
+  }
+});
+
+test('a local network server is trusted on first use, then held to that certificate', () => {
+  const cert = { hostname: '192.168.1.20', errorCode: -202, fingerprint: 'sha256/aaa' };
+  assert.equal(certDecision(cert), 'local-first');
+  assert.equal(certDecision(cert, { pins: { '192.168.1.20': 'sha256/aaa' } }), 'pinned');
+  assert.equal(certDecision({ ...cert, fingerprint: 'sha256/bbb' }, { pins: { '192.168.1.20': 'sha256/aaa' } }), 'changed');
+  assert.equal(certDecision({ ...cert, hostname: 'NAS.local' }, { pins: { 'nas.local': 'sha256/zzz' } }), 'changed');
+});
+
+test('only loopback counts as this computer', () => {
+  const { isLoopbackHost } = require('../src/main/cert-trust');
+  for (const host of ['localhost', 'a.localhost', '127.0.0.1', '::1', '[::1]', '::ffff:127.0.0.1']) assert.equal(isLoopbackHost(host), true, host);
+  for (const host of ['192.168.1.2', 'nas.local', '10.0.0.1', 'fe80::1', 'localhost.example.com', '']) assert.equal(isLoopbackHost(host), false, host);
+});
+
+test('main remembers a local host the first time and asks when it changes', () => {
+  const main = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/main/main.js'), 'utf8');
+  assert.match(main, /if \(verdict === 'grandfathered' \|\| verdict === 'local-first'\) \{\s*rememberCertificate\(host, fingerprint\);\s*return callback\(0\);/);
+  assert.match(main, /if \(verdict === 'local-first'\) rememberCertificate\(host, certificate\?\.fingerprint \|\| ''\);/);
+  assert.match(main, /askToTrustCertificate\(host, request\.certificate, verdict === 'changed'\)/);
 });
 
 test('servers used before the check are trusted on their next connection only', () => {

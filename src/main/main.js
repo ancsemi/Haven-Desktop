@@ -459,9 +459,10 @@ if (exitingForX11) {
 // Haven servers often use a certificate they made themselves. The app used
 // to accept every certificate from every host, so someone on the same
 // network could pose as a remote server. The rules are in cert-trust.js: a
-// certificate the system trusts is fine, this computer and the local
-// network stay automatic, and any other host's own certificate is accepted
-// once the user trusts it, then remembered by fingerprint.
+// certificate the system trusts is fine, this computer stays automatic, a
+// local network host's first certificate is remembered without asking, and
+// any other host's own certificate is accepted once the user trusts it.
+// Either way a different certificate later asks again.
 //
 // setCertificateVerifyProc sees every connection (pages, scripts and the
 // Socket.IO reconnect storms that used to exhaust the renderer when TLS
@@ -485,7 +486,8 @@ app.on('certificate-error', (event, _webContents, url, _error, certificate, call
     { hostname: host, errorCode: -1, fingerprint: certificate?.fingerprint || '' },
     { pins: trustedCertificates() }
   );
-  if (verdict === 'local' || verdict === 'pinned') {
+  if (verdict === 'local-first') rememberCertificate(host, certificate?.fingerprint || '');
+  if (verdict === 'local' || verdict === 'local-first' || verdict === 'pinned') {
     event.preventDefault();
     callback(true);
     return;
@@ -602,7 +604,8 @@ app.on('ready', () => {
     );
     if (verdict === 'system') return callback(-3); // Chromium's own verdict
     if (verdict === 'local' || verdict === 'pinned') return callback(0);
-    if (verdict === 'grandfathered') {
+    if (verdict === 'grandfathered' || verdict === 'local-first') {
+
       rememberCertificate(host, fingerprint);
       return callback(0);
     }

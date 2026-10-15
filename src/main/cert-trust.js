@@ -7,13 +7,25 @@
 // anyone on the same network could pose as a remote server and collect the
 // passwords and messages sent to it. The rule now:
 //   - a certificate the system already trusts is accepted as usual;
-//   - this computer and the local network stay automatic, since that is
-//     where a server's own certificate is the normal case;
+//   - this computer stays automatic: nothing else can answer there;
+//   - a local network host's own certificate is the normal case, so the
+//     first one is accepted without asking and remembered by fingerprint;
+//     someone else on the network answering for that host later, with a
+//     different certificate, is asked about like any other change;
 //   - any other host's own certificate is accepted once the user trusts it,
 //     and is remembered by fingerprint, so a different one asks again.
 
 function normalizeHost(hostname) {
   return String(hostname || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '');
+}
+
+/** This computer only: localhost names and loopback addresses. */
+function isLoopbackHost(hostname) {
+  const h = normalizeHost(hostname);
+  if (!h) return false;
+  if (h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true;
+  if (h.startsWith('::ffff:')) return isLoopbackHost(h.slice(7));
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
 /** This computer, a private (RFC 1918) or link-local address, or a .local name. */
@@ -37,7 +49,9 @@ function isLocalHost(hostname) {
 /**
  * What to do with a server's certificate:
  *   'system'         the system trusts it, so Chromium's own verdict stands
- *   'local'          this computer or the local network: accept
+ *   'local'          this computer: accept
+ *   'local-first'    a local network host seen for the first time: accept
+ *                    and remember it
  *   'pinned'         the certificate the user trusted before: accept
  *   'changed'        not the one the user trusted before: ask again
  *   'grandfathered'  a server used before certificates were checked:
@@ -47,11 +61,13 @@ function isLocalHost(hostname) {
 function certDecision({ hostname, errorCode, fingerprint }, { pins = {}, grandfathered = [] } = {}) {
   if (errorCode === 0) return 'system';
   const host = normalizeHost(hostname);
-  if (isLocalHost(host)) return 'local';
+  if (isLoopbackHost(host)) return 'local';
   const pinned = Object.prototype.hasOwnProperty.call(pins, host) ? pins[host] : null;
   if (pinned) return pinned === fingerprint ? 'pinned' : 'changed';
+  if (isLocalHost(host)) return 'local-first';
   if (grandfathered.includes(host)) return 'grandfathered';
   return 'unknown';
 }
 
-module.exports = { normalizeHost, isLocalHost, certDecision };
+module.exports = { normalizeHost, isLoopbackHost, isLocalHost, certDecision };
+
