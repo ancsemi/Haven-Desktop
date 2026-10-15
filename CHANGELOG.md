@@ -1,5 +1,23 @@
 # Haven Desktop Changelog
 
+## v1.7.1
+
+### Security
+- **Security fixes.** Updating is recommended for everyone.
+
+### Changed
+- **Pop-up messages from a server say which server they come from,** and
+  notifications from a server you are not looking at start with its name.
+- **Mute and deafen shortcuts can no longer be a single letter key,** since
+  that grabbed the key everywhere on your PC. Hold push to talk on a letter
+  key still works.
+
+### Fixed
+- **A full screen stream covers the whole window (Haven #5755).** Parts of the
+  page behind it could still be clicked or dragged.
+- **Running Haven Desktop from source keeps the Haven icon on the taskbar,**
+  instead of Electron's icon or a blank page.
+
 ## v1.7.0
 
 ### Added
