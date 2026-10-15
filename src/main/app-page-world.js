@@ -192,7 +192,8 @@ function installPageWorld(bridge, deps) {
 
     if (!_displayVideoTracks.has(track) || track.readyState !== 'live') {
       if (_screenShareTransceivers.has(transceiver)) {
-        try { transceiver.setCodecPreferences([]); } catch {}
+        try { transceiver.setCodecPreferences([]); }
+        catch (err) { console.warn('[Haven Desktop] could not reset codec preferences:', err?.message || err); }
         _screenShareTransceivers.delete(transceiver);
       }
       return;
@@ -218,7 +219,8 @@ function installPageWorld(bridge, deps) {
       console.log(`[Haven Desktop] screen encoder requested: ${preference}`);
     } else {
       if (_screenShareTransceivers.has(transceiver)) {
-        try { transceiver.setCodecPreferences([]); } catch {}
+        try { transceiver.setCodecPreferences([]); }
+        catch (err) { console.warn('[Haven Desktop] could not reset codec preferences:', err?.message || err); }
         _screenShareTransceivers.delete(transceiver);
       }
       publishVideoEncoderStatus({
@@ -797,7 +799,19 @@ function installPageWorld(bridge, deps) {
   // the system-loopback track on the screen-share MediaStream.
   // ═══════════════════════════════════════════════════════════
 
+  function closeFailed(err) {
+    console.warn('[Haven Desktop] AudioContext close failed:', err?.message || err);
+  }
+
+  // Take a track out of the shared stream; a track that already ended may
+  // refuse, and is gone either way.
+  function dropTrack(stream, track) {
+    try { stream.removeTrack(track); track.stop(); }
+    catch (err) { console.warn('[Haven Desktop] could not drop an audio track:', err?.message || err); }
+  }
+
   async function buildAudioPipeline(isCancelled = () => false) {
+
     if (isCancelled()) return false;
     // Reset arrival counters so the getDisplayMedia override's readiness
     // check reflects ONLY this capture session, never a stale prior one.
@@ -879,7 +893,7 @@ function installPageWorld(bridge, deps) {
       window._havenAudioCtxMonitor = setInterval(() => {
         if (_audioCtx && _audioCtx.state === 'suspended') {
           console.warn('[Haven Desktop] AudioContext suspended, resuming');
-          _audioCtx.resume().catch(() => {});
+          _audioCtx.resume().catch(err => console.warn('[Haven Desktop] AudioContext resume failed:', err?.message || err));
         }
       }, 2000);
 
@@ -889,7 +903,7 @@ function installPageWorld(bridge, deps) {
       console.warn('[Haven Desktop] AudioWorklet pipeline failed, trying ScriptProcessor fallback:', err.message);
       // Clean up partial AudioWorklet state before fallback
       _audioWorkletNode = null;
-      if (_audioCtx) { _audioCtx.close().catch(() => {}); _audioCtx = null; }
+      if (_audioCtx) { _audioCtx.close().catch(closeFailed); _audioCtx = null; }
       _audioDestination = null;
       if (isCancelled()) return false;
     }
@@ -956,7 +970,7 @@ function installPageWorld(bridge, deps) {
       window._havenAudioCtxMonitor = setInterval(() => {
         if (_audioCtx && _audioCtx.state === 'suspended') {
           console.warn('[Haven Desktop] AudioContext suspended, resuming');
-          _audioCtx.resume().catch(() => {});
+          _audioCtx.resume().catch(err => console.warn('[Haven Desktop] AudioContext resume failed:', err?.message || err));
         }
       }, 2000);
 
@@ -965,7 +979,7 @@ function installPageWorld(bridge, deps) {
     } catch (err) {
       console.error('[Haven Desktop] Audio pipeline setup failed completely:', err);
       // Clean up on total failure
-      if (_audioCtx) { _audioCtx.close().catch(() => {}); _audioCtx = null; }
+      if (_audioCtx) { _audioCtx.close().catch(closeFailed); _audioCtx = null; }
       _audioDestination = null;
       window._havenAppAudioPush = null;
       return false;
@@ -985,7 +999,7 @@ function installPageWorld(bridge, deps) {
     }
     _audioWorkletNode?.disconnect();
     _audioWorkletNode = null;
-    _audioCtx?.close().catch(() => {});
+    _audioCtx?.close().catch(closeFailed);
     _audioCtx         = null;
     _audioDestination = null;
     _capturedAudioPid = null;
@@ -1079,7 +1093,7 @@ function installPageWorld(bridge, deps) {
           if (_activeAudioCaptureId === captureId &&
               _audioPacketsReceived > 0 && window._havenAppAudioTrack) {
             // Remove any unexpected Electron track before attaching native audio.
-            stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+            stream.getAudioTracks().forEach(t => dropTrack(stream, t));
             stream.addTrack(window._havenAppAudioTrack);
             console.log(`[Haven Desktop] native audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
           } else {
@@ -1093,7 +1107,7 @@ function installPageWorld(bridge, deps) {
             console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
             console.warn('  lastNativeStatus:', _lastNativeStatus);
             console.warn('  Continuing without audio to prevent a Haven voice loop.');
-            stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+            stream.getAudioTracks().forEach(t => dropTrack(stream, t));
             teardownAudioPipeline(captureId);
           }
         } else if (window._havenAppAudioTrack && !_activeAudioCaptureId) {
@@ -1169,15 +1183,20 @@ function installPageWorld(bridge, deps) {
         window.app.switchChannel(code);
         if (messageId && window.app?._jumpToMessage) {
           const id = parseInt(messageId, 10);
-          if (id) setTimeout(() => { try { window.app._jumpToMessage(id); } catch {} }, 600);
+          if (id) setTimeout(() => {
+            try { window.app._jumpToMessage(id); }
+            catch (err) { console.warn('[Haven Desktop] could not jump to the message:', err?.message || err); }
+          }, 600);
         }
         return;
       }
-    } catch {}
+    } catch (err) {
+      console.warn('[Haven Desktop] could not open the linked channel, loading the link instead:', err?.message || err);
+    }
     // Fallback: full reload to the deep link if the SPA handlers aren't
     // available (e.g. login page).  The page's auth.js preserves the
     // ?channel/?message query across the auth bounce.
-    if (url) { try { location.href = url; } catch {} }
+    if (typeof url === 'string' && url) location.href = url;
   });
 }
 
