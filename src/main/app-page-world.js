@@ -396,6 +396,12 @@ function installPageWorld(bridge, deps) {
   // applies and the visual doesn't change.  We implement fullscreen
   // entirely manually: a CSS class for visual fullscreen + IPC to
   // toggle the Electron window's native fullscreen.
+  //
+  // The element also goes into the browser's top layer as a popover, as
+  // real fullscreen does. Without that, its z-index only counts inside its
+  // own stacking context (Haven's <main> is isolated), so the members
+  // panel, the sidebar and anything else above <main> stayed on top of the
+  // stream and could still be clicked and dragged through it (#5755).
   // ═══════════════════════════════════════════════════════════
 
   (function patchFullscreen() {
@@ -421,6 +427,8 @@ function installPageWorld(bridge, deps) {
           padding: 0 !important;
           border: none !important;
           border-radius: 0 !important;
+          inset: 0 !important;
+          overflow: hidden !important;
         }
       `;
       document.head.appendChild(style);
@@ -428,16 +436,45 @@ function installPageWorld(bridge, deps) {
     if (document.head) injectStyle();
     else window.addEventListener('DOMContentLoaded', injectStyle, { once: true });
 
+    // Set when we made the element a popover, so leaving takes off only
+    // what we added (an element the page made a popover itself keeps its own).
+    let _ownPopover = false;
+
+    function raiseToTopLayer(el) {
+      _ownPopover = false;
+      if (typeof el.showPopover !== 'function' || !el.isConnected || el.hasAttribute('popover')) return;
+      el.setAttribute('popover', 'manual');
+      try {
+        el.showPopover();
+        _ownPopover = true;
+      } catch (err) {
+        // The class alone still fills the window, only without the top layer.
+        el.removeAttribute('popover');
+        console.warn('[Haven Desktop] Full screen could not use the top layer:', err);
+      }
+    }
+
+    function lowerFromTopLayer(el) {
+      if (!_ownPopover) return;
+      _ownPopover = false;
+      // A stream that ended while full screen left the page, which already
+      // closed its popover.
+      if (el.matches(':popover-open')) el.hidePopover();
+      el.removeAttribute('popover');
+    }
+
     function enterFullscreen(el) {
       if (_fullscreenEl) exitFullscreen();
       _fullscreenEl = el;
       el.classList.add('haven-manual-fullscreen');
+      raiseToTopLayer(el);
       bridge.fullscreen(true);
       document.dispatchEvent(new Event('fullscreenchange'));
     }
 
     function exitFullscreen() {
       if (_fullscreenEl) {
+        lowerFromTopLayer(_fullscreenEl);
         _fullscreenEl.classList.remove('haven-manual-fullscreen');
         _fullscreenEl = null;
       }

@@ -127,3 +127,48 @@ test('the injected page world is valid on its own and wires the page globals to 
   p.localStorage.setItem('other', '1');
   assert.deepEqual(p.calls.filter(c => c[0] === 'locale'), [['locale', 'pt'], ['locale', 'auto']]);
 });
+
+// A full screen stream has to cover the whole page, members panel and
+// sidebar included, so it goes into the top layer as a popover (#5755).
+function fakeElement({ popover = false, failShow = false } = {}) {
+  const attrs = new Map(popover ? [['popover', 'auto']] : []);
+  const classes = new Set();
+  const el = {
+    isConnected: true,
+    open: false,
+    classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c), has: (c) => classes.has(c) },
+    hasAttribute: (n) => attrs.has(n),
+    getAttribute: (n) => attrs.get(n),
+    setAttribute: (n, v) => attrs.set(n, String(v)),
+    removeAttribute: (n) => attrs.delete(n),
+    matches: (sel) => sel === ':popover-open' && el.open,
+    showPopover() { if (failShow) throw new Error('not allowed'); el.open = true; },
+    hidePopover() { el.open = false; },
+  };
+  return el;
+}
+
+test('full screen puts the element in the top layer and takes it out again', () => {
+  const p = runPageWorld();
+  const el = fakeElement();
+  p.window.Element.prototype.requestFullscreen.call(el);
+  assert.equal(el.open, true, 'shown as a popover');
+  assert.equal(el.getAttribute('popover'), 'manual');
+  assert.ok(el.classList.has('haven-manual-fullscreen'));
+  p.window.Document.prototype.exitFullscreen.call({});
+  assert.equal(el.open, false);
+  assert.equal(el.hasAttribute('popover'), false, 'the attribute we added is gone');
+  assert.equal(el.classList.has('haven-manual-fullscreen'), false);
+  assert.deepEqual(p.calls.filter(c => c[0] === 'fullscreen'), [['fullscreen', true], ['fullscreen', false]]);
+
+  // The page's own popover is left alone, and a refused top layer still
+  // goes full screen with the class.
+  const own = fakeElement({ popover: true });
+  p.window.Element.prototype.requestFullscreen.call(own);
+  p.window.Document.prototype.exitFullscreen.call({});
+  assert.equal(own.getAttribute('popover'), 'auto');
+  const refused = fakeElement({ failShow: true });
+  p.window.Element.prototype.requestFullscreen.call(refused);
+  assert.ok(refused.classList.has('haven-manual-fullscreen'));
+  assert.equal(refused.hasAttribute('popover'), false);
+});
