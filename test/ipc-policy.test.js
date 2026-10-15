@@ -70,3 +70,33 @@ test('page dialogs are asynchronous, for the shown server only, and name it', ()
 test('notifications come from a server page top frame', () => {
   assert.match(handlerBody('notify'), /getTrustedServerUrlForFrame\(e\.sender, e\.senderFrame\)/);
 });
+
+test('the microphone and camera go only to the server on screen, from its own origin', () => {
+  const { permissionAllowed } = require('../src/main/ipc-policy');
+  const shown = { kind: 'server', origin: 'https://a.example', active: true };
+  const hidden = { kind: 'server', origin: 'https://b.example', active: false };
+  const popup = { kind: 'popup', origin: 'https://a.example' };
+  const ask = (permission, requester, requestingOrigin) => permissionAllowed({ permission, requester, requestingOrigin });
+
+  assert.equal(ask('media', shown, 'https://a.example'), true);
+  assert.equal(ask('display-capture', shown, 'https://a.example'), true);
+  assert.equal(ask('media', shown, 'https://www.youtube.com'), false, 'not an embed on the shown page');
+  assert.equal(ask('media', hidden, 'https://b.example'), false, 'not a hidden background server');
+  assert.equal(ask('media', popup, 'https://a.example'), false, 'not a popup');
+  assert.equal(ask('media', null, 'https://a.example'), false, 'not an unknown page');
+  assert.equal(ask('media', { kind: 'local' }, null), false);
+
+  assert.equal(ask('notifications', hidden, 'https://b.example'), true, 'hidden servers still notify');
+  assert.equal(ask('notifications', hidden, 'https://a.example'), false);
+  assert.equal(ask('clipboard-write', popup, 'https://a.example'), true);
+  assert.equal(ask('fullscreen', shown, 'https://www.youtube.com'), true, 'an embedded video can go full screen');
+  assert.equal(ask('fullscreen', { kind: 'local' }, null), true);
+  assert.equal(ask('clipboard-read', shown, 'https://a.example'), false);
+  assert.equal(ask('geolocation', shown, 'https://a.example'), false);
+});
+
+test('main asks the permission rules for every request and check', () => {
+  assert.match(MAIN, /setPermissionRequestHandler\(\(contents, permission, callback, details\) => \{\s*callback\(permissionAllowed\(/);
+  assert.match(MAIN, /setPermissionCheckHandler\(\(contents, permission, requestingOrigin, details\) => \{\s*const requester = permissionRequester\(contents\);\s*return permissionAllowed\(/);
+  assert.match(MAIN, /serverPopupOwners\.set\(child\.webContents, url\);/);
+});

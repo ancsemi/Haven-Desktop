@@ -34,8 +34,8 @@ const {
 } = require('./screen-share-audio');
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
-const { isTrustedMainFrame } = require('./ipc-security');
-const { isTypingKeyAccelerator, dialogHost, notificationTitle } = require('./ipc-policy');
+const { isTrustedMainFrame, getHttpOrigin } = require('./ipc-security');
+const { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
@@ -706,16 +706,31 @@ app.whenReady().then(async () => {
     }, 50);
   });
 
-  // Auto-grant camera, mic, screen-share, fullscreen, and PiP permissions for all server views.
-  // Not clipboard-read: Haven never reads the clipboard, and granting it let
-  // any server read whatever was copied, passwords included, without asking.
-  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture', 'clipboard-write'];
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(ALLOWED_PERMS.includes(permission));
+  // Permissions are granted without asking, but only to a server page, its
+  // popups and the app's own screens, and only what each needs (rules in
+  // ipc-policy.js): the microphone and camera go to the server on screen
+  // alone, so a hidden background server can never listen in. Not
+  // clipboard-read: Haven never reads the clipboard, and granting it let any
+  // server read whatever was copied, passwords included, without asking.
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    callback(permissionAllowed({
+      permission,
+      requester: permissionRequester(contents),
+      requestingOrigin: getHttpOrigin(details?.requestingUrl) || getHttpOrigin(details?.securityOrigin),
+    }));
   });
-  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
-    return ALLOWED_PERMS.includes(permission);
+  // Chromium checks some permissions with no origin at all (media, while a
+  // page loads); those are the page's own, so its address stands in.
+  session.defaultSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
+    const requester = permissionRequester(contents);
+    return permissionAllowed({
+      permission,
+      requester,
+      requestingOrigin: getHttpOrigin(requestingOrigin) || getHttpOrigin(details?.requestingUrl)
+        || (requester ? getHttpOrigin(contents.getURL()) : null),
+    });
   });
+
 
   registerIPC();
   registerScreenShareHandler();
@@ -1963,8 +1978,10 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // A same-origin popup, such as a picture opened in its own window, gets
     // the same menu (Haven #5663).
     view.webContents.on('did-create-window', (child) => {
+      serverPopupOwners.set(child.webContents, url);
       try { attachContextMenu(child.webContents, child); } catch {}
     });
+
 
     // ── Page load timeout: if no content after 15 s, offer to go back ──
     // Background-preloaded views are silent: they never show user dialogs.
@@ -2519,6 +2536,22 @@ function serverBadgePayload() {
 
 function sendServerBadges(contents) {
   safeSend(contents, 'server-badge-update', serverBadgePayload());
+}
+
+// Windows a server page opened (a picture, a game, a sign-in round trip),
+// with the server they belong to.
+const serverPopupOwners = new WeakMap();
+
+/** Who is asking for a browser permission (see permissionAllowed). */
+function permissionRequester(contents) {
+  if (!contents || contents.isDestroyed?.()) return null;
+  for (const [url, view] of serverViews) {
+    if (view.webContents === contents) return { kind: 'server', origin: getHttpOrigin(url), active: url === activeServerUrl };
+  }
+  const owner = serverPopupOwners.get(contents);
+  if (owner) return { kind: 'popup', origin: getHttpOrigin(owner) };
+  if (contents === contentsOf(welcomeWindow) || contents === contentsOf(mainWindow)) return { kind: 'local' };
+  return null;
 }
 
 function isLanguageSenderAllowed(contents) {

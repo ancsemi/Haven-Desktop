@@ -45,4 +45,34 @@ function notificationTitle(title, { active, serverName }) {
   return `${String(serverName).slice(0, 80)} · ${text}`;
 }
 
-module.exports = { isTypingKeyAccelerator, dialogHost, notificationTitle };
+// Browser permissions a page may be granted, by who asks:
+//   any frame of a server page or its popups, embeds included: harmless
+//   ones a browser grants without asking (an embedded video going full
+//   screen or picture in picture, or asking for its media keys);
+//   the server's own origin, page or popup: notifications, clipboard write;
+//   the server page on screen, from its own origin: microphone and camera,
+//   screen capture and the screen layout. A hidden server page can never
+//   open the mic.
+const ANY_FRAME = new Set(['fullscreen', 'picture-in-picture', 'mediaKeySystem']);
+const OWN_ORIGIN = new Set(['notifications', 'clipboard-write']);
+const SHOWN_SERVER = new Set(['media', 'display-capture', 'window-management']);
+
+/**
+ * requester: null (unknown), { kind: 'local' } for the app's own screens,
+ * { kind: 'server', origin, active } for a server view, or
+ * { kind: 'popup', origin } for a window a server page opened.
+ * requestingOrigin: the http(s) origin of the frame asking, or null.
+ */
+function permissionAllowed({ permission, requester, requestingOrigin }) {
+  if (!requester) return false;
+  if (requester.kind === 'local') return permission === 'fullscreen';
+  if (requester.kind !== 'server' && requester.kind !== 'popup') return false;
+  if (ANY_FRAME.has(permission)) return true;
+  const ownOrigin = !!requester.origin && requestingOrigin === requester.origin;
+  if (OWN_ORIGIN.has(permission)) return ownOrigin;
+  if (SHOWN_SERVER.has(permission)) return ownOrigin && requester.kind === 'server' && requester.active === true;
+  return false;
+}
+
+module.exports = { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed };
+
