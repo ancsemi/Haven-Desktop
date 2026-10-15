@@ -115,7 +115,7 @@ test('a server page stays on its server; embeds are frames, never the page', () 
 
 test('server views check navigations and redirects, and popups get their own guards', () => {
   assert.doesNotMatch(MAIN, /EMBED_ORIGINS/);
-  assert.match(MAIN, /view\.webContents\.on\('will-navigate', \(event, navUrl\) => \{\s*const verdict = serverNavigation\(navUrl, url\);/);
+  assert.match(MAIN, /view\.webContents\.on\('will-navigate', \(event, navUrl\) => \{\s*const verdict = signIn\.decide\(navUrl, url\);/);
   assert.match(MAIN, /view\.webContents\.on\('will-redirect', /);
   assert.match(MAIN, /guardServerPopup\(child\.webContents\);/);
   const popup = MAIN.slice(MAIN.indexOf('function guardServerPopup'), MAIN.indexOf('function getServerUrlForContents'));

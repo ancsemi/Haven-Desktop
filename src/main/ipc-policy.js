@@ -91,6 +91,54 @@ function serverNavigation(url, serverUrl) {
   return target.origin === server.origin ? 'stay' : 'browser';
 }
 
-module.exports = { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, serverNavigation };
+// Single sign-on (OIDC) runs in the server page's own view: the server sends
+// it to its identity provider and the provider sends it back. That is the one
+// time a server view may show another site, and only along that path.
+const SIGN_IN_START_PATH = '/api/auth/oidc/start';
+const SIGN_IN_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * One server view's sign-in round trip. decide(target, serverUrl, { redirect })
+ * answers like serverNavigation for each top frame navigation or redirect:
+ *   - the page's own move to /api/auth/oidc/start opens the round trip;
+ *   - the server's redirect from there names the provider and stays;
+ *   - the provider's own pages stay;
+ *   - coming back to the server closes it.
+ * Going anywhere else, or taking longer than SIGN_IN_WINDOW_MS, closes it too.
+ * While the view shows the provider, main refuses every call from the page,
+ * because its trusted frame check wants the server's own origin.
+ */
+function createSignInRoundTrip({ now = Date.now, windowMs = SIGN_IN_WINDOW_MS } = {}) {
+  let trip = null; // { openedAt, provider: origin or null }
+  return {
+    decide(target, serverUrl, { redirect = false } = {}) {
+      const verdict = serverNavigation(target, serverUrl);
+      if (trip && now() - trip.openedAt > windowMs) trip = null;
+      if (verdict === 'block') { trip = null; return 'block'; }
+      const parsed = new URL(String(target));
+      if (verdict === 'stay') {
+        trip = parsed.pathname === SIGN_IN_START_PATH ? { openedAt: now(), provider: null } : null;
+        return 'stay';
+      }
+      if (trip && !trip.provider && redirect) {
+        trip.provider = parsed.origin;
+        return 'stay';
+      }
+      if (trip && trip.provider === parsed.origin) return 'stay';
+      trip = null;
+      return 'browser';
+    },
+    isOpen() {
+      if (trip && now() - trip.openedAt > windowMs) trip = null;
+      return !!trip;
+    },
+  };
+}
+
+module.exports = {
+  isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, serverNavigation,
+  createSignInRoundTrip, SIGN_IN_WINDOW_MS,
+};
+
 
 

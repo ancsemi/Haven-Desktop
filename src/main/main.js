@@ -35,7 +35,9 @@ const {
 const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame, getHttpOrigin } = require('./ipc-security');
-const { isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, serverNavigation } = require('./ipc-policy');
+const {
+  isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, createSignInRoundTrip,
+} = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
@@ -2186,9 +2188,11 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // top frame, so embedded players (SoundCloud, Spotify, YouTube) still
     // load in their frames; the page itself never turns into one of them.
     // A redirect gets the same rule, so a link on the server cannot bounce
-    // the page somewhere else.
+    // the page somewhere else. The one way out is the server's own single
+    // sign-on round trip to its identity provider (createSignInRoundTrip).
+    const signIn = createSignInRoundTrip();
     view.webContents.on('will-navigate', (event, navUrl) => {
-      const verdict = serverNavigation(navUrl, url);
+      const verdict = signIn.decide(navUrl, url);
       if (verdict === 'stay') return;
       event.preventDefault();
       if (verdict === 'browser') openWebLink(navUrl);
@@ -2196,11 +2200,13 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     view.webContents.on('will-redirect', (event, redirectUrl, _isInPlace, isMainFrame) => {
       const mainFrame = event.isMainFrame ?? isMainFrame;
       if (mainFrame === false) return;
-      const verdict = serverNavigation(event.url || redirectUrl, url);
+      const target = event.url || redirectUrl;
+      const verdict = signIn.decide(target, url, { redirect: true });
       if (verdict === 'stay') return;
       event.preventDefault();
-      if (verdict === 'browser') openWebLink(event.url || redirectUrl);
+      if (verdict === 'browser') openWebLink(target);
     });
+
 
     // Intercept window.open → switch servers or open external.
     // Same-origin popups (e.g. game pop-out) open in a real child window;
@@ -2579,10 +2585,9 @@ function permissionRequester(contents) {
   return null;
 }
 
-function isLanguageSenderAllowed(contents) {
-  if (welcomeWindow?.webContents === contents) return true;
-  const serverUrl = getServerUrlForContents(contents);
-  return !!serverUrl && serverUrl === activeServerUrl;
+// The language is the welcome screen's, or the shown server page's, to set.
+function isLanguageSenderAllowed(e) {
+  return fromWelcomeScreen(e) || fromActiveServer(e);
 }
 
 function getActiveContents() {
@@ -3588,6 +3593,16 @@ function registerIPC() {
     });
   };
 
+  // Reads and small calls any open server page makes for itself, from its
+  // own top frame. A page that navigated elsewhere in the same view (an
+  // identity provider during sign-in, say) gets `denied`.
+  const handleFromAnyServer = (channel, fn, denied = false) => {
+    ipcMain.handle(channel, (e, ...args) => {
+      if (!fromAnyServer(e)) { refused(channel); return denied; }
+      return fn(e, ...args);
+    });
+  };
+
   // A hidden server page repainting the window would fight the shown one.
   ipcMain.on('theme:colors', (e, payload) => {
     if (fromActiveServer(e)) applyWindowTheme(payload || {});
@@ -3602,18 +3617,18 @@ function registerIPC() {
     event.returnValue = !!serverUrl && serverUrl === activeServerUrl;
   });
   ipcMain.on('i18n:set-language-sync', (event, preference) => {
-    if (!isLanguageSenderAllowed(event.sender)) {
+    if (!isLanguageSenderAllowed(event)) {
       event.returnValue = getI18nState();
       return;
     }
     event.returnValue = setLanguagePreference(preference);
   });
   ipcMain.handle('i18n:set-language', (event, preference) => {
-    if (!isLanguageSenderAllowed(event.sender)) return getI18nState();
+    if (!isLanguageSenderAllowed(event)) return getI18nState();
     return setLanguagePreference(preference);
   });
   ipcMain.handle('i18n:refresh-automatic', (event) => {
-    if (!isLanguageSenderAllowed(event.sender)) return getI18nState();
+    if (!isLanguageSenderAllowed(event)) return getI18nState();
     if ((store.get('language') || SYSTEM_LANGUAGE) === SYSTEM_LANGUAGE) {
       const activeServerLocale = activeServerUrl
         ? serverLanguageStates.get(activeServerUrl)?.locale
@@ -3627,7 +3642,7 @@ function registerIPC() {
     return getI18nState();
   });
   ipcMain.on('i18n:server-state', (event, state = {}) => {
-    const url = getServerUrlForContents(event.sender);
+    const url = getTrustedServerUrlForFrame(event.sender, event.senderFrame);
     if (!url) return;
     const preference = typeof state.preference === 'string' ? state.preference.slice(0, 20) : 'auto';
     const locale = typeof state.locale === 'string' ? state.locale.slice(0, 20) : '';
@@ -3717,19 +3732,22 @@ function registerIPC() {
   // together with the C++ capture. Stopping the addon directly leaves
   // hasActive() true, and the next share would start without audio
   // (captureBusy); it also lets a stale request kill a newer capture.
-  ipcMain.handle('audio:stop-capture', (event, { captureId } = {}) => {
+  handleFromAnyServer('audio:stop-capture', (event, { captureId } = {}) => {
     if (typeof captureId !== 'string') return false;
     return audioCaptureController.stop(captureId, event.sender.id);
   });
-  ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
-  ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
+  handleFromAnyServer('audio:is-supported', () => {
+    try { return audioCapture.isSupported(); }
+    catch (err) { console.warn('[Audio] could not check native capture support:', err.message); return false; }
+  });
+  handleFromAnyServer('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
 
-  ipcMain.handle('video:get-encoder-config', () => ({
+  handleFromAnyServer('video:get-encoder-config', () => ({
     preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
     hardwareAvailable: hardwareVideoEncodingAvailable,
     hardwareStatus: hardwareVideoEncodingStatus,
     platform: process.platform,
-  }));
+  }), null);
 
   // ── Audio Devices ─────────────────────────────────────
   handleFromActiveServer('devices:get-inputs', async () => {
@@ -3883,7 +3901,10 @@ function registerIPC() {
   });
 
   // ── App Info ──────────────────────────────────────────
-  ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:version', (e) => {
+    if (!fromAppScreen(e) && !fromAnyServer(e)) { refused('app:version'); return null; }
+    return app.getVersion();
+  });
 
   // ── Clipboard: write image ───────────────────────────
   // Renderer-side navigator.clipboard.write([new ClipboardItem({...})])
@@ -3979,7 +4000,7 @@ function registerIPC() {
   }, { ok: false, reason: 'not-allowed' });
 
   // ── Desktop App Preferences ───────────────────────────
-  ipcMain.handle('desktop:get-prefs', () => ({
+  handleFromAnyServer('desktop:get-prefs', () => ({
     startOnLogin:     !!store.get('startOnLogin'),
     startHidden:      !!store.get('startHidden'),
     minimizeToTray:   !!store.get('minimizeToTray'),
@@ -3992,7 +4013,7 @@ function registerIPC() {
     linuxForceX11:    !!store.get('linuxForceX11'),
     language:         getI18nState(),
     videoEncoderPreference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
-  }));
+  }), {});
 
   handleFromActiveServer('desktop:set-start-on-login', (_e, enabled) => {
     store.set('startOnLogin', !!enabled);
@@ -4087,7 +4108,8 @@ function registerIPC() {
   });
 
   // ── Desktop Shortcuts ─────────────────────────────────
-  ipcMain.handle('shortcuts:get', () => store.get('desktopShortcuts') || {});
+  handleFromAnyServer('shortcuts:get', () => store.get('desktopShortcuts') || {}, {});
+
   // A key that types is refused for anything but hold to talk, which the
   // input hook only listens to (see registerVoiceShortcuts).
   const typingKeyRefused = (cfg, k, v) =>
