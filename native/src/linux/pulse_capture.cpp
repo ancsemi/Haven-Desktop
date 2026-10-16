@@ -2,7 +2,8 @@
 // Haven Desktop: Linux PulseAudio Per-App Audio Capture
 //
 // Strategy:
-//   1. Enumerate sink inputs → each has a PID + app name
+//   1. Enumerate sink inputs → each has a PID + app name (the PID
+//      comes from the stream, or from its client for native PipeWire apps)
 //   2. Load module-null-sink (virtual sink "HavenCapture")
 //   3. Move the target app's sink input to the null sink
 //   4. Load module-loopback from null sink → default output
@@ -20,6 +21,8 @@
 #include <pulse/simple.h>
 #include <pulse/error.h>
 
+#include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <vector>
@@ -157,11 +160,23 @@ struct PaSync {
 // ── Sink input enumeration callback data ──────────────────
 struct SinkInputInfo {
     uint32_t    index;
-    uint32_t    pid;
+    uint32_t    pid;       // resolved by listSinkInputs, 0 when unknown
     uint32_t    sinkIndex;
     uint32_t    ownerModule;
+    uint32_t    client;    // PulseAudio client index, PA_INVALID_INDEX if none
     std::string name;
 };
+
+// A process id from a proplist, or 0 when missing or malformed.
+static uint32_t proplistPid(const pa_proplist* props, const char* key) {
+    const char* text = props ? pa_proplist_gets(props, key) : nullptr;
+    if (!text || !*text) return 0;
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || value == 0 || value > UINT32_MAX) return 0;
+    return static_cast<uint32_t>(value);
+}
 
 // File-scope struct used by the sink-input enumeration callback.
 // Replaces an old trick of manual pointer arithmetic to reach the
@@ -180,15 +195,86 @@ static void sinkInputCb(pa_context*, const pa_sink_input_info* info, int eol, vo
     si.index     = info->index;
     si.sinkIndex = info->sink;
     si.ownerModule = info->owner_module;
+    si.client    = info->client;
     si.name      = info->name ? info->name : "Unknown";
 
-    const char* pidStr = pa_proplist_gets(info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
-    si.pid = pidStr ? (uint32_t)atoi(pidStr) : 0;
+    si.pid = proplistPid(info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
 
     const char* appName = pa_proplist_gets(info->proplist, PA_PROP_APPLICATION_NAME);
     if (appName && strlen(appName) > 0) si.name = appName;
 
     data->inputs.push_back(si);
+}
+
+// Process ids a PulseAudio client reports. Apps talking to PipeWire
+// natively (SDL games such as Team Fortress 2) leave the process id off
+// their stream and only set it on their client.
+struct ClientPids {
+    uint32_t index;
+    uint32_t processId; // application.process.id, set by the app itself
+    uint32_t secPid;    // pipewire.sec.pid, set by PipeWire from the socket
+};
+
+struct ClientEnumData {
+    std::vector<ClientPids> clients;
+    bool done = false;
+};
+
+static void clientCb(pa_context*, const pa_client_info* info, int eol, void* ud) {
+    auto* data = static_cast<ClientEnumData*>(ud);
+    if (eol > 0 || !info) { data->done = true; return; }
+    // For apps using the PulseAudio API, PipeWire sees pipewire-pulse as
+    // the client, so pipewire.sec.pid names that server, not the app.
+    const char* api = pa_proplist_gets(info->proplist, "client.api");
+    const bool viaPulseServer = api && strcmp(api, "pipewire-pulse") == 0;
+    data->clients.push_back({
+        info->index,
+        proplistPid(info->proplist, PA_PROP_APPLICATION_PROCESS_ID),
+        viaPulseServer ? 0 : proplistPid(info->proplist, "pipewire.sec.pid"),
+    });
+}
+
+// The process behind a stream: the id on the stream, else the one its
+// client reports, else the one PipeWire recorded for the client.
+static uint32_t resolveStreamPid(uint32_t streamPid, const ClientPids* client) {
+    if (streamPid != 0) return streamPid;
+    if (!client) return 0;
+    if (client->processId != 0) return client->processId;
+    return client->secPid;
+}
+
+// Lists the current sink inputs with each one's process resolved. Every
+// place that matches streams to a process goes through here, so an app
+// that is listed can also be captured.
+static bool listSinkInputs(PaSync& pa, std::vector<SinkInputInfo>& out) {
+    SinkInputEnumData inputs;
+    pa_operation* op = pa_context_get_sink_input_info_list(pa.ctx, sinkInputCb, &inputs);
+    if (!op) return false;
+    while (!inputs.done) pa.iterateBlock();
+    pa_operation_unref(op);
+
+    ClientEnumData clients;
+    op = pa_context_get_client_info_list(pa.ctx, clientCb, &clients);
+    if (op) {
+        while (!clients.done) pa.iterateBlock();
+        pa_operation_unref(op);
+    } else {
+        // Streams that carry their own process id still resolve; only the
+        // client fallback is lost, so log it and carry on.
+        fprintf(stderr, "[Haven Pulse] could not list audio clients\n");
+    }
+
+    for (auto& input : inputs.inputs) {
+        const ClientPids* client = nullptr;
+        if (input.client != PA_INVALID_INDEX) {
+            const auto found = std::find_if(clients.clients.begin(), clients.clients.end(),
+                [&](const ClientPids& c) { return c.index == input.client; });
+            if (found != clients.clients.end()) client = &*found;
+        }
+        input.pid = resolveStreamPid(input.pid, client);
+    }
+    out = std::move(inputs.inputs);
+    return true;
 }
 
 // Module load callback
@@ -335,19 +421,13 @@ std::vector<AudioApp> PulseCapture::GetAudioApplications() {
     PaSync pa;
     if (!pa.connect()) return result;
 
-    // Enumerate sink inputs
-    SinkInputEnumData ed;
-
-    pa_operation* op = pa_context_get_sink_input_info_list(pa.ctx, sinkInputCb, &ed);
-    if (!op) return result;
-
-    while (!ed.done) pa.iterateBlock();
-    pa_operation_unref(op);
+    std::vector<SinkInputInfo> inputs;
+    if (!listSinkInputs(pa, inputs)) return result;
 
     // Deduplicate by PID
     std::vector<uint32_t> seen;
     const uint32_t ourPid = static_cast<uint32_t>(getpid());
-    for (auto& si : ed.inputs) {
+    for (auto& si : inputs) {
         if (si.pid == 0) continue;
         if (isOwnProcess(si.pid, ourPid)) continue;
         if (std::find(seen.begin(), seen.end(), si.pid) != seen.end()) continue;
@@ -517,23 +597,19 @@ void PulseCapture::captureLoop() {
         };
         std::vector<MovedSinkInput> movedInputs;
         auto routeNewInputs = [&]() {
-            SinkInputEnumData inputs;
-            pa_operation* listOp = pa_context_get_sink_input_info_list(
-                pa.ctx, sinkInputCb, &inputs);
-            if (!listOp) return;
-            while (!inputs.done) pa.iterateBlock();
-            pa_operation_unref(listOp);
+            std::vector<SinkInputInfo> inputs;
+            if (!listSinkInputs(pa, inputs)) return;
 
             movedInputs.erase(std::remove_if(
                 movedInputs.begin(), movedInputs.end(), [&](const auto& moved) {
-                    return std::none_of(inputs.inputs.begin(), inputs.inputs.end(),
+                    return std::none_of(inputs.begin(), inputs.end(),
                         [&](const auto& input) {
                             return input.index == moved.index && input.pid == moved.pid &&
                                 procIdentity(input.pid) == moved.identity;
                         });
                 }), movedInputs.end());
 
-            for (const auto& input : inputs.inputs) {
+            for (const auto& input : inputs) {
                 if (input.ownerModule != PA_INVALID_INDEX || input.pid == 0 ||
                     input.sinkIndex != outputIndex) continue;
                 if (!isExternalProcess(input.pid, m_targetPid)) continue;
@@ -551,20 +627,16 @@ void PulseCapture::captureLoop() {
             }
         };
         auto restoreWith = [&](PaSync& context) {
-            SinkInputEnumData inputs;
-            pa_operation* listOp = pa_context_get_sink_input_info_list(
-                context.ctx, sinkInputCb, &inputs);
-            if (!listOp) return false;
-            while (!inputs.done) context.iterateBlock();
-            pa_operation_unref(listOp);
+            std::vector<SinkInputInfo> inputs;
+            if (!listSinkInputs(context, inputs)) return false;
             bool restored = true;
             for (const auto& moved : movedInputs) {
                 const auto current = std::find_if(
-                    inputs.inputs.begin(), inputs.inputs.end(), [&](const auto& input) {
+                    inputs.begin(), inputs.end(), [&](const auto& input) {
                         return input.index == moved.index && input.pid == moved.pid &&
                             input.sinkIndex == combinedSinkIndex;
                     });
-                if (current == inputs.inputs.end() ||
+                if (current == inputs.end() ||
                     procIdentity(current->pid) != moved.identity) continue;
                 if (!moveSinkInput(context, moved.index, moved.originalSink)) restored = false;
             }
@@ -707,16 +779,12 @@ void PulseCapture::captureLoop() {
         m_running = false;
         return;
     }
-    SinkInputEnumData ed;
-
-    pa_operation* op = pa_context_get_sink_input_info_list(pa.ctx, sinkInputCb, &ed);
-    if (!op) {
+    std::vector<SinkInputInfo> currentInputs;
+    if (!listSinkInputs(pa, currentInputs)) {
         emitStatus(CaptureStatusKind::Failed, "pa_context_get_sink_input_info_list returned NULL");
         m_running = false;
         return;
     }
-    while (!ed.done) pa.iterateBlock();
-    pa_operation_unref(op);
 
     uint32_t targetSinkInput = PA_INVALID_INDEX;
     uint32_t originalSink    = PA_INVALID_INDEX;
@@ -729,7 +797,7 @@ void PulseCapture::captureLoop() {
         return;
     }
 
-    for (auto& si : ed.inputs) {
+    for (auto& si : currentInputs) {
         if (si.pid == m_targetPid) {
             targetSinkInput = si.index;
             originalSink    = si.sinkIndex;
@@ -759,23 +827,19 @@ void PulseCapture::captureLoop() {
             m_running = false;
             return false;
         }
-        SinkInputEnumData inputs;
-        pa_operation* listOp = pa_context_get_sink_input_info_list(
-            context.ctx, sinkInputCb, &inputs);
-        if (!listOp) return !routedTargetInputs.empty();
-        while (!inputs.done) context.iterateBlock();
-        pa_operation_unref(listOp);
+        std::vector<SinkInputInfo> inputs;
+        if (!listSinkInputs(context, inputs)) return !routedTargetInputs.empty();
 
         routedTargetInputs.erase(std::remove_if(
             routedTargetInputs.begin(), routedTargetInputs.end(), [&](const auto& routed) {
-                return std::none_of(inputs.inputs.begin(), inputs.inputs.end(),
+                return std::none_of(inputs.begin(), inputs.end(),
                     [&](const auto& input) {
                         return input.index == routed.index && input.pid == routed.pid &&
                             procIdentity(input.pid) == routed.identity;
                     });
             }), routedTargetInputs.end());
 
-        for (const auto& input : inputs.inputs) {
+        for (const auto& input : inputs) {
             if (input.pid != m_targetPid) continue;
             if (std::any_of(routedTargetInputs.begin(), routedTargetInputs.end(),
                 [&](const auto& routed) { return routed.index == input.index; })) continue;
@@ -790,20 +854,16 @@ void PulseCapture::captureLoop() {
         return !routedTargetInputs.empty();
     };
     auto restoreTargetInputs = [&](PaSync& context, uint32_t routeSink) {
-        SinkInputEnumData inputs;
-        pa_operation* listOp = pa_context_get_sink_input_info_list(
-            context.ctx, sinkInputCb, &inputs);
-        if (!listOp) return false;
-        while (!inputs.done) context.iterateBlock();
-        pa_operation_unref(listOp);
+        std::vector<SinkInputInfo> inputs;
+        if (!listSinkInputs(context, inputs)) return false;
         bool restored = true;
         for (const auto& routed : routedTargetInputs) {
             const auto current = std::find_if(
-                inputs.inputs.begin(), inputs.inputs.end(), [&](const auto& input) {
+                inputs.begin(), inputs.end(), [&](const auto& input) {
                     return input.index == routed.index && input.pid == routed.pid &&
                         input.sinkIndex == routeSink;
                 });
-            if (current == inputs.inputs.end() ||
+            if (current == inputs.end() ||
                 procIdentity(current->pid) != routed.identity) continue;
             if (!moveSinkInput(context, routed.index, routed.originalSink)) restored = false;
         }
@@ -823,7 +883,7 @@ void PulseCapture::captureLoop() {
         if (info && info->server_name) s->name = info->server_name;
         s->done = true;
     };
-    op = pa_context_get_server_info(pa.ctx, serverInfoCb, &si);
+    pa_operation* op = pa_context_get_server_info(pa.ctx, serverInfoCb, &si);
     if (op) { while (!si.done) pa.iterateBlock(); pa_operation_unref(op); }
 
     bool isPipeWire = (si.name.find("PipeWire") != std::string::npos) ||
