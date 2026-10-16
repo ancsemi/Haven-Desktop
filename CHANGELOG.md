@@ -1,5 +1,22 @@
 # Haven Desktop Changelog
 
+## v1.8.0
+
+### Added
+- **Push to mute.** A new hold shortcut under Desktop shortcuts mutes your
+  mic while it is held, and works while a game has focus, so it can share a
+  key with a game's own push to talk. Needs Haven server 4.25.0.
+- **Media keys control Listen Together.** Play/Pause, Next and Previous on
+  the keyboard work while the shared player is playing, and the keys go back
+  to other apps when it stops.
+
+### Fixed
+- **Games show up in the Linux app audio list (Haven #5760).** Apps that
+  talk to PipeWire directly, like Team Fortress 2 and Flatpak games, were
+  left out of "Audio from one application".
+- **Running Haven Desktop from source keeps the Haven icon on the taskbar**
+  after notifications, instead of Electron's icon or a blank page.
+
 ## v1.7.1
 
 ### Security
