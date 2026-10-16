@@ -66,6 +66,7 @@ try { ({ autoUpdater } = require('electron-updater')); }
 catch (err) { console.warn('[AutoUpdate] electron-updater could not be loaded, update checks are off:', err.message); }
 let _manualUpdateCheck = false; // set by Help > Check for Updates (Haven #5627)
 const { createUpdateState, CHECK_INTERVAL_MS: UPDATE_CHECK_INTERVAL_MS } = require('./update-state');
+const devShortcut = require('./dev-shortcut');
 const updateState = createUpdateState();
 
 // ── Constants ─────────────────────────────────────────────
@@ -290,6 +291,13 @@ if (store.get('unlimitFrameRate')) {
 // entry and its notifications keep their name.
 if (process.platform === 'win32') {
   try { app.setAppUserModelId('com.haven.desktop'); } catch {}
+  // A copy run from source uses one fixed toast CLSID, the one its Start
+  // Menu shortcut carries (see dev-shortcut.js), instead of a random one per
+  // run, so the shortcut and Electron always agree.
+  if (!app.isPackaged) {
+    try { app.setToastActivatorCLSID(devShortcut.DEV_TOAST_CLSID); }
+    catch (err) { console.warn('[Haven] could not set the toast CLSID:', err.message); }
+  }
 }
 
 // ── Suppress Chromium stderr noise (WGC ProcessFrame spam, GPU errors, etc.) ──
@@ -1277,15 +1285,19 @@ function devTaskbarIconPath() {
 
 // Windows takes the taskbar icon and name for an app id from a Start Menu
 // shortcut that carries that id, ahead of anything the window sets. A copy run
-// from source used to end up with Electron's icon, or a blank page when the
-// shortcut pointed at an icon or a copy that no longer existed.
+// from source used to end up with Electron's icon, or a blank page, because
+// Electron writes its own shortcut for notifications (see dev-shortcut.js).
 //
-// So the copy you actually use (its normal profile, not a temporary one from
-// --user-data-dir, and not something run out of the temp folder) owns one
-// shortcut, "Haven Desktop (source)", and rewrites it on every launch to
-// point at itself and the Haven icon. Other shortcuts with this id that start
-// electron.exe (stale copies, test runs) are removed so they cannot win.
-// An installed Haven's own shortcut starts Haven.exe and is left alone.
+// scripts/brand-dev-electron.js (run by "Start Haven Desktop.bat" and npm
+// install) stamps the Haven icon and the name "Haven Desktop (source)" into
+// electron.exe, so Electron's shortcut gets that name and icon. The copy you
+// actually use (its normal profile, not a temporary one from --user-data-dir,
+// and not something run out of the temp folder) writes that same shortcut
+// with its arguments, in the form Electron accepts as valid, so Electron
+// keeps it and there is one entry that starts Haven. Other shortcuts with
+// this id that start electron.exe (the "Electron.lnk" an unstamped exe makes,
+// stale copies, test runs) are removed so they cannot win. An installed
+// Haven's own shortcut starts Haven.exe and is left alone.
 function ownsDevShortcut() {
   if (app.commandLine.hasSwitch('user-data-dir')) return false;
   const tmp = path.resolve(os.tmpdir()).toLowerCase();
@@ -1297,16 +1309,13 @@ function fixDevStartMenuShortcuts(icon) {
   if (!ownsDevShortcut()) return;
   const { shell } = require('electron');
   const programs = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
-  const wanted = path.join(programs, 'Haven Desktop (source).lnk');
-  const options = {
-    target: process.execPath,
-    args: `"${app.getAppPath()}"${IS_DEV ? ' --dev' : ''}`,
-    cwd: app.getAppPath(),
-    description: 'Haven Desktop (run from source)',
+  const wanted = path.join(programs, devShortcut.devShortcutName());
+  const options = devShortcut.devShortcutOptions({
+    execPath: process.execPath,
+    appPath: app.getAppPath(),
+    dev: IS_DEV,
     icon,
-    iconIndex: 0,
-    appUserModelId: 'com.haven.desktop',
-  };
+  });
   let names = [];
   try {
     names = fs.readdirSync(programs).filter(name => name.toLowerCase().endsWith('.lnk'));
@@ -1320,19 +1329,14 @@ function fixDevStartMenuShortcuts(icon) {
     let link;
     try { link = shell.readShortcutLink(file); }
     catch { continue; } // some shortcuts (installer "advertised" ones) cannot be read, and none of those are ours
-    if (link.appUserModelId !== 'com.haven.desktop') continue;
-    if (path.basename(link.target || '').toLowerCase() !== 'electron.exe') continue;
+    if (!devShortcut.isStaleDevShortcut(link)) continue;
     try { fs.unlinkSync(file); }
     catch (err) { console.warn('[Haven] could not remove a stale Start Menu shortcut:', err.message); }
   }
   let current = null;
   try { current = shell.readShortcutLink(wanted); }
   catch (err) { if (fs.existsSync(wanted)) console.warn('[Haven] could not read the Start Menu shortcut:', err.message); }
-  const same = current
-    && path.resolve(current.target || '').toLowerCase() === options.target.toLowerCase()
-    && current.args === options.args && current.icon === options.icon
-    && current.appUserModelId === options.appUserModelId;
-  if (same) return;
+  if (devShortcut.sameShortcut(current, options)) return;
   try {
     shell.writeShortcutLink(wanted, current ? 'replace' : 'create', options);
   } catch (err) {
