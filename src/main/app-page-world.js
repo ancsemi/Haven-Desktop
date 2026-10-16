@@ -536,6 +536,28 @@ function installPageWorld(bridge, deps) {
   let _audioPacketsReceived = 0;
   let _audioPreparationQueue = Promise.resolve();
   const _cancelledAudioPreparations = new Set();
+
+  // ─── Listen Together media keys ──────────────────────────
+  // Haven's client says when its shared player wants the keyboard's media
+  // keys (playing, or paused a moment ago, and this user may control it), and
+  // main holds them only then. Each press comes back here and runs the same
+  // control as the player's buttons; the client checks again that the user
+  // may. A server too old for this never asks, so the keys stay with other
+  // apps.
+  const _MEDIA_KEY_ACTIONS = new Set(['playpause', 'nexttrack', 'previoustrack']);
+  document.addEventListener('haven:music-media-keys', (e) => {
+    bridge.musicMediaKeys(!!(e && e.detail && e.detail.wanted === true));
+  });
+  on('music:media-key', (action) => {
+    if (!_MEDIA_KEY_ACTIONS.has(action)) return;
+    const app = window.app || window._havenApp || null;
+    if (!app || typeof app._musicMediaKey !== 'function') {
+      console.log(`[MediaKeys] ${action}: the page has no shared player controls, ignored`);
+      return;
+    }
+    if (!app._musicMediaKey(action)) console.log(`[MediaKeys] ${action}: nothing to do (no track, or not allowed)`);
+  });
+
   // ─── Global voice shortcut triggers ──────────────────────
   on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
   on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());

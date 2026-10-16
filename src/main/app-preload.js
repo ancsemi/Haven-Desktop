@@ -260,12 +260,15 @@ contextBridge.exposeInMainWorld('__havenDesktopPage', {
     if (typeof requestId !== 'string') return;
     ipcRenderer.send('screen:prepare-share-result', { requestId, audioReady: audioReady === true });
   },
+  // Listen Together asks for the keyboard's media keys while its player is
+  // playing and the user may control it (main.js, refreshMediaKeys).
+  musicMediaKeys: (wanted) => ipcRenderer.send('music:media-keys', { wanted: wanted === true }),
 });
 
 // Events from main that the page world acts on.
 for (const channel of [
   'voice:mute-toggle', 'voice:deafen-toggle', 'voice:ptt-toggle', 'voice:ptt-down', 'voice:ptt-up',
-  'voice:ptm-down', 'voice:ptm-up',
+  'voice:ptm-down', 'voice:ptm-up', 'music:media-key',
   'notification-clicked', 'app:navigate-deep-link', 'screen:prepare-share', 'screen:prepare-share-cancel',
 ]) {
   ipcRenderer.on(channel, (_event, payload) => toPageWorld(channel, payload));

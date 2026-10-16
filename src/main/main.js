@@ -40,6 +40,7 @@ const {
   permissionAllowed, createSignInRoundTrip,
 } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
+const { MEDIA_KEY_ACTIONS, mediaKeyAction, claimWanted, createMediaKeyClaims } = require('./media-keys');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
 let exitingForX11 = false;
@@ -1036,6 +1037,9 @@ function _stopUiohookIfIdle() {
 }
 
 function unregisterVoiceShortcuts() {
+  // The voice shortcuts are registered first, so a voice shortcut on a media
+  // key keeps it; registerVoiceShortcuts takes the free ones back after.
+  releaseMediaKeys();
   const cfg = store.get('desktopShortcuts') || {};
   ['mute', 'deafen', 'ptt', 'ptm'].forEach(k => {
     try { if (cfg[k] && !_isUiohookAccel(cfg[k])) globalShortcut.unregister(cfg[k]); } catch {}
@@ -1172,6 +1176,61 @@ function registerVoiceShortcuts() {
   }
 
   if (needUiohook) _ensureUiohookStarted();
+  refreshMediaKeys();
+}
+
+// ── Listen Together media keys ──────────────────────────
+// Play/pause, next and previous run the shared music player while a server
+// page asks for them: its player is playing (or paused a moment ago) and
+// the user may control it. Holding a media key takes it from every other
+// app, so the keys are let go as soon as no page asks. See media-keys.js.
+const mediaKeyClaims = createMediaKeyClaims();
+const _mediaKeysHeld = new Set();
+const _mediaKeyPages = new WeakSet();
+
+function _sendMediaKey(accel) {
+  const action = mediaKeyAction(accel);
+  if (!action) return;
+  const active = activeServerUrl && serverViews.get(activeServerUrl);
+  const targetId = mediaKeyClaims.target(active ? active.webContents.id : null);
+  if (targetId == null) return;
+  for (const view of serverViews.values()) {
+    if (view.webContents.id === targetId) { safeSend(view.webContents, 'music:media-key', action); return; }
+  }
+}
+
+function releaseMediaKeys() {
+  for (const accel of _mediaKeysHeld) {
+    try { globalShortcut.unregister(accel); }
+    catch (err) { console.warn(`[MediaKeys] could not let go of ${accel}:`, err.message); }
+  }
+  _mediaKeysHeld.clear();
+}
+
+function refreshMediaKeys() {
+  if (!mediaKeyClaims.wanted()) { releaseMediaKeys(); return; }
+  for (const accel of Object.keys(MEDIA_KEY_ACTIONS)) {
+    // Already ours, or a voice shortcut's.
+    if (_mediaKeysHeld.has(accel) || globalShortcut.isRegistered(accel)) continue;
+    let ok = false;
+    try { ok = !!globalShortcut.register(accel, () => _sendMediaKey(accel)); }
+    catch (err) { console.warn(`[MediaKeys] could not take ${accel}:`, err.message); }
+    if (ok) _mediaKeysHeld.add(accel);
+    else console.warn(`[MediaKeys] ${accel} is held by another app, leaving it there`);
+  }
+}
+
+/** A server page's own main frame asks for the media keys, or lets them go. */
+function setMediaKeyClaim(contents, payload) {
+  const id = contents.id;
+  if (!_mediaKeyPages.has(contents)) {
+    _mediaKeyPages.add(contents);
+    // A page that goes away, or loads anew, asks again for itself.
+    const forget = () => { if (mediaKeyClaims.drop(id)) refreshMediaKeys(); };
+    contents.once('destroyed', forget);
+    contents.on('did-navigate', forget);
+  }
+  if (mediaKeyClaims.set(id, claimWanted(payload))) refreshMediaKeys();
 }
 
 // ── Show a dialog with an auto-timeout ─────────────────
@@ -3948,6 +4007,14 @@ function registerIPC() {
   ipcMain.on('window:leave-fullscreen', (e) => {
     if (!fromActiveServer(e)) return;
     if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+  });
+
+  // ── Listen Together media keys (see refreshMediaKeys) ──
+  // Any server page may ask, shown or not: music keeps playing in a voice
+  // call on a server that is not on screen.
+  ipcMain.on('music:media-keys', (e, payload) => {
+    if (!getTrustedServerUrlForFrame(e.sender, e.senderFrame)) return;
+    setMediaKeyClaim(e.sender, payload);
   });
 
   // ── Settings ──────────────────────────────────────────
