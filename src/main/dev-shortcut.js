@@ -17,7 +17,9 @@
 // fields Electron checks. Electron then finds it valid and keeps our arguments
 // and icon, and there is only ever one entry.
 
-const path = require('path');
+// Start Menu shortcuts only exist on Windows, so these are always Windows
+// paths, also when the tests run on the Linux build machine.
+const path = require('path').win32;
 
 // Not "Haven": that is the installed app's product name, and Electron would
 // then take over the installed app's own shortcut.
