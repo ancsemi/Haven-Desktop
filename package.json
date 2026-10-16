@@ -38,6 +38,7 @@
   "devDependencies": {
     "electron": "^42.10.1",
     "electron-builder": "^26.15.7",
-    "node-gyp": "^12.4.0"
+    "node-gyp": "^12.4.0",
+    "resedit": "^1.7.2"
   }
 }
