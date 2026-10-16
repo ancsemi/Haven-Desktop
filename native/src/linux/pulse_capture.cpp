@@ -234,13 +234,39 @@ static void clientCb(pa_context*, const pa_client_info* info, int eol, void* ud)
     });
 }
 
+// True when innerPid is how hostPid appears inside a nested PID namespace
+// (a Flatpak or similar sandbox), going by the NSpid line in /proc.
+static bool isNamespacedPidOf(uint32_t hostPid, uint32_t innerPid) {
+    std::ifstream file("/proc/" + std::to_string(hostPid) + "/status");
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.compare(0, 6, "NSpid:") != 0) continue;
+        std::istringstream fields(line.substr(6));
+        uint32_t value = 0;
+        bool outermost = true;
+        while (fields >> value) {
+            if (!outermost && value == innerPid) return true;
+            outermost = false;
+        }
+        return false;
+    }
+    return false;
+}
+
 // The process behind a stream: the id on the stream, else the one its
 // client reports, else the one PipeWire recorded for the client.
+//
+// A sandboxed app reports its id from inside its own PID namespace, where
+// it names some unrelated host process. PipeWire takes pipewire.sec.pid
+// from the kernel in the host's view, so it wins whenever the claimed id
+// is that same process seen from inside the sandbox.
 static uint32_t resolveStreamPid(uint32_t streamPid, const ClientPids* client) {
-    if (streamPid != 0) return streamPid;
-    if (!client) return 0;
-    if (client->processId != 0) return client->processId;
-    return client->secPid;
+    uint32_t claimed = streamPid;
+    if (claimed == 0 && client) claimed = client->processId;
+    const uint32_t secPid = client ? client->secPid : 0;
+    if (secPid == 0) return claimed;
+    if (claimed == 0 || claimed == secPid || isNamespacedPidOf(secPid, claimed)) return secPid;
+    return claimed;
 }
 
 // Lists the current sink inputs with each one's process resolved. Every
