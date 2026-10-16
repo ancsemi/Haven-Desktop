@@ -88,6 +88,10 @@ if %ERRORLEVEL% neq 0 (
     echo        install-app-deps complete.
 )
 
+:: Haven icon and name for electron.exe (taskbar and Start Menu). npm
+:: install ran with --ignore-scripts, so postinstall did not do it.
+node "./scripts/brand-dev-electron.js"
+
 :: ─── Build native audio addon ─────────────────────
 echo.
 echo [4/4] Building native audio addon...

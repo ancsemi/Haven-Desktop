@@ -25,7 +25,7 @@
     "build:native": "node ./node_modules/node-gyp/bin/node-gyp.js rebuild --directory=native",
     "build:native:local": "node ./scripts/build-native.js",
     "rebuild:electron": "electron-builder install-app-deps && npm run build:native",
-    "postinstall": "electron-builder install-app-deps || echo electron-rebuild skipped"
+    "postinstall": "(electron-builder install-app-deps || echo electron-rebuild skipped) && (node scripts/brand-dev-electron.js || echo dev icon skipped)"
   },
   "dependencies": {
     "electron-store": "^8.2.0",

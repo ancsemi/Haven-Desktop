@@ -13,6 +13,11 @@ if not exist "node_modules" (
     exit /b 1
 )
 
+:: Give electron.exe the Haven icon and name, so the taskbar and Start Menu
+:: show Haven instead of Electron. Does nothing once done, and never stops
+:: the launch.
+node "./scripts/brand-dev-electron.js"
+
 :: Launch Electron in dev mode
 echo Starting Haven Desktop...
 node "./node_modules/electron/cli.js" . --dev
