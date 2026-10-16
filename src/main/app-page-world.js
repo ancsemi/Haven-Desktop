@@ -555,7 +555,11 @@ function installPageWorld(bridge, deps) {
     const app = window.app || window._havenApp || null;
     const voice = app && app.voice;
     if (voice && typeof voice.isMuted === 'boolean') {
-      return { app, isMuted: voice.isMuted, inVoice: !!voice.inVoice, source: 'app' };
+      // While push to mute is held the mic stays muted whatever push to talk
+      // does. Haven's client then keeps the user's own mute for the release
+      // and reports it here, so push to talk keeps following its key.
+      const isMuted = typeof app._micUserMuted === 'function' ? !!app._micUserMuted() : voice.isMuted;
+      return { app, isMuted, inVoice: !!voice.inVoice, source: 'app' };
     }
     // Haven hides both mute buttons (inline display:none) while you are not in
     // voice, so a shown one means you are in a call.
@@ -582,6 +586,13 @@ function installPageWorld(bridge, deps) {
     const edge = shouldTalk ? 'down' : 'up';
     if (!s) { console.log(`[PTT] ${via} ${edge}: no voice state on the page yet, ignored`); return; }
     if (_pttOutOfVoice(s, `${via} ${edge}`)) return;
+    if (_ptmFallbackHeld) {
+      // Push to mute is held on a server without its own handling: mute
+      // wins, and the release puts back what push to talk wants by then.
+      _ptmFallbackLive = shouldTalk;
+      console.log(`[PTT] ${via} ${edge}: push to mute is held, the mic stays muted`);
+      return;
+    }
     // shouldTalk → want unmuted. Flip only when the state has to change, so
     // the input hook and the page's own key handler never fight.
     const needFlip = shouldTalk ? s.isMuted : !s.isMuted;
@@ -605,6 +616,11 @@ function installPageWorld(bridge, deps) {
     const s = _pttState();
     if (!s) { console.log(`[PTT] ${via} toggle: no voice state on the page yet, ignored`); return; }
     if (_pttOutOfVoice(s, `${via} toggle`)) return;
+    if (_ptmFallbackHeld) {
+      _ptmFallbackLive = !_ptmFallbackLive;
+      console.log(`[PTT] ${via} toggle: push to mute is held, the mic stays muted`);
+      return;
+    }
     console.log(`[PTT] ${via} toggle: muted=${s.isMuted} inVoice=${s.inVoice} via ${s.source}`);
     if (s.app && typeof s.app._toggleMute === 'function') {
       try { s.app._toggleMute(); return; } catch (err) { console.warn('[PTT] _toggleMute threw:', err); }
@@ -614,6 +630,51 @@ function installPageWorld(bridge, deps) {
   }
   on('voice:ptt-down', () => _pttSetTalking(true, 'hook'));
   on('voice:ptt-up',   () => _pttSetTalking(false, 'hook'));
+
+  // Push to mute (hold): the mic is muted while the key is down and goes back
+  // to what it was on release. People put it on a game's own push to talk key
+  // so Haven stays open for friends and goes quiet while they talk in game.
+  // Haven's client does it itself (app._pushToMute), muting the outgoing mic
+  // and keeping it muted even while push to talk is held. A server too old for
+  // that gets the same through the mute toggle here: muted on press when live,
+  // and on release the mic the user would have had, following any push to
+  // talk in between.
+  let _ptmFallbackHeld = false;
+  let _ptmFallbackLive = false;
+  function _ptmFlip(s) {
+    if (s.app && typeof s.app._toggleMute === 'function') {
+      try { s.app._toggleMute(); return; } catch (err) { console.warn('[PTM] _toggleMute threw:', err); }
+    }
+    const btn = s.btn || document.getElementById('voice-mute-btn');
+    if (btn) btn.click();
+  }
+  function _ptmSetHeld(held, via = 'key') {
+    const edge = held ? 'down' : 'up';
+    const s = _pttState();
+    if (!s) { console.log(`[PTM] ${via} ${edge}: no voice state on the page yet, ignored`); return; }
+    if (s.app && typeof s.app._pushToMute === 'function') {
+      console.log(`[PTM] ${via} ${edge}: inVoice=${s.inVoice}`);
+      try { s.app._pushToMute(held); } catch (err) { console.warn('[PTM] _pushToMute threw:', err); }
+      return;
+    }
+    if (held) {
+      if (_ptmFallbackHeld) return;
+      if (s.inVoice === false) { console.log(`[PTM] ${via} down: not in voice, ignored`); return; }
+      _ptmFallbackHeld = true;
+      _ptmFallbackLive = !s.isMuted;
+      console.log(`[PTM] ${via} down: muted=${s.isMuted} via ${s.source}, ${_ptmFallbackLive ? 'muting' : 'already muted'}`);
+      if (_ptmFallbackLive) _ptmFlip(s);
+      return;
+    }
+    if (!_ptmFallbackHeld) return;
+    const live = _ptmFallbackLive;
+    _ptmFallbackHeld = false;
+    _ptmFallbackLive = false;
+    console.log(`[PTM] ${via} up: muted=${s.isMuted} inVoice=${s.inVoice}, ${live && s.isMuted && s.inVoice !== false ? 'unmuting' : 'no change'}`);
+    if (live && s.isMuted && s.inVoice !== false) _ptmFlip(s);
+  }
+  on('voice:ptm-down', () => _ptmSetHeld(true, 'hook'));
+  on('voice:ptm-up',   () => _ptmSetHeld(false, 'hook'));
 
   // ─── Hold-mode PTT while the Haven window itself is focused ──────────
   // The native input hook in main drives PTT, but on Windows several people
@@ -637,6 +698,9 @@ function installPageWorld(bridge, deps) {
   let _pttDomBinding = null;
   let _pttDomToggle = false;
   let _pttDomDown = false;
+  // Push to mute follows its binding here the same way, for the same reason.
+  let _ptmDomBinding = null;
+  let _ptmDomDown = false;
   function _parsePttAccel(accel) {
     const mouse = /^Mouse(\d+)$/i.exec(accel || '');
     if (mouse) return { mouseButton: parseInt(mouse[1], 10) - 1 };
@@ -667,9 +731,19 @@ function installPageWorld(bridge, deps) {
       _pttDomToggle = !!cfg && cfg.pttMode === 'toggle';
       _pttDomBinding = (cfg && cfg.ptt) ? _parsePttAccel(cfg.ptt) : null;
       if (!_pttDomBinding && _pttDomDown) { _pttDomDown = false; _pttSetTalking(false); }
-    }).catch(() => { _pttDomBinding = null; });
+      _ptmDomBinding = (cfg && cfg.ptm) ? _parsePttAccel(cfg.ptm) : null;
+      if (!_ptmDomBinding && _ptmDomDown) { _ptmDomDown = false; _ptmSetHeld(false); }
+    }).catch((err) => {
+      console.warn('[PTT] could not read the shortcut bindings:', err);
+      _pttDomBinding = null;
+      _ptmDomBinding = null;
+    });
   }
   window.addEventListener('keydown', (e) => {
+    if (!e.repeat && !_ptmDomDown && _pttDomKeyMatches(e, _ptmDomBinding, true)) {
+      _ptmDomDown = true;
+      _ptmSetHeld(true);
+    }
     if (_pttDomToggle) {
       if (!e.repeat && _pttDomKeyMatches(e, _pttDomBinding, true)) _pttToggleOnce('page');
       return;
@@ -679,11 +753,20 @@ function installPageWorld(bridge, deps) {
     _pttSetTalking(true);
   }, true);
   window.addEventListener('keyup', (e) => {
+    if (_ptmDomDown && _pttDomKeyMatches(e, _ptmDomBinding, false)) {
+      _ptmDomDown = false;
+      _ptmSetHeld(false);
+    }
     if (!_pttDomDown || !_pttDomKeyMatches(e, _pttDomBinding, false)) return;
     _pttDomDown = false;
     _pttSetTalking(false);
   }, true);
   window.addEventListener('mousedown', (e) => {
+    const m = _ptmDomBinding;
+    if (m && m.mouseButton != null && e.button === m.mouseButton && !_ptmDomDown) {
+      _ptmDomDown = true;
+      _ptmSetHeld(true);
+    }
     const b = _pttDomBinding;
     if (!b || b.mouseButton == null || e.button !== b.mouseButton) return;
     if (_pttDomToggle) { _pttToggleOnce('page'); return; }
@@ -692,6 +775,11 @@ function installPageWorld(bridge, deps) {
     _pttSetTalking(true);
   }, true);
   window.addEventListener('mouseup', (e) => {
+    const m = _ptmDomBinding;
+    if (m && m.mouseButton != null && e.button === m.mouseButton && _ptmDomDown) {
+      _ptmDomDown = false;
+      _ptmSetHeld(false);
+    }
     const b = _pttDomBinding;
     if (!b || b.mouseButton == null || e.button !== b.mouseButton || !_pttDomDown) return;
     _pttDomDown = false;
