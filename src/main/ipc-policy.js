@@ -32,6 +32,22 @@ function isTypingKeyAccelerator(accel) {
   return TYPING_KEY_NAMES.has(key.toLowerCase());
 }
 
+/**
+ * Shortcuts that act while their key is down and stop when it comes up: push
+ * to talk in hold mode, and push to mute, which is always held. Only the input
+ * hook takes these, and it only listens, so they may sit on a key that types
+ * (V, Space): the key still reaches the game or whatever has focus.
+ */
+function isHoldShortcut(name, cfg) {
+  if (name === 'ptm') return true;
+  return name === 'ptt' && (cfg || {}).pttMode !== 'toggle';
+}
+
+/** A key that types is refused for every shortcut that is not a held one. */
+function shortcutKeyRefused(cfg, name, accel) {
+  return !!accel && isTypingKeyAccelerator(accel) && !isHoldShortcut(name, cfg);
+}
+
 /** The host a dialog names as the page asking, or '' when there is none. */
 function dialogHost(serverUrl) {
   try { return new URL(String(serverUrl)).host; } catch { return ''; } // not a URL: no name
@@ -142,7 +158,7 @@ function createSignInRoundTrip({ now = Date.now, windowMs = SIGN_IN_WINDOW_MS } 
 }
 
 module.exports = {
-  isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, serverNavigation,
+  isTypingKeyAccelerator, isHoldShortcut, shortcutKeyRefused, dialogHost, notificationTitle, permissionAllowed, serverNavigation,
   createSignInRoundTrip, SIGN_IN_WINDOW_MS,
 };
 

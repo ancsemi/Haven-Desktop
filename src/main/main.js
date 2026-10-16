@@ -36,7 +36,8 @@ const { normalizeVideoEncoderPreference } = require('./screen-share-video');
 const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame, getHttpOrigin } = require('./ipc-security');
 const {
-  isTypingKeyAccelerator, dialogHost, notificationTitle, permissionAllowed, createSignInRoundTrip,
+  isTypingKeyAccelerator, isHoldShortcut, shortcutKeyRefused, dialogHost, notificationTitle,
+  permissionAllowed, createSignInRoundTrip,
 } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 // Set while this copy quits to make way for its X11 copy, and when an X11
@@ -92,6 +93,7 @@ const store = new Store({
       mute:   'CommandOrControl+Shift+M',  // toggle mute
       deafen: 'CommandOrControl+Shift+D',  // toggle deafen
       ptt:    '',                           // push-to-talk (empty = disabled)
+      ptm:    '',                           // push-to-mute, held (empty = disabled)
     },
     startOnLogin:   false,    // launch Haven Desktop on OS login
     startHidden:    false,    // start minimized to tray (when startOnLogin is enabled)
@@ -795,6 +797,8 @@ app.whenReady().then(async () => {
 // listens for `voice:ptt-down` / `voice:ptt-up` and unmutes on down,
 // re-mutes on up. Toggle mode keeps the existing `voice:ptt-toggle`
 // behaviour (single tap flips the mute button state). (#184)
+// Push to mute is always held, the other way round: `voice:ptm-down` mutes
+// and `voice:ptm-up` puts the mic back as it was.
 let _uiohook = null;
 let _uiohookStarted = false;
 // Platform-specific hint for "the native dep didn't load", surfaced in the
@@ -836,7 +840,7 @@ function tryLoadUiohook() {
 
 // uiohook routing table: { keycode|button -> { kind, event, mode } }
 // kind:  'key' | 'mouse'
-// event: base IPC channel name ('voice:ptt' | 'voice:mute-toggle' | 'voice:deafen-toggle')
+// event: base IPC channel name ('voice:ptt' | 'voice:ptm' | 'voice:mute-toggle' | 'voice:deafen-toggle')
 // mode:  'toggle' (single fire on press) | 'hold' (separate -down / -up events)
 const _uiohookKeyBindings = new Map();
 const _uiohookMouseBindings = new Map();
@@ -938,7 +942,9 @@ function _accelToMouseButton(accel) {
   return parseInt(m[1], 10);
 }
 
-let _gsPttTimer = null;
+// Held shortcuts that went through Electron's globalShortcut, which has no
+// key-up: event -> the timer that sends the release once the repeats stop.
+const _gsHoldTimers = new Map();
 
 function _isUiohookAccel(accel) {
   if (!accel) return false;
@@ -1031,10 +1037,11 @@ function _stopUiohookIfIdle() {
 
 function unregisterVoiceShortcuts() {
   const cfg = store.get('desktopShortcuts') || {};
-  ['mute', 'deafen', 'ptt'].forEach(k => {
+  ['mute', 'deafen', 'ptt', 'ptm'].forEach(k => {
     try { if (cfg[k] && !_isUiohookAccel(cfg[k])) globalShortcut.unregister(cfg[k]); } catch {}
   });
-  if (_gsPttTimer) { clearTimeout(_gsPttTimer); _gsPttTimer = null; }
+  for (const timer of _gsHoldTimers.values()) clearTimeout(timer);
+  _gsHoldTimers.clear();
   _uiohookKeyBindings.clear();
   _uiohookMouseBindings.clear();
   _uiohookDownState.clear();
@@ -1047,9 +1054,11 @@ function registerVoiceShortcuts() {
   const pttMode = cfg.pttMode === 'toggle' ? 'toggle' : 'hold'; // default hold (#5255)
 
   const bindings = [
-    { accel: cfg.mute,   event: 'voice:mute-toggle',   mode: 'toggle' },
-    { accel: cfg.deafen, event: 'voice:deafen-toggle', mode: 'toggle' },
-    { accel: cfg.ptt,    event: 'voice:ptt',           mode: pttMode  },
+    { name: 'mute',   accel: cfg.mute,   event: 'voice:mute-toggle',   mode: 'toggle' },
+    { name: 'deafen', accel: cfg.deafen, event: 'voice:deafen-toggle', mode: 'toggle' },
+    { name: 'ptt',    accel: cfg.ptt,    event: 'voice:ptt',           mode: pttMode  },
+    // Push to mute: muted while held, back as it was on release.
+    { name: 'ptm',    accel: cfg.ptm,    event: 'voice:ptm',           mode: 'hold'   },
   ];
 
   let needUiohook = false;
@@ -1058,10 +1067,11 @@ function registerVoiceShortcuts() {
     if (!b.accel) continue;
 
     // A key that types (V, M, Space) is never taken from other apps. Push to
-    // talk held on one still works through the input hook, which only
-    // listens; a toggle on such a key would flip whenever the user typed it.
+    // talk or push to mute held on one still works through the input hook,
+    // which only listens; a toggle on such a key would flip whenever the user
+    // typed it.
     const typingKey = isTypingKeyAccelerator(b.accel);
-    if (typingKey && !(b.event === 'voice:ptt' && b.mode === 'hold')) {
+    if (typingKey && !isHoldShortcut(b.name, cfg)) {
       console.warn(`[Shortcuts] ${b.accel} types text, so it is not used for ${b.event}`);
       continue;
     }
@@ -1108,7 +1118,7 @@ function registerVoiceShortcuts() {
     }
 
     if (typingKey) {
-      console.warn(`[Shortcuts] ${b.accel} needs the input hook for hold to talk; it is not taken as a global shortcut`);
+      console.warn(`[Shortcuts] ${b.accel} needs the input hook for ${b.event} held; it is not taken as a global shortcut`);
       continue;
     }
 
@@ -1119,18 +1129,18 @@ function registerVoiceShortcuts() {
     // Hold is emulated instead: talk on the first press, release 350 ms after
     // the repeats stop.
     const fire = () => {
-      if (b.event === 'voice:ptt' && b.mode === 'hold') {
-        const stateKey = 'g:voice:ptt';
+      if (b.mode === 'hold') {
+        const stateKey = `g:${b.event}`;
         if (!_uiohookDownState.has(stateKey)) {
           _uiohookDownState.add(stateKey);
-          safeSend(getActiveContents(), 'voice:ptt-down');
+          safeSend(getActiveContents(), `${b.event}-down`);
         }
-        if (_gsPttTimer) clearTimeout(_gsPttTimer);
-        _gsPttTimer = setTimeout(() => {
-          _gsPttTimer = null;
+        clearTimeout(_gsHoldTimers.get(b.event));
+        _gsHoldTimers.set(b.event, setTimeout(() => {
+          _gsHoldTimers.delete(b.event);
           _uiohookDownState.delete(stateKey);
-          safeSend(getActiveContents(), 'voice:ptt-up');
-        }, 350);
+          safeSend(getActiveContents(), `${b.event}-up`);
+        }, 350));
         return;
       }
       safeSend(getActiveContents(), b.event === 'voice:ptt' ? 'voice:ptt-toggle' : b.event);
@@ -4170,12 +4180,13 @@ function registerIPC() {
   });
 
   // ── Desktop Shortcuts ─────────────────────────────────
-  handleFromAnyServer('shortcuts:get', () => store.get('desktopShortcuts') || {}, {});
+  // ptm is always listed, empty when unbound, so the settings page can tell
+  // this build has push to mute and show its row.
+  handleFromAnyServer('shortcuts:get', () => ({ ptm: '', ...(store.get('desktopShortcuts') || {}) }), {});
 
-  // A key that types is refused for anything but hold to talk, which the
-  // input hook only listens to (see registerVoiceShortcuts).
-  const typingKeyRefused = (cfg, k, v) =>
-    !!v && isTypingKeyAccelerator(v) && !(k === 'ptt' && cfg.pttMode !== 'toggle');
+  // A key that types is refused for anything but a held shortcut (hold to
+  // talk, push to mute), which the input hook only listens to (see
+  // registerVoiceShortcuts and ipc-policy.js).
   handleFromActiveServer('shortcuts:register', (_e, updates) => {
     if (!updates || typeof updates !== 'object') return false;
     unregisterVoiceShortcuts();
@@ -4183,13 +4194,13 @@ function registerIPC() {
     // `pttMode` ('toggle' | 'hold') is stored alongside the keybinds so
     // registerVoiceShortcuts() can decide whether PTT needs press/release
     // events from uiohook. (#5255 / #184)
-    const allowed = new Set(['mute', 'deafen', 'ptt', 'pttMode']);
+    const allowed = new Set(['mute', 'deafen', 'ptt', 'ptm', 'pttMode']);
     if (updates.pttMode === 'toggle' || updates.pttMode === 'hold') cfg.pttMode = updates.pttMode;
     const refusedKeys = {};
     Object.entries(updates).forEach(([k, v]) => {
       if (!allowed.has(k) || k === 'pttMode') return;
       if (typeof v !== 'string' || v.length > 50) return;
-      if (typingKeyRefused(cfg, k, v)) { refusedKeys[k] = v; return; }
+      if (shortcutKeyRefused(cfg, k, v)) { refusedKeys[k] = v; return; }
       cfg[k] = v;
     });
     store.set('desktopShortcuts', cfg);
@@ -4210,7 +4221,7 @@ function registerIPC() {
     Object.entries(cfg).forEach(([k, v]) => {
       if (k === 'pttMode') { result[k] = { ok: true, reason: 'ok' }; return; }
       if (!v)              { result[k] = { ok: true, reason: 'ok' }; return; }
-      if (typingKeyRefused(cfg, k, v)) { result[k] = { ok: false, reason: 'typing-key', accel: v }; return; }
+      if (shortcutKeyRefused(cfg, k, v)) { result[k] = { ok: false, reason: 'typing-key', accel: v }; return; }
       // A key the input hook took (hold mode, or one Electron refused) is
       // not in globalShortcut, so asking it would call the binding a
       // conflict and the settings page would throw the key away. (#38)
@@ -4228,7 +4239,7 @@ function registerIPC() {
         return;
       }
       if (isTypingKeyAccelerator(v)) {
-        // Hold to talk on a typing key only works through the input hook.
+        // A held shortcut on a typing key only works through the input hook.
         result[k] = { ok: false, reason: 'uiohook-unavailable', accel: v };
         return;
       }

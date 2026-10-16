@@ -265,6 +265,7 @@ contextBridge.exposeInMainWorld('__havenDesktopPage', {
 // Events from main that the page world acts on.
 for (const channel of [
   'voice:mute-toggle', 'voice:deafen-toggle', 'voice:ptt-toggle', 'voice:ptt-down', 'voice:ptt-up',
+  'voice:ptm-down', 'voice:ptm-up',
   'notification-clicked', 'app:navigate-deep-link', 'screen:prepare-share', 'screen:prepare-share-cancel',
 ]) {
   ipcRenderer.on(channel, (_event, payload) => toPageWorld(channel, payload));
@@ -732,7 +733,8 @@ contextBridge.exposeInMainWorld('havenDesktop', {
   /** Desktop shortcut configuration */
   shortcuts: {
     getConfig: ()         => ipcRenderer.invoke('shortcuts:get'),
-    // The in-page hold-mode PTT follows the same binding (Haven #5603).
+    // The in-page hold-mode PTT and push to mute follow the same bindings
+    // (Haven #5603).
     setConfig: (updates)  => ipcRenderer.invoke('shortcuts:register', updates)
       .then((res) => { toPageWorld('shortcuts:changed'); return res; }),
   },
