@@ -36,7 +36,7 @@
     "uiohook-napi": "^1.5.4"
   },
   "devDependencies": {
-    "electron": "^42.10.1",
+    "electron": "^42.11.17",
     "electron-builder": "^26.15.7",
     "node-gyp": "^12.4.0",
     "resedit": "^1.7.2"
