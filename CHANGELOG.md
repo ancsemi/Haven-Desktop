@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.8.1
+
+### Security
+- **Updated Electron, the browser engine inside the app, to 42.11.17.** It
+  fixes a case where the check that decides whether to trust a server's
+  certificate could be skipped for a request, and brings Chromium's latest
+  certificate fixes. Updating is recommended for everyone.
+
 ## v1.8.0
 
 ### Added
