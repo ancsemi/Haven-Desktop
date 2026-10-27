@@ -19,6 +19,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | **Windows** (.exe) | [Latest Release](https://github.com/ancsemi/Haven-Desktop/releases/latest) |
 | **Linux** (.AppImage) | [Latest Release](https://github.com/ancsemi/Haven-Desktop/releases/latest) |
 | **Linux** (.deb) | [Latest Release](https://github.com/ancsemi/Haven-Desktop/releases/latest) |
+| **macOS** (.dmg) | [Amnibro's Mac version](https://github.com/Amnibro/Haven-Desktop/releases/latest/download/Haven-Desktop-universal.dmg), Apple Silicon and Intel |
 
 > **Windows:** Double-click the `.exe` → Haven installs and launches automatically.
 > **Linux AppImage:** `chmod +x Haven*.AppImage && ./Haven*.AppImage`, or just double-click in most desktop environments.
@@ -46,6 +47,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 
 - **Windows 10** (build 19041+) / **Windows 11**
 - **Linux** (PulseAudio or PipeWire with `pipewire-pulse`)
+- **macOS**: a separate Mac version built by [Amnibro](https://github.com/Amnibro), linked in the download table above
 
 > Per-app audio on Windows requires build 19041+ (Windows 10 version 2004, May 2020 Update).
 
