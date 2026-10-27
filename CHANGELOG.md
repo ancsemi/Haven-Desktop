@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Fixed
+- **Right-clicking a video or sound now gives a menu** with Play/Pause, Mute,
+  Loop, Show Controls, Save and Copy Address, like in a browser. Before, it
+  showed nothing (Haven #5825).
+
 ## v1.8.1
 
 ### Security

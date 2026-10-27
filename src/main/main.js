@@ -2075,6 +2075,43 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         items.push({ type: 'separator' });
       }
 
+      // ── Video and audio actions (Haven #5825) ──
+      // Electron has no menu of its own, so right-clicking a video offered
+      // nothing: no loop, no controls, no save. These act on the element
+      // under the pointer, like a browser's own menu.
+      if (params.mediaType === 'video' || params.mediaType === 'audio') {
+        const f = params.mediaFlags || {};
+        const isVideo = params.mediaType === 'video';
+        const media = (code) => {
+          const zoom = wc.getZoomFactor() || 1;
+          const x = Math.round(params.x / zoom), y = Math.round(params.y / zoom);
+          wc.executeJavaScript(`(() => { const m = document.elementFromPoint(${x}, ${y})?.closest('video, audio'); if (m) { ${code} } })()`)
+            .catch((err) => console.warn('[Context] media action failed:', err.message));
+        };
+        items.push({
+          label: f.isPaused ? t('context.play') : t('context.pause'),
+          click: () => media(f.isPaused ? "m.play()?.catch?.((e) => console.warn('[Context] play failed:', e.message))" : 'm.pause()'),
+        });
+        if (f.hasAudio !== false) items.push({ label: t('context.mute'), type: 'checkbox', checked: !!f.isMuted, click: () => media('m.muted = !m.muted') });
+        items.push({ label: t('context.loop'), type: 'checkbox', checked: !!f.isLooping, click: () => media('m.loop = !m.loop') });
+        if (f.canToggleControls) {
+          items.push({ label: t('context.showControls'), type: 'checkbox', checked: !!f.isControlsVisible, click: () => media('m.controls = !m.controls') });
+        }
+        if (/^(https?|blob):/i.test(params.srcURL || '')) {
+          items.push({
+            label: isVideo ? t('context.saveVideo') : t('context.saveAudio'),
+            click: () => { try { wc.downloadURL(params.srcURL); } catch (err) { console.warn('[Context] save failed:', err.message); } },
+          });
+        }
+        if (/^https?:\/\//i.test(params.srcURL || '')) {
+          items.push({
+            label: isVideo ? t('context.copyVideoAddress') : t('context.copyAudioAddress'),
+            click: () => require('electron').clipboard.writeText(params.srcURL),
+          });
+        }
+        items.push({ type: 'separator' });
+      }
+
       // ── Standard editing actions ──
       // Electron's BrowserView has no default context menu, so right-click on
       // selectable text or an input previously offered nothing. Build the
