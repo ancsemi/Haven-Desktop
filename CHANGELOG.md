@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.8.2
 
 ### Fixed
 - **Right-clicking a video or sound now gives a menu** with Play/Pause, Mute,
