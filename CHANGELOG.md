@@ -12,7 +12,8 @@
   to a corner, shows only who is talking, hides messages, and sets its size
   and opacity. It works over windowed and borderless full-screen games. On
   Linux with Wayland it needs X11 mode (Settings, Desktop App) to stay on
-  top.
+  top. Silent and burn-after-read messages, muted people and channels stay
+  out of it, and spoilers stay hidden. Thanks Dawnforger (#70).
 
 ## v1.8.2
 

@@ -203,6 +203,23 @@ test('the page world passes on messages from the call\'s channel only', () => {
   assert.deepEqual(w.sent.at(-1), { inVoice: false });
 });
 
+test('what the app keeps quiet stays out of the overlay', () => {
+  const w = runWorldSection();
+  w.app._mutedUserIds = () => new Set([3]);
+  w.enable(true);
+  const say = (message) => w.server('new-message', { channelCode: 'vc', message: { user_id: 2, username: 'bea', ...message } });
+  say({ content: 'whisper', silent: 1 });
+  say({ content: 'gone soon', burn_seconds: 30 });
+  say({ content: JSON.stringify({ v: 1, ct: 'ciphertext', iv: 'x' }) });
+  say({ user_id: 3, content: 'from someone you muted' });
+  w.tick();
+  assert.deepEqual(w.sent.at(-1).messages, [], 'none of those show');
+
+  say({ content: 'the boss is ||behind you|| <:wave:123456789012345678>' });
+  w.tick();
+  assert.deepEqual(w.sent.at(-1).messages.map(m => m.content), ['the boss is ▒▒▒ :wave:'], 'spoilers stay hidden');
+});
+
 test('main takes reports and the on/off question only from a trusted server frame', () => {
   for (const channel of ["ipcMain.on('voice-overlay:report'", "ipcMain.handle('voice-overlay:enabled'"]) {
     const at = MAIN.indexOf(channel);

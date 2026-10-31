@@ -557,6 +557,25 @@ function installPageWorld(bridge, deps) {
       try { return fn(); } catch { return fallback; }
     }
 
+    // What may appear above a game, which other people may be watching. The
+    // same limits as the app's own notifications. Null means leave it out.
+    function overlayText(raw) {
+      if (typeof raw !== 'string') return '';
+      // An encrypted message the page has not been able to read.
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch { /* ordinary text */ }
+      if (parsed && parsed.v && parsed.ct) return null;
+      return raw
+        .replace(/\|\|[\s\S]*?\|\|/g, '▒▒▒')
+        .replace(/<a?:([A-Za-z0-9_]{2,32}):\d{15,25}>/g, ':$1:');
+    }
+
+    function keptQuiet(app, code, m) {
+      if (m.silent || m.burn_seconds > 0) return true;
+      if (call(() => JSON.parse(localStorage.getItem('haven_muted_channels') || '[]').includes(code), false)) return true;
+      return call(() => m.user_id != null && app._mutedUserIds().has(Number(m.user_id)), false);
+    }
+
     function listen(app) {
       if (!app.socket || app.socket === socket || typeof app.socket.on !== 'function') return;
       socket = app.socket;
@@ -569,10 +588,13 @@ function installPageWorld(bridge, deps) {
         const m = d && d.message;
         const v = app.voice;
         if (!m || !v || !v.inVoice || d.channelCode !== v.currentChannel) return;
+        if (keptQuiet(app, d.channelCode, m)) return;
         // The page decrypts an encrypted message in place in its own
         // handler, which runs first; read it once that has finished.
         setTimeout(() => {
-          messages.push({ seq: ++seq, channel: d.channelCode, userId: m.user_id, username: m.username, content: m.content });
+          const content = overlayText(m.content);
+          if (content === null) return;
+          messages.push({ seq: ++seq, channel: d.channelCode, userId: m.user_id, username: m.username, content });
           if (messages.length > 10) messages.shift();
         }, 400);
       });
