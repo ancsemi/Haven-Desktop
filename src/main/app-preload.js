@@ -263,12 +263,20 @@ contextBridge.exposeInMainWorld('__havenDesktopPage', {
   // Listen Together asks for the keyboard's media keys while its player is
   // playing and the user may control it (main.js, refreshMediaKeys).
   musicMediaKeys: (wanted) => ipcRenderer.send('music:media-keys', { wanted: wanted === true }),
+  // The voice overlay: whether to report, and the report (main checks it).
+  voiceOverlayEnabled: () => ipcRenderer.invoke('voice-overlay:enabled'),
+  voiceOverlayReport: (report) => {
+    let json;
+    try { json = JSON.stringify(report ?? null); } catch { return; }
+    if (json.length > 64 * 1024) return;
+    ipcRenderer.send('voice-overlay:report', JSON.parse(json));
+  },
 });
 
 // Events from main that the page world acts on.
 for (const channel of [
   'voice:mute-toggle', 'voice:deafen-toggle', 'voice:ptt-toggle', 'voice:ptt-down', 'voice:ptt-up',
-  'voice:ptm-down', 'voice:ptm-up', 'music:media-key',
+  'voice:ptm-down', 'voice:ptm-up', 'music:media-key', 'voice-overlay:enabled',
   'notification-clicked', 'app:navigate-deep-link', 'screen:prepare-share', 'screen:prepare-share-cancel',
 ]) {
   ipcRenderer.on(channel, (_event, payload) => toPageWorld(channel, payload));

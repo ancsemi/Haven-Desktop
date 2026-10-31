@@ -1,5 +1,19 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Added
+- **Voice overlay for games.** A small see-through panel that stays above
+  your game and shows who is in your voice call, who is talking (their
+  picture lights up green), who is muted or deafened, and new messages in
+  the call's channel, which fade after a few seconds. Clicks go through it
+  to the game, and it never takes focus. Turn it on from the tray icon:
+  **Voice overlay → Show voice overlay**. The same menu moves it, snaps it
+  to a corner, shows only who is talking, hides messages, and sets its size
+  and opacity. It works over windowed and borderless full-screen games. On
+  Linux with Wayland it needs X11 mode (Settings, Desktop App) to stay on
+  top.
+
 ## v1.8.2
 
 ### Fixed

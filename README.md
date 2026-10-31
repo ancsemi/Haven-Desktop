@@ -39,6 +39,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 | **Host or Join** | Run your own Haven server from the app, or connect to someone else's. Auto-detects local servers. |
 | **One-Click Install** | NSIS installer (Windows) and AppImage / .deb (Linux). |
 | **Minimize to Tray** | Stays running quietly in your system tray. |
+| **Voice Overlay** | See who is in your call and who is talking while you play. A click-through panel above windowed and borderless games, with new messages from the call's channel. Turn it on from the tray icon. |
 | **Rich Presence** | See what everyone is playing and listening to in the member list and on their profile. Games via **Steam**; music via **Last.fm** (which covers Spotify, Apple Music, YouTube Music, Navidrome and Plex in one connection), Spotify directly, or Haven's own player. Optional, hidden while you're Invisible, never saved to the database. |
 
 ---
