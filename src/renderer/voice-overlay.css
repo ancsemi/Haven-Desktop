@@ -1,0 +1,174 @@
+:root {
+  --accent: #7c5cfc;
+  --talk: #43d17a;
+  --pill: rgba(16, 17, 28, 0.78);
+  --pill-talk: rgba(18, 30, 24, 0.86);
+  --text: #f3f2ff;
+  --muted: #ff6b6b;
+  --scale: 1;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font: 600 calc(14px * var(--scale)) / 1.25 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  color: var(--text);
+  user-select: none;
+}
+
+#root {
+  position: absolute;
+  inset: 0;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(5px * var(--scale));
+  border: 2px dashed transparent;
+  border-radius: 12px;
+}
+body.right #root { align-items: flex-end; }
+
+/* While moving, the window manager drags the window from anywhere on it. */
+body.editing #root {
+  border-color: var(--accent);
+  background: rgba(124, 92, 252, 0.14);
+  -webkit-app-region: drag;
+}
+body.editing #done { -webkit-app-region: no-drag; }
+
+#edit-bar {
+  display: none;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--accent);
+  font-size: 13px;
+}
+body.editing #edit-bar { display: flex; }
+#edit-bar button {
+  font: inherit;
+  color: var(--accent);
+  background: #fff;
+  border: 0;
+  border-radius: 6px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+#header {
+  display: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(243, 242, 255, 0.85);
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--pill);
+}
+#header.show { display: block; }
+
+#users, #messages {
+  display: flex;
+  flex-direction: column;
+  align-items: inherit;
+  gap: calc(5px * var(--scale));
+  width: 100%;
+}
+
+.user {
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--scale));
+  max-width: 100%;
+  padding: calc(3px * var(--scale)) calc(12px * var(--scale)) calc(3px * var(--scale)) calc(3px * var(--scale));
+  border-radius: 999px;
+  background: var(--pill);
+  opacity: 0.72;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+body.right .user {
+  flex-direction: row-reverse;
+  padding: calc(3px * var(--scale)) calc(3px * var(--scale)) calc(3px * var(--scale)) calc(12px * var(--scale));
+}
+.user.talking { opacity: 1; background: var(--pill-talk); }
+
+.avatar {
+  flex: none;
+  width: calc(30px * var(--scale));
+  height: calc(30px * var(--scale));
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.9em;
+  background: var(--c, #5b5f7a);
+  box-shadow: 0 0 0 2px transparent;
+  transition: box-shadow 100ms ease;
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.user.talking .avatar { box-shadow: 0 0 0 2px var(--talk), 0 0 10px 2px rgba(67, 209, 122, 0.55); }
+
+.name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(200px * var(--scale));
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.bot {
+  flex: none;
+  font-size: 0.68em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.icons { display: flex; gap: 3px; flex: none; }
+.icons svg { width: 1em; height: 1em; fill: var(--muted); }
+
+.msg {
+  max-width: 100%;
+  padding: calc(5px * var(--scale)) calc(10px * var(--scale));
+  border-radius: 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--pill);
+  font-weight: 500;
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  transition: opacity 600ms ease;
+}
+body.right .msg { border-left: 0; border-right: 3px solid var(--accent); text-align: right; }
+.msg .who { font-weight: 700; color: var(--c, #c9c2ff); }
+.msg .body {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.msg.fading { opacity: 0; }
+
+#hint {
+  display: none;
+  font-weight: 500;
+  font-size: 0.85em;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--pill);
+}
+body.editing #hint.show { display: block; }

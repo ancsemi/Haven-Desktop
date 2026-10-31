@@ -41,6 +41,8 @@ const {
 } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 const { MEDIA_KEY_ACTIONS, mediaKeyAction, claimWanted, createMediaKeyClaims } = require('./media-keys');
+const { createVoiceOverlay } = require('./voice-overlay');
+const { sanitizeVoiceReport, createVoiceReports } = require('./voice-overlay-state');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
 let exitingForX11 = false;
@@ -231,6 +233,7 @@ function broadcastLanguageChange() {
 function refreshLanguageSurfaces() {
   Menu.setApplicationMenu(buildAppMenu());
   rebuildTrayMenu();
+  voiceOverlay?.languageChanged();
   broadcastLanguageChange();
   recomputeTaskbarBadge();
 }
@@ -360,6 +363,8 @@ let welcomeWindow   = null;
 let welcomeWanted   = false;
 let tray            = null;
 let trayRefreshTimer = null;
+let voiceOverlay    = null;   // the in-game voice overlay (voice-overlay.js)
+const voiceReports  = createVoiceReports();
 let serverManager   = null;
 let audioCapture    = null;
 const pipeWireStreamRouter = process.platform === 'linux'
@@ -650,6 +655,15 @@ app.whenReady().then(async () => {
     }, 3000);
   }
   serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV, t });
+  voiceOverlay = createVoiceOverlay({
+    electron: { BrowserWindow, ipcMain, screen },
+    store,
+    t,
+    onChange: () => {
+      rebuildTrayMenu();
+      for (const [, view] of serverViews) safeSend(view.webContents, 'voice-overlay:enabled', voiceOverlay.enabled);
+    },
+  });
   audioCapture  = new AudioCaptureManager(null, () => pipeWireStreamRouter?.stop(), t);
   badgeIcon     = createBadgeIcon();
 
@@ -1220,6 +1234,34 @@ function refreshMediaKeys() {
   }
 }
 
+const _voiceReportPages = new WeakSet();
+
+/** A server page's voice overlay report; the overlay shows the call you are in. */
+function setVoiceReport(contents, report) {
+  const id = contents.id;
+  if (!_voiceReportPages.has(contents)) {
+    _voiceReportPages.add(contents);
+    // A page that goes away, or loads anew, is no longer in a call.
+    const forget = () => { voiceReports.drop(id); refreshVoiceOverlay(); };
+    contents.once('destroyed', forget);
+    contents.on('did-navigate', forget);
+  }
+  voiceReports.set(id, report);
+  refreshVoiceOverlay();
+}
+
+function refreshVoiceOverlay() {
+  if (!voiceOverlay) return;
+  const active = activeServerUrl && serverViews.get(activeServerUrl);
+  const shown = voiceReports.shown(active ? active.webContents.id : null);
+  voiceOverlay.update(shown && {
+    key: String(shown.key),
+    channelName: shown.channelName,
+    users: shown.users,
+    messages: shown.messages,
+  });
+}
+
 /** A server page's own main frame asks for the media keys, or lets them go. */
 function setMediaKeyClaim(contents, payload) {
   const id = contents.id;
@@ -1294,6 +1336,7 @@ app.on('before-quit', () => {
   serverManager?.stopServer();
   pipeWireStreamRouter?.stop();
   audioCapture?.cleanup();
+  voiceOverlay?.destroy();
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -1530,6 +1573,7 @@ function createWelcomeWindow() {
 
 function createAppWindow(serverUrl) {
   if (!mainWindow) {
+    voiceOverlay?.setAppOpen(true);
     const bounds = store.get('windowBounds');
     mainWindow = new BrowserWindow({
       ...bounds,
@@ -1640,6 +1684,7 @@ function createAppWindow(serverUrl) {
       activeServerUrl = null;
       primaryServerUrl = null;
       mainWindow = null;
+      voiceOverlay?.setAppOpen(false);
     });
   }
 
@@ -3067,6 +3112,12 @@ function createTray() {
   });
 }
 
+// On Linux the overlay needs X11 to stay above other windows and open where
+// it was left: a native Wayland window may do neither.
+function voiceOverlayNeedsX11() {
+  return isWaylandSession() && !process.argv.some(a => a === '--ozone-platform=x11');
+}
+
 function rebuildTrayMenu() {
   if (!tray || tray.isDestroyed()) return;
   const running = serverManager?.isRunning();
@@ -3098,6 +3149,7 @@ function rebuildTrayMenu() {
       },
     }] : []),
     { type: 'separator' },
+    ...(voiceOverlay ? [{ label: t('voiceOverlay.title'), submenu: voiceOverlay.menu({ waylandNote: voiceOverlayNeedsX11() }) }] : []),
     { label: t('menu.language'), submenu: buildLanguageSubmenu() },
     { type: 'separator' },
     { label: `${running ? '●' : '○'} ${running ? t('tray.serverRunning') : t('tray.serverStopped')}`, enabled: false },
@@ -4052,6 +4104,18 @@ function registerIPC() {
   ipcMain.on('music:media-keys', (e, payload) => {
     if (!getTrustedServerUrlForFrame(e.sender, e.senderFrame)) return;
     setMediaKeyClaim(e.sender, payload);
+  });
+
+  // ── Voice overlay (see voice-overlay.js) ──
+  // Any server page may report, shown or not: you stay in a call on a
+  // server that is not on screen.
+  ipcMain.handle('voice-overlay:enabled', (e) => {
+    return !!getTrustedServerUrlForFrame(e.sender, e.senderFrame) && !!voiceOverlay?.enabled;
+  });
+  ipcMain.on('voice-overlay:report', (e, report) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!url || !voiceOverlay?.enabled) return;
+    setVoiceReport(e.sender, sanitizeVoiceReport(report, getHttpOrigin(url)));
   });
 
   // ── Settings ──────────────────────────────────────────

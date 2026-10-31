@@ -77,6 +77,8 @@ function runPageWorld() {
       getEncoderConfig: async () => ({}),
       stopCapture: async () => true,
       prepareShareResult: (id, ready) => { calls.push(['prepared', id, ready]); },
+      voiceOverlayEnabled: async () => false,
+      voiceOverlayReport: () => {},
     },
   };
   const Element = proto();

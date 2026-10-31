@@ -537,6 +537,123 @@ function installPageWorld(bridge, deps) {
   let _audioPreparationQueue = Promise.resolve();
   const _cancelledAudioPreparations = new Set();
 
+  // ─── Voice overlay ───────────────────────────────────────
+  // While the overlay is on, report who is in this page's voice call, who is
+  // talking, and new messages in that call's channel (voice-overlay.js). The
+  // roster comes from the server's own voice-users-update, which lists the
+  // call you are in even while another channel is on screen; talking comes
+  // from the page's talkingState. Only a change is sent, so a quiet call
+  // costs nothing.
+  (function voiceOverlayReporter() {
+    let timer = null;
+    let lastSent = '';
+    let socket = null;
+    let rosters = Object.create(null); // channel code -> users from the server
+    let asked = Object.create(null);
+    const messages = [];
+    let seq = 0;
+
+    function call(fn, fallback) {
+      try { return fn(); } catch { return fallback; }
+    }
+
+    function listen(app) {
+      if (!app.socket || app.socket === socket || typeof app.socket.on !== 'function') return;
+      socket = app.socket;
+      rosters = Object.create(null);
+      asked = Object.create(null);
+      socket.on('voice-users-update', (d) => {
+        if (d && typeof d.channelCode === 'string' && Array.isArray(d.users)) rosters[d.channelCode] = d.users;
+      });
+      socket.on('new-message', (d) => {
+        const m = d && d.message;
+        const v = app.voice;
+        if (!m || !v || !v.inVoice || d.channelCode !== v.currentChannel) return;
+        // The page decrypts an encrypted message in place in its own
+        // handler, which runs first; read it once that has finished.
+        setTimeout(() => {
+          messages.push({ seq: ++seq, channel: d.channelCode, userId: m.user_id, username: m.username, content: m.content });
+          if (messages.length > 10) messages.shift();
+        }, 400);
+      });
+    }
+
+    function report() {
+      const app = window.app;
+      if (!app || !app.voice || !app.user) return null;
+      listen(app);
+      const v = app.voice;
+      const me = app.user;
+      const code = v.inVoice ? v.currentChannel : null;
+      if (!code) return { inVoice: false };
+
+      let roster = rosters[code];
+      if (!roster && app._lastVoiceUsersChannel === code && Array.isArray(app._lastVoiceUsers)) roster = app._lastVoiceUsers;
+      // Turned on mid-call: ask once, the same way the page does.
+      if (!rosters[code] && !asked[code] && socket) {
+        asked[code] = true;
+        call(() => socket.emit('request-voice-users', { code, iAmInVoice: true }));
+      }
+      roster = (roster || []).slice();
+      if (!roster.some(u => u && u.id === me.id)) {
+        roster.unshift({ id: me.id, username: me.displayName || me.username, roleColor: me.roleColor });
+      }
+
+      const nick = (id, name) => call(() => (app._getNickname ? app._getNickname(id, name) : name), name);
+      const member = (id) => call(() => (app._memberById ? app._memberById(id) : null), null);
+      const absolute = (url) => call(() => (url ? new URL(url, location.href).href : null), null);
+      const talking = v.talkingState instanceof Map ? v.talkingState : new Map();
+      const channel = (app.channels || []).find(c => c && c.code === code);
+
+      return {
+        inVoice: true,
+        channelName: String((channel && channel.name) || ''),
+        users: roster.filter(Boolean).map(u => {
+          const self = u.id === me.id;
+          const m = member(u.id) || {};
+          return {
+            id: u.id,
+            name: nick(u.id, u.username),
+            color: u.roleColor || m.roleColor || null,
+            avatar: absolute(m.avatar || u.avatar || (self ? me.avatar : null)),
+            isSelf: self,
+            isBot: !!u.isBot,
+            talking: !!(self ? talking.get('self') : talking.get(u.id)),
+            muted: self ? !!v.isMuted : !!u.isMuted,
+            deafened: self ? !!v.isDeafened : !!u.isDeafened,
+          };
+        }),
+        messages: messages.filter(m => m.channel === code).map(m => ({
+          seq: m.seq,
+          name: nick(m.userId, m.username),
+          color: (member(m.userId) || {}).roleColor || null,
+          content: typeof m.content === 'string' ? m.content : '',
+        })),
+      };
+    }
+
+    function tick() {
+      const r = call(report, null);
+      const sig = JSON.stringify(r);
+      if (sig === lastSent) return;
+      lastSent = sig;
+      bridge.voiceOverlayReport(r);
+    }
+
+    function setEnabled(enabled) {
+      if (enabled === true && !timer) {
+        lastSent = '';
+        timer = setInterval(tick, 150);
+        tick();
+      } else if (enabled !== true && timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+    on('voice-overlay:enabled', setEnabled);
+    bridge.voiceOverlayEnabled().then(setEnabled, () => {});
+  })();
+
   // ─── Listen Together media keys ──────────────────────────
   // Haven's client says when its shared player wants the keyboard's media
   // keys (playing, or paused a moment ago, and this user may control it), and
