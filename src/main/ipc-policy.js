@@ -113,6 +113,26 @@ function serverNavigation(url, serverUrl) {
   return target.origin === server.origin ? 'stay' : 'browser';
 }
 
+// The same server saved twice, once as http:// and once as https://. The http
+// one redirects to the https one, so a view of it can only end up off its own
+// origin (Haven-Desktop #71).
+function isHttpTwin(url, savedUrls) {
+  try {
+    const u = new URL(String(url));
+    if (u.protocol !== 'http:') return false;
+    return savedUrls.some((other) => {
+      try {
+        const o = new URL(String(other));
+        return o.protocol === 'https:' && o.hostname === u.hostname;
+      } catch {
+        return false; // an unreadable saved entry is nobody's twin
+      }
+    });
+  } catch {
+    return false; // not a URL: not a twin of anything
+  }
+}
+
 // Single sign-on (OIDC) runs in the server page's own view: the server sends
 // it to its identity provider and the provider sends it back. That is the one
 // time a server view may show another site, and only along that path.
@@ -159,7 +179,7 @@ function createSignInRoundTrip({ now = Date.now, windowMs = SIGN_IN_WINDOW_MS } 
 
 module.exports = {
   isTypingKeyAccelerator, isHoldShortcut, shortcutKeyRefused, dialogHost, notificationTitle, permissionAllowed, serverNavigation,
-  createSignInRoundTrip, SIGN_IN_WINDOW_MS,
+  createSignInRoundTrip, SIGN_IN_WINDOW_MS, isHttpTwin,
 };
 
 

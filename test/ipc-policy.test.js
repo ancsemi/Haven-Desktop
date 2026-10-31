@@ -5,6 +5,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
+test('an http address is a twin only when the same host is saved as https', () => {
+  const { isHttpTwin } = require('../src/main/ipc-policy');
+  const saved = ['https://chat.example', 'http://other.example', 'not a url'];
+  assert.equal(isHttpTwin('http://chat.example', saved), true);
+  assert.equal(isHttpTwin('http://chat.example:3001', saved), true, 'the redirect port is the same server');
+  assert.equal(isHttpTwin('http://other.example', saved), false, 'nothing https to go to');
+  assert.equal(isHttpTwin('https://chat.example', saved), false);
+  assert.equal(isHttpTwin('nonsense', saved), false);
+});
+
+test('a server view off screen never opens the browser on its own', () => {
+  const main = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
+  assert.match(main, /const leaveFor = \(target\) => \{ if \(activeServerUrl === url\) openWebLink\(target\); \};/);
+  assert.match(main, /if \(verdict === 'browser'\) leaveFor\(navUrl\);/);
+  assert.match(main, /if \(verdict === 'browser'\) leaveFor\(target\);/);
+  assert.match(main, /isHttpTwin\(url, saved\)\) continue;/);
+});
+
 const { isTypingKeyAccelerator, dialogHost, notificationTitle } = require('../src/main/ipc-policy');
 
 const MAIN = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');

@@ -37,7 +37,7 @@ const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame, getHttpOrigin } = require('./ipc-security');
 const {
   isTypingKeyAccelerator, isHoldShortcut, shortcutKeyRefused, dialogHost, notificationTitle,
-  permissionAllowed, createSignInRoundTrip,
+  permissionAllowed, createSignInRoundTrip, isHttpTwin,
 } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 const { MEDIA_KEY_ACTIONS, mediaKeyAction, claimWanted, createMediaKeyClaims } = require('./media-keys');
@@ -2389,11 +2389,14 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // the page somewhere else. The one way out is the server's own single
     // sign-on round trip to its identity provider (createSignInRoundTrip).
     const signIn = createSignInRoundTrip();
+    // A view that is not on screen never opens the browser: nobody clicked
+    // anything. It is only cancelled (Haven-Desktop #71).
+    const leaveFor = (target) => { if (activeServerUrl === url) openWebLink(target); };
     view.webContents.on('will-navigate', (event, navUrl) => {
       const verdict = signIn.decide(navUrl, url);
       if (verdict === 'stay') return;
       event.preventDefault();
-      if (verdict === 'browser') openWebLink(navUrl);
+      if (verdict === 'browser') leaveFor(navUrl);
     });
     view.webContents.on('will-redirect', (event, redirectUrl, _isInPlace, isMainFrame) => {
       const mainFrame = event.isMainFrame ?? isMainFrame;
@@ -2402,7 +2405,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       const verdict = signIn.decide(target, url, { redirect: true });
       if (verdict === 'stay') return;
       event.preventDefault();
-      if (verdict === 'browser') openWebLink(target);
+      if (verdict === 'browser') leaveFor(target);
     });
 
 
@@ -2673,11 +2676,12 @@ function scheduleBackgroundServerPreload(activeServerUrl) {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const activeNorm = normalizeServerUrl(activeServerUrl);
     const history = sanitizeServerHistory(store.get('serverHistory') || []);
+    const saved = [activeNorm, ...history.map(entry => entry.url)];
     let started = 0;
     for (const entry of history) {
       if (started >= BACKGROUND_SERVER_CAP) break;
       const url = entry.url;
-      if (!url || url === activeNorm || serverViews.has(url)) continue;
+      if (!url || url === activeNorm || serverViews.has(url) || isHttpTwin(url, saved)) continue;
       try {
         ensureServerView(url, { background: true });
         started++;
