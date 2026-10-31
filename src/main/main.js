@@ -42,6 +42,7 @@ const {
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 const { MEDIA_KEY_ACTIONS, mediaKeyAction, claimWanted, createMediaKeyClaims } = require('./media-keys');
 const { createVoiceOverlay } = require('./voice-overlay');
+const { onSomeDisplay, usableBounds, centeredIn } = require('./window-placement');
 const { sanitizeVoiceReport, createVoiceReports } = require('./voice-overlay-state');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
@@ -655,6 +656,11 @@ app.whenReady().then(async () => {
     }, 3000);
   }
   serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV, t });
+  // A monitor unplugged or switched off: a window left on it comes back.
+  screen.on('display-removed', () => {
+    const win = mainWindow || welcomeWindow;
+    if (win && !win.isDestroyed() && !onSomeDisplay(win.getBounds(), screen.getAllDisplays())) bringWindowToMainScreen();
+  });
   voiceOverlay = createVoiceOverlay({
     electron: { BrowserWindow, ipcMain, screen },
     store,
@@ -1574,7 +1580,7 @@ function createWelcomeWindow() {
 function createAppWindow(serverUrl) {
   if (!mainWindow) {
     voiceOverlay?.setAppOpen(true);
-    const bounds = store.get('windowBounds');
+    const bounds = usableBounds(store.get('windowBounds'), screen.getAllDisplays());
     mainWindow = new BrowserWindow({
       ...bounds,
       minWidth: 800, minHeight: 600,
@@ -3122,6 +3128,19 @@ function voiceOverlayNeedsX11() {
   return isWaylandSession() && !process.argv.some(a => a === '--ozone-platform=x11');
 }
 
+// The way back for a window on a monitor nobody can see, such as a VR headset
+// that is off (Haven #5847). It stays listed as a monitor, so only the user can
+// say the window is lost.
+function bringWindowToMainScreen() {
+  const win = mainWindow || welcomeWindow;
+  if (!win || win.isDestroyed()) return;
+  if (win.isFullScreen()) win.setFullScreen(false);
+  if (win.isMaximized()) win.unmaximize();
+  win.setBounds(centeredIn(win.getBounds(), screen.getPrimaryDisplay().workArea));
+  win.show();
+  win.focus();
+}
+
 function rebuildTrayMenu() {
   if (!tray || tray.isDestroyed()) return;
   const running = serverManager?.isRunning();
@@ -3129,6 +3148,7 @@ function rebuildTrayMenu() {
     { label: `Haven Desktop v${app.getVersion()}`, enabled: false },
     { label: t('menu.checkForUpdates'), click: () => checkForUpdatesFromMenu() },
     { type: 'separator' },
+    { label: t('tray.moveToMainScreen'), click: () => bringWindowToMainScreen() },
     { label: t('tray.show'), click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
     ...(mainWindow ? [{
       label: (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl)

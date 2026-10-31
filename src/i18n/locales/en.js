@@ -168,6 +168,7 @@ module.exports = {
 
   'badge.newMessages': 'New messages',
   'tray.show': 'Show Haven',
+  'tray.moveToMainScreen': 'Move window to main screen',
   'tray.backToServer': 'Back to My Server',
   'tray.changeServer': 'Change Server',
   'tray.serverRunning': 'Server Running',
