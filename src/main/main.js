@@ -390,6 +390,9 @@ let primaryServerUrl = null;       // the server the user actually chose to conn
 let badgeIcon       = null;
 let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
 let serverLanguageStates = new Map(); // serverUrl → { preference, locale }
+// `${serverUrl}|${channelCode}` → the live Notification instance currently
+// shown for that channel, so a cross-device read receipt can close it.
+const liveNotificationsByServerAndChannel = new Map();
 // senderUrl → Set<normalizedUrl> of servers that view's sidebar can display.
 // Used to filter the taskbar overlay so a background BrowserView with
 // unreads doesn't light the badge when no open view has a visible icon
@@ -4032,12 +4035,23 @@ function registerIPC() {
       silent: opts.silent === true,
     });
     n.show();
+    // Tracked per server + channel so another device marking the channel
+    // read can close this toast too (Haven #cross-device-notification-dismissal).
+    const channelCode = typeof opts.channelCode === 'string' ? opts.channelCode.slice(0, 200) : null;
+    if (channelCode) {
+      const key = `${serverUrl}|${channelCode}`;
+      liveNotificationsByServerAndChannel.get(key)?.close();
+      liveNotificationsByServerAndChannel.set(key, n);
+      n.on('close', () => {
+        if (liveNotificationsByServerAndChannel.get(key) === n) liveNotificationsByServerAndChannel.delete(key);
+      });
+    }
     n.on('click', () => {
       mainWindow?.show();
       mainWindow?.focus();
       // Tell the renderer which channel to navigate to
-      if (typeof opts.channelCode === 'string' && opts.channelCode) {
-        safeSend(e.sender, 'notification-clicked', opts.channelCode.slice(0, 200));
+      if (channelCode) {
+        safeSend(e.sender, 'notification-clicked', channelCode);
       }
     });
 
@@ -4052,6 +4066,15 @@ function registerIPC() {
       try { if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true); } catch (err) { console.warn('[Haven] taskbar flash failed:', err?.message || err); }
     }
     return true;
+  });
+
+  // Another device for this account marked a channel read: close our own
+  // toast for it, if we still have one showing. Scoped to the calling
+  // server's own channel namespace, same as notify() above.
+  ipcMain.on('dismiss-notification', (e, channelCode) => {
+    const serverUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!serverUrl || typeof channelCode !== 'string' || !channelCode) return;
+    liveNotificationsByServerAndChannel.get(`${serverUrl}|${channelCode.slice(0, 200)}`)?.close();
   });
 
   // ── Unread badge signal (fired by renderer on any unread count change) ──

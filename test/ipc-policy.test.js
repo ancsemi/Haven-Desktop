@@ -89,6 +89,11 @@ test('notifications come from a server page top frame', () => {
   assert.match(handlerBody('notify'), /getTrustedServerUrlForFrame\(e\.sender, e\.senderFrame\)/);
 });
 
+test('dismissing a notification for a cross-device read receipt is scoped to the calling server', () => {
+  assert.match(handlerBody('dismiss-notification'), /getTrustedServerUrlForFrame\(e\.sender, e\.senderFrame\)/);
+  assert.match(handlerBody('dismiss-notification'), /liveNotificationsByServerAndChannel/);
+});
+
 test('the microphone and camera go only to the server on screen, from its own origin', () => {
   const { permissionAllowed } = require('../src/main/ipc-policy');
   const shown = { kind: 'server', origin: 'https://a.example', active: true };

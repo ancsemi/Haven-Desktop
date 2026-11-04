@@ -740,6 +740,7 @@ contextBridge.exposeInMainWorld('havenDesktop', {
   },
 
   notify: (title, body, opts = {}) => ipcRenderer.invoke('notify', { title, body, ...opts }),
+  dismissNotification: (channelCode) => ipcRenderer.send('dismiss-notification', channelCode),
 
   /** Desktop shortcut configuration */
   shortcuts: {
