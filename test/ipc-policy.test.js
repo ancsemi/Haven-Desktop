@@ -94,6 +94,21 @@ test('dismissing a notification for a cross-device read receipt is scoped to the
   assert.match(handlerBody('dismiss-notification'), /liveNotificationsByServerAndChannel/);
 });
 
+test('a toast stays tracked after it leaves the screen so it can be removed from the Windows Notification Center', () => {
+  const notify = handlerBody('notify');
+  // The tracking entry must not be dropped on the 'close' event, which also
+  // fires when the toast times out into the Notification Center.
+  assert.doesNotMatch(notify, /on\('close',[^)]*\{[^}]*liveNotificationsByServerAndChannel\.delete/);
+  assert.match(notify, /onScreenNotifications\.add\(n\)/);
+  assert.match(notify, /on\('close', \(\) => onScreenNotifications\.delete\(n\)\)/);
+});
+
+test('dismissing the last toast on screen ends the taskbar flash', () => {
+  const body = handlerBody('dismiss-notification');
+  assert.match(body, /onScreenNotifications\.size === 0/);
+  assert.match(body, /flashFrame\(false\)/);
+});
+
 test('the microphone and camera go only to the server on screen, from its own origin', () => {
   const { permissionAllowed } = require('../src/main/ipc-policy');
   const shown = { kind: 'server', origin: 'https://a.example', active: true };
