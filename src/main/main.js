@@ -4062,6 +4062,9 @@ function registerIPC() {
       }
       mainWindow?.show();
       mainWindow?.focus();
+      // A toast from a server that is not on screen brings that server up
+      // first, or the channel switch below lands on a page nobody can see.
+      if (serverUrl !== activeServerUrl && serverViews.has(serverUrl)) switchToServer(serverUrl);
       // Tell the renderer which channel to navigate to
       if (channelCode) {
         safeSend(e.sender, 'notification-clicked', channelCode);

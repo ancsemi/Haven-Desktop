@@ -109,6 +109,16 @@ test('dismissing the last toast on screen ends the taskbar flash', () => {
   assert.match(body, /flashFrame\(false\)/);
 });
 
+test('clicking a toast from a server that is not on screen brings that server up first', () => {
+  const notify = handlerBody('notify');
+  const click = notify.slice(notify.indexOf("n.on('click'"));
+  const switchAt = click.search(/switchToServer\(serverUrl\)/);
+  const sendAt = click.search(/safeSend\(e\.sender, 'notification-clicked'/);
+  assert.ok(switchAt >= 0, 'the click handler must switch to the toast\'s server');
+  assert.match(click, /serverUrl !== activeServerUrl && serverViews\.has\(serverUrl\)/);
+  assert.ok(switchAt < sendAt, 'the server is switched before the channel event is sent');
+});
+
 test('the microphone and camera go only to the server on screen, from its own origin', () => {
   const { permissionAllowed } = require('../src/main/ipc-policy');
   const shown = { kind: 'server', origin: 'https://a.example', active: true };
