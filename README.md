@@ -6,7 +6,7 @@ Haven Desktop is a standalone Electron application that connects to any [Haven](
 
 > **⬡ You need a Haven server to use this app.**
 > Haven Desktop is a client: it connects to a Haven server running on your (or a friend's) machine.
-> If you don't have one yet, **[download Haven](https://github.com/ancsemi/Haven)** first and follow the [setup guide](https://github.com/ancsemi/Haven/blob/main/GUIDE.md).
+> If you don't have one yet, **[download Haven](https://github.com/ancsemi/Haven)** first and follow the [setup guide](https://github.com/ancsemi/Haven/blob/main/GUIDE.md), or watch the [video tutorials](https://haven-app.com/tutorials.html).
 
 ---
 
@@ -163,6 +163,7 @@ Haven Desktop is just the client. **You need a Haven server to connect to.**
 | **Haven Server** | [github.com/ancsemi/Haven](https://github.com/ancsemi/Haven) |
 | **Setup Guide** | [GUIDE.md](https://github.com/ancsemi/Haven/blob/main/GUIDE.md) |
 | **Website** | [haven-app.com](https://haven-app.com/) |
+| **Video tutorials** | [haven-app.com/tutorials](https://haven-app.com/tutorials.html) · [YouTube](https://www.youtube.com/@Haven-App_Tutorials) · [Rumble](https://rumble.com/user/HavenApp) |
 
 ---
 
