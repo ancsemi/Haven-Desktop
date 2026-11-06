@@ -14,6 +14,7 @@ const {
   DEFAULT_OVERLAY_SETTINGS, normalizeOverlaySettings, sanitizeVoiceReport, createVoiceReports,
   safeColor, overlayAlignment, cornerPosition, dragPosition,
 } = require('../src/main/voice-overlay-state');
+const { createVoiceOverlay } = require('../src/main/voice-overlay');
 
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 const WORLD = read('src/main/app-page-world.js');
@@ -255,4 +256,87 @@ test('moving hands the drag to the window manager in a window it may move', () =
   // Nothing moves the window from a timer or on the page's word.
   assert.doesNotMatch(OVERLAY_MAIN, /setInterval|getCursorScreenPoint/);
   assert.doesNotMatch(OVERLAY_PRELOAD, /drag/);
+});
+
+function fakeOverlayWindows() {
+  const windows = [];
+  class FakeWindow {
+    constructor(options) {
+      this.options = options;
+      this.calls = [];
+      this.listeners = new Map();
+      this.loadListeners = new Map();
+      const self = this;
+      this.webContents = {
+        mainFrame: {},
+        isLoading: () => false,
+        send() {},
+        setWindowOpenHandler() {},
+        on(event, fn) { self.loadListeners.set(event, fn); },
+      };
+      windows.push(this);
+    }
+    isDestroyed() { return false; }
+    getBounds() { return { x: 0, y: 0, width: 340, height: 620 }; }
+    getPosition() { return [0, 0]; }
+    setAlwaysOnTop() {}
+    setVisibleOnAllWorkspaces() {}
+    setIgnoreMouseEvents(value) { this.calls.push(['ignore', value]); }
+    show() { this.calls.push(['show']); }
+    showInactive() { this.calls.push(['showInactive']); }
+    on(event, fn) { this.listeners.set(event, fn); }
+    loadFile() {}
+    destroy() {}
+    finishLoad() { this.loadListeners.get('did-finish-load')(); }
+  }
+  const area = { x: 0, y: 0, width: 1920, height: 1080 };
+  const overlay = createVoiceOverlay({
+    electron: {
+      BrowserWindow: FakeWindow,
+      ipcMain: { on() {} },
+      screen: {
+        getDisplayMatching: () => ({ workArea: area }),
+        getPrimaryDisplay: () => ({ workArea: area }),
+        getAllDisplays: () => [{ workArea: area }],
+      },
+    },
+    store: { get: () => ({ enabled: true }), set() {} },
+    t: (key) => key,
+  });
+  return { overlay, windows };
+}
+
+test('click-through is set once the page has loaded, before the window shows', () => {
+  const { overlay, windows } = fakeOverlayWindows();
+  overlay.setAppOpen(true);
+  assert.deepEqual(windows[0].calls, [], 'a call before the load is lost on X11');
+  windows[0].finishLoad();
+  assert.deepEqual(windows[0].calls, [['ignore', true], ['showInactive']]);
+});
+
+test('click-through comes back once a move or size change has settled', async () => {
+  const { overlay, windows } = fakeOverlayWindows();
+  overlay.setAppOpen(true);
+  windows[0].finishLoad();
+  windows[0].calls.length = 0;
+  windows[0].listeners.get('move')();
+  windows[0].listeners.get('resize')();
+  assert.deepEqual(windows[0].calls, [], 'too early: X11 resets it after the move event');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(windows[0].calls, [['ignore', true]]);
+});
+
+test('moving takes the mouse, and Done gives the game its clicks back', () => {
+  const { overlay, windows } = fakeOverlayWindows();
+  overlay.setAppOpen(true);
+  windows[0].finishLoad();
+  const move = overlay.menu().find(item => item.label === 'voiceOverlay.move');
+
+  move.click({ checked: true });
+  windows[1].finishLoad();
+  assert.deepEqual(windows[1].calls, [['ignore', false], ['show']]);
+
+  move.click({ checked: false });
+  windows[2].finishLoad();
+  assert.deepEqual(windows[2].calls, [['ignore', true], ['showInactive']]);
 });
