@@ -390,6 +390,12 @@ let primaryServerUrl = null;       // the server the user actually chose to conn
 let badgeIcon       = null;
 let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
 let serverLanguageStates = new Map(); // serverUrl → { preference, locale }
+// `${serverUrl}|${channelCode}` → the live Notification instance currently
+// shown for that channel, so a cross-device read receipt can close it.
+const liveNotificationsByServerAndChannel = new Map();
+// Toasts still on screen (a 'close' event takes one out). The map above also
+// holds toasts that have moved to the Windows Notification Center.
+const onScreenNotifications = new Set();
 // senderUrl → Set<normalizedUrl> of servers that view's sidebar can display.
 // Used to filter the taskbar overlay so a background BrowserView with
 // unreads doesn't light the badge when no open view has a visible icon
@@ -4032,12 +4038,36 @@ function registerIPC() {
       silent: opts.silent === true,
     });
     n.show();
+    onScreenNotifications.add(n);
+    n.on('close', () => onScreenNotifications.delete(n));
+    // Tracked per server + channel so another device marking the channel
+    // read can close this toast too (Haven #cross-device-notification-dismissal).
+    // The entry stays after the toast leaves the screen: on Windows it is then
+    // in the Notification Center, and close() on the same object is what
+    // removes it from there. It goes when it is dismissed, clicked or replaced.
+    const channelCode = typeof opts.channelCode === 'string' ? opts.channelCode.slice(0, 200) : null;
+    if (channelCode) {
+      const key = `${serverUrl}|${channelCode}`;
+      liveNotificationsByServerAndChannel.get(key)?.close();
+      liveNotificationsByServerAndChannel.delete(key); // re-insert so the oldest entry is the first
+      liveNotificationsByServerAndChannel.set(key, n);
+      while (liveNotificationsByServerAndChannel.size > 200) {
+        liveNotificationsByServerAndChannel.delete(liveNotificationsByServerAndChannel.keys().next().value);
+      }
+    }
     n.on('click', () => {
+      if (channelCode) {
+        const key = `${serverUrl}|${channelCode}`;
+        if (liveNotificationsByServerAndChannel.get(key) === n) liveNotificationsByServerAndChannel.delete(key);
+      }
       mainWindow?.show();
       mainWindow?.focus();
+      // A toast from a server that is not on screen brings that server up
+      // first, or the channel switch below lands on a page nobody can see.
+      if (serverUrl !== activeServerUrl && serverViews.has(serverUrl)) switchToServer(serverUrl);
       // Tell the renderer which channel to navigate to
-      if (typeof opts.channelCode === 'string' && opts.channelCode) {
-        safeSend(e.sender, 'notification-clicked', opts.channelCode.slice(0, 200));
+      if (channelCode) {
+        safeSend(e.sender, 'notification-clicked', channelCode);
       }
     });
 
@@ -4052,6 +4082,26 @@ function registerIPC() {
       try { if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true); } catch (err) { console.warn('[Haven] taskbar flash failed:', err?.message || err); }
     }
     return true;
+  });
+
+  // Another device for this account marked a channel read: close our own
+  // toast for it, if we still have one showing. Scoped to the calling
+  // server's own channel namespace, same as notify() above.
+  ipcMain.on('dismiss-notification', (e, channelCode) => {
+    const serverUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!serverUrl || typeof channelCode !== 'string' || !channelCode) return;
+    const key = `${serverUrl}|${channelCode.slice(0, 200)}`;
+    const toast = liveNotificationsByServerAndChannel.get(key);
+    if (!toast) return;
+    liveNotificationsByServerAndChannel.delete(key);
+    try { toast.close(); } catch {}
+    // The taskbar flash goes with a notification. Once the last toast still
+    // on screen is gone there is nothing left to look at, so end the flash
+    // (and the steady highlight Windows leaves behind). The unread overlay
+    // badge is separate and follows the unread counts.
+    if (onScreenNotifications.size === 0) {
+      try { mainWindow?.flashFrame(false); } catch {}
+    }
   });
 
   // ── Unread badge signal (fired by renderer on any unread count change) ──

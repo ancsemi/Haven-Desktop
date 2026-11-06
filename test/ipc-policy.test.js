@@ -89,6 +89,36 @@ test('notifications come from a server page top frame', () => {
   assert.match(handlerBody('notify'), /getTrustedServerUrlForFrame\(e\.sender, e\.senderFrame\)/);
 });
 
+test('dismissing a notification for a cross-device read receipt is scoped to the calling server', () => {
+  assert.match(handlerBody('dismiss-notification'), /getTrustedServerUrlForFrame\(e\.sender, e\.senderFrame\)/);
+  assert.match(handlerBody('dismiss-notification'), /liveNotificationsByServerAndChannel/);
+});
+
+test('a toast stays tracked after it leaves the screen so it can be removed from the Windows Notification Center', () => {
+  const notify = handlerBody('notify');
+  // The tracking entry must not be dropped on the 'close' event, which also
+  // fires when the toast times out into the Notification Center.
+  assert.doesNotMatch(notify, /on\('close',[^)]*\{[^}]*liveNotificationsByServerAndChannel\.delete/);
+  assert.match(notify, /onScreenNotifications\.add\(n\)/);
+  assert.match(notify, /on\('close', \(\) => onScreenNotifications\.delete\(n\)\)/);
+});
+
+test('dismissing the last toast on screen ends the taskbar flash', () => {
+  const body = handlerBody('dismiss-notification');
+  assert.match(body, /onScreenNotifications\.size === 0/);
+  assert.match(body, /flashFrame\(false\)/);
+});
+
+test('clicking a toast from a server that is not on screen brings that server up first', () => {
+  const notify = handlerBody('notify');
+  const click = notify.slice(notify.indexOf("n.on('click'"));
+  const switchAt = click.search(/switchToServer\(serverUrl\)/);
+  const sendAt = click.search(/safeSend\(e\.sender, 'notification-clicked'/);
+  assert.ok(switchAt >= 0, 'the click handler must switch to the toast\'s server');
+  assert.match(click, /serverUrl !== activeServerUrl && serverViews\.has\(serverUrl\)/);
+  assert.ok(switchAt < sendAt, 'the server is switched before the channel event is sent');
+});
+
 test('the microphone and camera go only to the server on screen, from its own origin', () => {
   const { permissionAllowed } = require('../src/main/ipc-policy');
   const shown = { kind: 'server', origin: 'https://a.example', active: true };
