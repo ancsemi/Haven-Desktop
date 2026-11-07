@@ -1,8 +1,12 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.8.3
 
 ### Fixed
+- **Reading a channel clears its notification everywhere (#72).** When you read a channel in Haven,
+  on this computer or another device, its desktop notification goes away, from the Notification
+  Center too, and the taskbar stops flashing. A channel shows one notification at a time instead of
+  a pile, and clicking one from a server that isn't on screen switches to that server. Thanks Roolk.
 - **A window you can't reach can come back (Haven #5847).** The tray icon has **Move window to main screen**, for when Haven opens on a monitor you can't see, such as a VR headset that's off. A window saved on a monitor that's gone now opens on one that's there, and one left on a monitor that gets unplugged moves back.
 - **The browser no longer opens by itself at startup (#71).** A server in the background could send its address to your browser when it redirected, which happened on every launch if a server was saved as both `http://` and `https://`. A server that isn't on screen now never opens the browser, and an `http://` copy of a saved `https://` server isn't loaded in the background.
 
