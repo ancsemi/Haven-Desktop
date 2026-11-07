@@ -23,6 +23,7 @@ const {
 
 const SIZE = Object.freeze({ width: 340, height: 620 });
 const SAVE_MOVE_MS = 300;
+const CLICK_THROUGH_SETTLE_MS = 200;
 
 /**
  * electron: { BrowserWindow, ipcMain, screen }
@@ -121,17 +122,35 @@ function createVoiceOverlay({ electron, store, t, onChange }) {
     win = w;
     w.setAlwaysOnTop(true, 'screen-saver');
     w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    w.setIgnoreMouseEvents(!moving);
+    // On X11 this does not last: a call before the page has loaded is lost, and
+    // moving the window (snap to corner) gives it back its whole input area a
+    // moment after the move event, so it is set again once the move has
+    // settled. Otherwise the window would go on taking the game's clicks.
+    const setClickThrough = () => {
+      if (!w.isDestroyed()) w.setIgnoreMouseEvents(!moving);
+    };
+    let settleTimer = null;
+    const setClickThroughSoon = () => {
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(setClickThrough, CLICK_THROUGH_SETTLE_MS);
+    };
     w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     w.webContents.on('will-navigate', (e) => e.preventDefault());
     w.webContents.on('did-finish-load', () => {
       send('voice-overlay:view', view());
       send('voice-overlay:state', lastState);
+      setClickThrough();
       if (moving) w.show();
       else w.showInactive();
     });
-    if (moving) w.on('move', savePositionSoon);
+    if (moving) {
+      w.on('move', savePositionSoon);
+    } else {
+      w.on('move', setClickThroughSoon);
+      w.on('resize', setClickThroughSoon);
+    }
     w.on('closed', () => {
+      clearTimeout(settleTimer);
       if (win !== w) return; // swapped for the other kind of window
       win = null;
       editing = false;
