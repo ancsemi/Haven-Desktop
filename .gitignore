@@ -7,3 +7,5 @@ native/build/
 Thumbs.db
 out/
 *.log
+# Local tool settings can hold commands with passwords; never commit them
+.claude/
