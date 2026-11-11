@@ -1,5 +1,14 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Added
+- **The tray icon shows unread messages.** It gets a red dot while there is something unread, the same as the taskbar button, so you can tell with the window hidden to the tray (asked for by Grester).
+- **Keep running in the tray when closed** is now in the tray icon's menu. It is the same setting as Settings > Desktop App > Minimize to Tray on Close, put where people look for it: with it on, closing the window hides Haven to the tray and takes it off the taskbar.
+
+### Fixed
+- **Clicks pass through the voice overlay on X11 (#73).**
+
 ## v1.8.3
 
 ### Fixed

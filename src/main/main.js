@@ -363,6 +363,9 @@ let welcomeWindow   = null;
 // instead (#5715).
 let welcomeWanted   = false;
 let tray            = null;
+let trayIconPlain   = null;
+let trayIconUnread  = null;
+let trayUnread      = false;
 let trayRefreshTimer = null;
 let voiceOverlay    = null;   // the in-game voice overlay (voice-overlay.js)
 const voiceReports  = createVoiceReports();
@@ -2909,6 +2912,7 @@ function createBadgeIcon() {
 }
 
 function setNotificationBadge() {
+  setTrayUnread(true);
   if (!mainWindow) return;
   // Overlay/dock badge: always show when there are unreads (even if window is focused:
   // the user may be in a different channel and hasn't seen the new message yet).
@@ -2922,6 +2926,7 @@ function setNotificationBadge() {
 }
 
 function clearNotificationBadge() {
+  setTrayUnread(false);
   if (!mainWindow) return;
   if (process.platform === 'win32') mainWindow.setOverlayIcon(null, '');
   if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(0);
@@ -3116,8 +3121,10 @@ function createTray() {
     return; // icon asset may not exist yet in dev
   }
 
-  tray = new Tray(icon);
-  tray.setToolTip('Haven Desktop');
+  trayIconPlain = icon;
+  trayIconUnread = withUnreadDot(icon);
+  tray = new Tray(trayUnread && trayIconUnread ? trayIconUnread : icon);
+  tray.setToolTip(trayUnread ? `Haven Desktop: ${t('badge.newMessages')}` : 'Haven Desktop');
   rebuildTrayMenu();
   // Refresh tray menu periodically so server status stays current
   if (!trayRefreshTimer) trayRefreshTimer = setInterval(rebuildTrayMenu, 60000);
@@ -3126,6 +3133,40 @@ function createTray() {
     const win = mainWindow || welcomeWindow;
     if (win) { win.isVisible() ? win.focus() : win.show(); }
   });
+}
+
+// The tray icon with a red dot in its corner, shown while there are unread
+// messages. With the window hidden to the tray there is no taskbar button to
+// carry the badge, so the tray icon is the only place left to show it.
+function withUnreadDot(icon) {
+  try {
+    const { width, height } = icon.getSize();
+    const buf = Buffer.from(icon.toBitmap());
+    if (!width || !height || buf.length !== width * height * 4) return null;
+    const r = Math.max(3, Math.round(width * 0.25));
+    const cx = width - r - 0.5, cy = height - r - 0.5;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const d = Math.hypot(x - cx, y - cy);
+        if (d > r) continue;
+        const i = (y * width + x) * 4;
+        // Bitmaps are BGRA. A white rim keeps the dot apart from the icon.
+        const rim = d > r - 1;
+        buf[i] = rim ? 255 : 0x3c; buf[i + 1] = rim ? 255 : 0x4c; buf[i + 2] = rim ? 255 : 0xe7; buf[i + 3] = 255;
+      }
+    }
+    return nativeImage.createFromBitmap(buf, { width, height });
+  } catch (err) {
+    console.warn('[Haven Desktop] could not draw the unread tray icon:', err.message);
+    return null;
+  }
+}
+
+function setTrayUnread(unread) {
+  trayUnread = !!unread;
+  if (!tray || tray.isDestroyed() || !trayIconPlain) return;
+  tray.setImage(trayUnread && trayIconUnread ? trayIconUnread : trayIconPlain);
+  tray.setToolTip(trayUnread ? `Haven Desktop: ${t('badge.newMessages')}` : 'Haven Desktop');
 }
 
 // On Linux the overlay needs X11 to stay above other windows and open where
@@ -3156,6 +3197,8 @@ function rebuildTrayMenu() {
     { type: 'separator' },
     { label: t('tray.moveToMainScreen'), click: () => bringWindowToMainScreen() },
     { label: t('tray.show'), click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
+    // The same setting as Settings > Desktop App, here where people look for it.
+    { label: t('tray.keepInTray'), type: 'checkbox', checked: !!store.get('minimizeToTray'), click: (item) => store.set('minimizeToTray', !!item.checked) },
     ...(mainWindow ? [{
       label: (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl)
         ? t('tray.backToServer')
@@ -4354,6 +4397,7 @@ function registerIPC() {
 
   handleFromActiveServer('desktop:set-minimize-to-tray', (_e, enabled) => {
     store.set('minimizeToTray', !!enabled);
+    rebuildTrayMenu(); // its checkbox shows the same setting
     return true;
   });
 

@@ -151,6 +151,7 @@ module.exports = {
 
   'badge.newMessages': 'Novas mensagens',
   'tray.show': 'Mostrar Haven',
+  'tray.keepInTray': 'Continuar na bandeja ao fechar',
   'tray.moveToMainScreen': 'Mover a janela para a tela principal',
   'tray.backToServer': 'Voltar ao meu servidor',
   'tray.changeServer': 'Trocar servidor',
