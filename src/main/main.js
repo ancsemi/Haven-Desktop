@@ -2394,7 +2394,15 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // Reset retry counter once a load succeeds, so a future failure starts
 
     // fresh and we don't burn the budget over many brief outages.
-    view.webContents.on('did-finish-load', () => { _failRetryCount = 0; });
+    view.webContents.on('did-finish-load', () => {
+      _failRetryCount = 0;
+      // A mouse's back button means "previous page" to Chromium, and the
+      // page before the app is the login page: going there drops the call.
+      // With no earlier page kept there is nothing to go back to, whatever
+      // the page itself does with the button (Haven #5886).
+      try { view.webContents.navigationHistory.clear(); }
+      catch (err) { console.warn('[Haven Desktop] could not clear the page history:', err.message); }
+    });
 
     // ── Open external links in default browser (issue #5) ──
     // The server page stays on its own server. will-navigate covers only the

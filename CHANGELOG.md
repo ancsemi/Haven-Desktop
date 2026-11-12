@@ -8,6 +8,7 @@
 
 ### Fixed
 - **Clicks pass through the voice overlay on X11 (#73).**
+- **A mouse's back button no longer leaves the app (Haven #5886).** Pressing it could take Haven back to the login page and drop the call you were in. The app now keeps no earlier page to go back to.
 
 ## v1.8.3
 
