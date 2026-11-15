@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.8.4
 
 ### Added
 - **The tray icon shows unread messages.** It gets a red dot while there is something unread, the same as the taskbar button, so you can tell with the window hidden to the tray (asked for by Grester).
