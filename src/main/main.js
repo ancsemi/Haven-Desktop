@@ -44,6 +44,7 @@ const { MEDIA_KEY_ACTIONS, mediaKeyAction, claimWanted, createMediaKeyClaims } =
 const { createVoiceOverlay } = require('./voice-overlay');
 const { onSomeDisplay, usableBounds, centeredIn } = require('./window-placement');
 const { sanitizeVoiceReport, createVoiceReports } = require('./voice-overlay-state');
+const appActivity = require('./app-activity');
 // Set while this copy quits to make way for its X11 copy, and when an X11
 // start failed and this copy opens normally instead (Haven #5741).
 let exitingForX11 = false;
@@ -112,6 +113,7 @@ const store = new Store({
     videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
     screenShareAudioMode: 'window', // share picker audio: 'window' | 'system' | 'none' (#5760)
     serverMutes: {},          // server origin → 'all' | 'mentions' (server mute, set from any server's icon)
+    appActivityServers: [],   // server origins the user lets see activity from other apps (Haven #5894)
     serverHistory:  [],       // [{url, name, lastConnected}] of recent server connections
     serverListRemoved: [],    // servers the user removed; pages may not add them back
     serverListOrder:   [],    // the user's server rail order, shared by every server
@@ -1290,6 +1292,85 @@ function setMediaKeyClaim(contents, payload) {
   if (mediaKeyClaims.set(id, claimWanted(payload))) refreshMediaKeys();
 }
 
+// ── Activity from other apps on this computer (Haven #5894) ──
+// See app-activity.js. A server page is handed what is heard only after the
+// user said yes for that server in the app's own dialog, and the listener
+// only runs while such a page is open.
+const _appActivityPages = new Map(); // webContents id -> webContents
+const _appActivityHooked = new WeakSet();
+let _appActivityListener = null;
+let _appActivityAsking = false;
+
+function appActivityServers() {
+  return appActivity.cleanAllowed(store.get('appActivityServers'));
+}
+
+function appActivityAllowed(serverUrl) {
+  const origin = appActivity.serverOrigin(serverUrl);
+  return !!origin && appActivityServers().includes(origin);
+}
+
+function appActivityListener() {
+  if (!_appActivityListener) {
+    _appActivityListener = appActivity.createActivityListener({
+      net: require('net'),
+      fs,
+      platform: process.platform,
+      env: process.env,
+      lookupName: appActivity.createNameLookup({
+        platform: process.platform,
+        env: process.env,
+        execFile: require('child_process').execFile,
+        readFile: fs.promises.readFile,
+      }),
+      onChange: (current) => {
+        for (const contents of _appActivityPages.values()) safeSend(contents, 'app-activity:update', current);
+      },
+      log: (message) => console.log(`[AppActivity] ${message}`),
+    });
+  }
+  return _appActivityListener;
+}
+
+function refreshAppActivityListener() {
+  if (!_appActivityPages.size) { _appActivityListener?.stop(); return; }
+  appActivityListener().start().catch(err => console.warn('[AppActivity] could not start listening:', err.message));
+}
+
+function unwatchAppActivity(id) {
+  if (_appActivityPages.delete(id)) refreshAppActivityListener();
+}
+
+/** Start handing a server page what other apps announce. */
+function watchAppActivity(contents) {
+  const id = contents.id;
+  if (!_appActivityHooked.has(contents)) {
+    _appActivityHooked.add(contents);
+    // A page that goes away, or loads anew, asks again for itself.
+    contents.once('destroyed', () => unwatchAppActivity(id));
+    contents.on('did-navigate', () => unwatchAppActivity(id));
+  }
+  _appActivityPages.set(id, contents);
+  refreshAppActivityListener();
+  safeSend(contents, 'app-activity:update', appActivityListener().current());
+}
+
+function askAboutAppActivity(serverUrl) {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const options = {
+    type: 'question',
+    title: t('appActivity.ask.title'),
+    message: t('appActivity.ask.message', { host: dialogHost(serverUrl) }),
+    detail: t('appActivity.ask.detail'),
+    buttons: [t('dialog.cancel'), t('appActivity.ask.confirm')],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  return (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response }) => response === 1);
+}
+
 // ── Show a dialog with an auto-timeout ─────────────────
 // Wraps `dialog.showMessageBox` so an unanswered "server unreachable"
 // popup doesn't trap the app forever. After `timeoutMs` we resolve as
@@ -1352,6 +1433,7 @@ app.on('before-quit', () => {
   pipeWireStreamRouter?.stop();
   audioCapture?.cleanup();
   voiceOverlay?.destroy();
+  _appActivityListener?.stop();
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -4229,6 +4311,43 @@ function registerIPC() {
   ipcMain.on('music:media-keys', (e, payload) => {
     if (!getTrustedServerUrlForFrame(e.sender, e.senderFrame)) return;
     setMediaKeyClaim(e.sender, payload);
+  });
+
+  // ── Activity from other apps (see app-activity.js) ──
+  // Any server page may ask whether it is switched on for its own server.
+  // Switching it on takes the page on screen, a click or key press there
+  // just now, and the user's yes in the app's own dialog.
+  ipcMain.handle('app-activity:status', (e) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!url) return { supported: false, enabled: false };
+    const enabled = appActivityAllowed(url);
+    if (enabled) watchAppActivity(e.sender);
+    return { supported: true, enabled };
+  });
+  ipcMain.handle('app-activity:enable', async (e, action) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame, { active: true });
+    if (!url) return { enabled: false };
+    if (!appActivityAllowed(url)) {
+      if (!action || action.fresh !== true || _appActivityAsking) return { enabled: false };
+      _appActivityAsking = true;
+      let yes = false;
+      try { yes = await askAboutAppActivity(url); }
+      finally { _appActivityAsking = false; }
+      if (!yes) return { enabled: false };
+      store.set('appActivityServers', [...appActivityServers(), appActivity.serverOrigin(url)]);
+    }
+    // The page may have gone while the question was open.
+    if (e.sender.isDestroyed() || serverViews.get(url)?.webContents !== e.sender) return { enabled: false };
+    watchAppActivity(e.sender);
+    return { enabled: true };
+  });
+  ipcMain.handle('app-activity:disable', (e) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!url) return { enabled: false };
+    const origin = appActivity.serverOrigin(url);
+    store.set('appActivityServers', appActivityServers().filter(o => o !== origin));
+    unwatchAppActivity(e.sender.id);
+    return { enabled: false };
   });
 
   // ── Voice overlay (see voice-overlay.js) ──

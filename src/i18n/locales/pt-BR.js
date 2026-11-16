@@ -63,6 +63,11 @@ module.exports = {
   'serverPicker.error.unreachable': 'Não foi possível acessar o servidor. Verifique o endereço e tente novamente.',
   'serverPicker.error.connectionFailed': 'Falha na conexão. Verifique o endereço e tente novamente.',
 
+  'appActivity.ask.title': 'Atividade dos seus aplicativos',
+  'appActivity.ask.message': 'Permitir que {host} mostre o que você está jogando ou ouvindo?',
+  'appActivity.ask.detail': 'Jogos e players de música neste computador que oferecem rich presence aparecerão como sua atividade neste servidor. Só é compartilhado o que esses aplicativos anunciam, e apenas com este servidor. Você pode desativar novamente nas Configurações.',
+  'appActivity.ask.confirm': 'Permitir',
+
   'screenPicker.title': 'Compartilhar sua tela',
   'screenPicker.subtitle': 'Escolha uma janela ou tela e, se desejar, um aplicativo cujo áudio será compartilhado.',
   'screenPicker.portalSubtitle': 'Escolha as opções de áudio e codificação. O sistema fará a seleção da janela ou tela.',

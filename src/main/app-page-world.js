@@ -697,6 +697,17 @@ function installPageWorld(bridge, deps) {
     if (!app._musicMediaKey(action)) console.log(`[MediaKeys] ${action}: nothing to do (no track, or not allowed)`);
   });
 
+  // ─── Activity from other apps ────────────────────────────
+  // What games and music players on this computer announce, for a server
+  // the user switched it on for (main.js). Haven's client reports it as
+  // the user's activity.
+  on('app-activity:update', (current) => {
+    const c = current && typeof current === 'object' ? current : {};
+    document.dispatchEvent(new CustomEvent('haven:app-activity', {
+      detail: { playing: c.playing || null, listening: c.listening || null },
+    }));
+  });
+
   // ─── Global voice shortcut triggers ──────────────────────
   on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
   on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());

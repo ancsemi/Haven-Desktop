@@ -80,6 +80,11 @@ module.exports = {
   'serverList.gate.confirmChange': 'Change',
   'serverList.gate.confirmOpen': 'Open',
 
+  'appActivity.ask.title': 'Activity from your apps',
+  'appActivity.ask.message': 'Let {host} show what you are playing or listening to?',
+  'appActivity.ask.detail': 'Games and music players on this computer that support rich presence will show as your activity on this server. Only what those apps announce is shared, and only with this server. You can switch it off again in Settings.',
+  'appActivity.ask.confirm': 'Allow',
+
   'screenPicker.title': 'Share Your Screen',
   'screenPicker.subtitle': 'Choose a window or screen, then optionally pick an application whose audio to share.',
   'screenPicker.portalSubtitle': 'Choose audio and encoding options. Your system handles window or screen selection.',

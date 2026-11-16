@@ -276,7 +276,7 @@ contextBridge.exposeInMainWorld('__havenDesktopPage', {
 // Events from main that the page world acts on.
 for (const channel of [
   'voice:mute-toggle', 'voice:deafen-toggle', 'voice:ptt-toggle', 'voice:ptt-down', 'voice:ptt-up',
-  'voice:ptm-down', 'voice:ptm-up', 'music:media-key', 'voice-overlay:enabled',
+  'voice:ptm-down', 'voice:ptm-up', 'music:media-key', 'voice-overlay:enabled', 'app-activity:update',
   'notification-clicked', 'app:navigate-deep-link', 'screen:prepare-share', 'screen:prepare-share-cancel',
 ]) {
   ipcRenderer.on(channel, (_event, payload) => toPageWorld(channel, payload));
@@ -793,6 +793,20 @@ contextBridge.exposeInMainWorld('havenDesktop', {
   /** opts.user: the user removed it (Manage Servers). Without it the app
    *  takes the call for a page syncing on its own, and nothing changes. */
   removeServerHistory: (url, opts) => ipcRenderer.invoke('server-history:remove', url, serverListAction(opts)),
+
+  /** Activity from other apps on this computer (Haven #5894): games and
+   *  music players that announce themselves the way they would to a Discord
+   *  app. Off until the user says yes for this server in the app's own
+   *  dialog (enable() only asks right after a click or key press here).
+   *  Each resolves to { enabled }; status() also has { supported }. While it
+   *  is on, the page gets 'haven:app-activity' events on document, with
+   *  detail { playing, listening } (each null or { name, details,
+   *  startedAt, duration, app }). */
+  appActivity: {
+    status: () => ipcRenderer.invoke('app-activity:status'),
+    enable: () => ipcRenderer.invoke('app-activity:enable', { fresh: userActedJustNow() }),
+    disable: () => ipcRenderer.invoke('app-activity:disable'),
+  },
 
   /** The shared server list every server page shows:
    *  { servers: [{ url, name, customName?, icon?, customIcon? }] in the
