@@ -15,6 +15,11 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        # The tests and install scripts below run in this checkout. Without
+        # this the release token would sit in .git/config where they could
+        # read it. The release steps get the token through their own env.
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -66,6 +71,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # The tests and install scripts below run in this checkout. Without
+        # this the release token would sit in .git/config where they could
+        # read it. The release steps get the token through their own env.
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

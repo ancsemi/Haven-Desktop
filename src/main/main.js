@@ -4460,22 +4460,41 @@ function registerIPC() {
 
   // WebView download= is ignored for many http(s) image URLs. Haven calls
   // havenDesktop.saveImage with base64 bytes so we can show a real save dialog.
+  const SAVED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp'];
+  // Which picture these bytes are, by how the file starts, or null.
+  function savedImageExtension(buf) {
+    if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'png';
+    if (buf.length >= 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'jpg';
+    if (buf.length >= 6 && ['GIF87a', 'GIF89a'].includes(buf.subarray(0, 6).toString('latin1'))) return 'gif';
+    if (buf.length >= 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+    if (buf.length >= 12 && buf.subarray(4, 8).toString('latin1') === 'ftyp' && ['avif', 'avis'].includes(buf.subarray(8, 12).toString('latin1'))) return 'avif';
+    if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4D) return 'bmp';
+    return null;
+  }
+
   handleFromActiveServer('dialog:save-image', async (e, { payload, filename } = {}) => {
     try {
       if (!payload || typeof payload !== 'string') return { ok: false, reason: 'no-payload' };
       const raw = payload.includes(',') ? payload.slice(payload.lastIndexOf(',') + 1) : payload;
       const buf = Buffer.from(String(raw).replace(/\s+/g, ''), 'base64');
       if (!buf.length) return { ok: false, reason: 'empty-image' };
-      const leaf = String(filename || 'haven-image.png').replace(/\\/g, '/').split('/').pop() || 'haven-image.png';
-      const name = leaf.replace(/[^A-Za-z0-9._-]/g, '') || 'haven-image.png';
+      // The page asks, so the page is not trusted with what gets written: the
+      // bytes must be a picture, and the file gets that picture's extension
+      // whatever name was asked for (never "update.exe").
+      const ext = savedImageExtension(buf);
+      if (!ext) return { ok: false, reason: 'not-an-image' };
+      const leaf = String(filename || 'haven-image').replace(/\\/g, '/').split('/').pop() || 'haven-image';
+      const stem = leaf.replace(/[^A-Za-z0-9._-]/g, '').replace(/\.[A-Za-z0-9]*$/, '').replace(/^\.+/, '') || 'haven-image';
+      const name = `${stem}.${ext}`;
       const wc = e && e.sender;
       const win = (wc && !wc.isDestroyed() && BrowserWindow.fromWebContents(wc)) || mainWindow;
       const picked = await dialog.showSaveDialog(win && !win.isDestroyed() ? win : undefined, {
         title: 'Save image',
         defaultPath: name,
-        filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
+        filters: [{ name: 'Image', extensions: SAVED_IMAGE_EXTENSIONS }],
       });
       if (picked.canceled || !picked.filePath) return { ok: false, cancelled: true };
+      if (!SAVED_IMAGE_EXTENSIONS.includes(path.extname(picked.filePath).slice(1).toLowerCase())) return { ok: false, reason: 'not-an-image-name' };
       fs.writeFileSync(picked.filePath, buf);
       return { ok: true, path: picked.filePath };
     } catch (err) {
