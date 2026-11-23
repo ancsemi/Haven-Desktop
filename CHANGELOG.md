@@ -1,6 +1,6 @@
 # Haven Desktop Changelog
 
-## Unreleased
+## v1.9.0
 
 ### Added
 - **Activity from your other apps (Haven #5894, asked for by gitty323).** Games and music players that support rich presence, the kind that shows in Discord, can show as your activity in Haven. Switch it on under Settings > Activity > Show activity from apps on this computer (the server needs Haven 4.30.0 or newer). It is off until you do, the app asks you for each server separately, and a server you did not say yes to hears nothing. Everything stays on your computer: nothing is looked up online, so there is no artwork, and the app's name is the one it gives itself or the name of its program. It only works while Discord itself is closed, since Discord takes those announcements first. Apps installed as Flatpak or Snap look for Discord inside their own sandbox and may need the usual link to the real location.
