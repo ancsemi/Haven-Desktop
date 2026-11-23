@@ -6,6 +6,7 @@
 - **Activity from your other apps (Haven #5894, asked for by gitty323).** Games and music players that support rich presence, the kind that shows in Discord, can show as your activity in Haven. Switch it on under Settings > Activity > Show activity from apps on this computer (the server needs Haven 4.30.0 or newer). It is off until you do, the app asks you for each server separately, and a server you did not say yes to hears nothing. Everything stays on your computer: nothing is looked up online, so there is no artwork, and the app's name is the one it gives itself or the name of its program. It only works while Discord itself is closed, since Discord takes those announcements first. Apps installed as Flatpak or Snap look for Discord inside their own sandbox and may need the usual link to the real location.
 
 ### Fixed
+- **A picture from an encrypted DM opens in its own window again (reported by QUAKEMAN).** Middle-clicking it, or choosing Open in New Tab, gave a white window since 1.7.1: a safety rule for windows that server pages open was also turning away the decrypted picture. Pictures in channels were not affected.
 - **Save image only saves pictures.** A server could ask Desktop to open a Save window for any file under any name, such as a program. Desktop now checks that what it is asked to save really is a picture and names the file with that picture's type.
 
 ## v1.8.4

@@ -37,7 +37,7 @@ const { resolveRefreshedSource } = require('./screen-source');
 const { isTrustedMainFrame, getHttpOrigin } = require('./ipc-security');
 const {
   isTypingKeyAccelerator, isHoldShortcut, shortcutKeyRefused, dialogHost, notificationTitle,
-  permissionAllowed, createSignInRoundTrip, isHttpTwin,
+  permissionAllowed, createSignInRoundTrip, isHttpTwin, popupNavigationAllowed,
 } = require('./ipc-policy');
 const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
 const { MEDIA_KEY_ACTIONS, mediaKeyAction, claimWanted, createMediaKeyClaims } = require('./media-keys');
@@ -2279,7 +2279,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // the same menu (Haven #5663).
     view.webContents.on('did-create-window', (child) => {
       serverPopupOwners.set(child.webContents, url);
-      guardServerPopup(child.webContents);
+      guardServerPopup(child.webContents, url);
       try { attachContextMenu(child.webContents, child); } catch {}
     });
 
@@ -2821,14 +2821,12 @@ function handleWindowOpen(url) {
 
 // A window a server page opened (a picture, a game, the Steam or Spotify
 // sign-in round trip) has no preload and no bridge, so it may browse the
-// web, but nothing else: no other schemes, and no further windows of its
-// own (those go to the system browser).
-function guardServerPopup(contents) {
+// web and show what its own server page made in memory (a decrypted DM
+// picture), but nothing else: no other schemes, and no further windows of
+// its own (those go to the system browser).
+function guardServerPopup(contents, ownerUrl) {
   const webOnly = (event, target) => {
-    let parsed = null;
-    try { parsed = new URL(String(target)); } catch { /* not a URL: blocked below */ }
-    if (parsed && (parsed.protocol === 'https:' || parsed.protocol === 'http:')) return;
-    event.preventDefault();
+    if (!popupNavigationAllowed(target, ownerUrl)) event.preventDefault();
   };
   contents.on('will-navigate', (event, target) => webOnly(event, target));
   contents.on('will-redirect', (event, target) => webOnly(event, event.url || target));

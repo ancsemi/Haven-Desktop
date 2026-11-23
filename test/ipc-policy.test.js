@@ -165,11 +165,29 @@ test('server views check navigations and redirects, and popups get their own gua
   assert.doesNotMatch(MAIN, /EMBED_ORIGINS/);
   assert.match(MAIN, /view\.webContents\.on\('will-navigate', \(event, navUrl\) => \{\s*const verdict = signIn\.decide\(navUrl, url\);/);
   assert.match(MAIN, /view\.webContents\.on\('will-redirect', /);
-  assert.match(MAIN, /guardServerPopup\(child\.webContents\);/);
+  assert.match(MAIN, /guardServerPopup\(child\.webContents, url\);/);
   const popup = MAIN.slice(MAIN.indexOf('function guardServerPopup'), MAIN.indexOf('function getServerUrlForContents'));
   assert.match(popup, /'will-navigate'/);
   assert.match(popup, /'will-redirect'/);
   assert.match(popup, /setWindowOpenHandler\([\s\S]*action: 'deny'/);
+});
+
+test('a popup may show the web and an in-memory picture from its own server page, nothing else', () => {
+  const { popupNavigationAllowed } = require('../src/main/ipc-policy');
+  const owner = 'https://chat.example';
+  assert.equal(popupNavigationAllowed('https://chat.example/uploads/a.png', owner), true);
+  assert.equal(popupNavigationAllowed('https://elsewhere.example/', owner), true);
+  assert.equal(popupNavigationAllowed('blob:https://chat.example/0b1c-22', owner), true, 'a decrypted DM picture');
+  assert.equal(popupNavigationAllowed('blob:https://chat.example:8443/0b1c-22', owner), false, 'another port is another origin');
+  assert.equal(popupNavigationAllowed('blob:https://elsewhere.example/0b1c-22', owner), false);
+  assert.equal(popupNavigationAllowed('blob:null/0b1c-22', owner), false);
+  assert.equal(popupNavigationAllowed('blob:https://chat.example/0b1c-22', undefined), false, 'no known owner');
+  assert.equal(popupNavigationAllowed('blob:https://chat.example/0b1c-22', 'file:///c:/x'), false);
+  for (const bad of ['file:///c:/windows/win.ini', 'data:text/html,<p>x', 'javascript:alert(1)', 'haven://x', 'about:blank', 'not a url', '']) {
+    assert.equal(popupNavigationAllowed(bad, owner), false, bad);
+  }
+  const popup = MAIN.slice(MAIN.indexOf('function guardServerPopup'), MAIN.indexOf('function getServerUrlForContents'));
+  assert.match(popup, /if \(!popupNavigationAllowed\(target, ownerUrl\)\) event\.preventDefault\(\);/);
 });
 
 test('a server that got the mic while shown keeps it while hidden, for its own origin only', () => {

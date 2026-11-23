@@ -177,7 +177,23 @@ function createSignInRoundTrip({ now = Date.now, windowMs = SIGN_IN_WINDOW_MS } 
   };
 }
 
+/** Where a window a server page opened may go: the web, and a picture or
+ *  file its own server page made in memory (a blob: address of that server's
+ *  origin, which is how a decrypted DM picture opens; Haven #5663). Nothing
+ *  else: no file:, data: or app schemes, and no other origin's blob. */
+function popupNavigationAllowed(target, ownerUrl) {
+  let parsed = null;
+  try { parsed = new URL(String(target)); } catch { return false; } // not an address
+  if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return true;
+  if (parsed.protocol !== 'blob:') return false;
+  let owner = null;
+  try { owner = new URL(String(ownerUrl)); } catch { return false; } // no known owner: refuse
+  if (owner.protocol !== 'https:' && owner.protocol !== 'http:') return false;
+  return parsed.origin === owner.origin;
+}
+
 module.exports = {
+  popupNavigationAllowed,
   isTypingKeyAccelerator, isHoldShortcut, shortcutKeyRefused, dialogHost, notificationTitle, permissionAllowed, serverNavigation,
   createSignInRoundTrip, SIGN_IN_WINDOW_MS, isHttpTwin,
 };
