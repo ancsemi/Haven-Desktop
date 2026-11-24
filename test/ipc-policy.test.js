@@ -210,3 +210,9 @@ test('main remembers a shown grant and forgets it when the page changes origin',
   const forget = MAIN.slice(MAIN.indexOf('function forgetMediaGrantOnNavigation'), MAIN.indexOf('function forgetMediaGrantOnNavigation') + 250);
   assert.match(forget, /getHttpOrigin\(url\) !== granted\) mediaGrantOrigins\.delete\(contents\)/);
 });
+
+test('picking another server from a login page does not stop a host from hosting', () => {
+  const change = MAIN.slice(MAIN.indexOf("ipcMain.on('nav:change-primary-server'"), MAIN.indexOf('// ── Server History'));
+  assert.match(change, /const hosting = store\.get\('userPrefs\.mode'\) === 'host' && !!store\.get\('userPrefs\.serverPath'\);/);
+  assert.match(change, /if \(!hosting\) \{\s+store\.set\('userPrefs\.serverUrl', newUrl\);\s+store\.set\('userPrefs\.mode', 'join'\);\s+\}/);
+});

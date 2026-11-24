@@ -4737,8 +4737,14 @@ function registerIPC() {
       knownServerUrlsByView.clear();
       primaryServerUrl = newUrl;
       activeServerUrl = null;
-      store.set('userPrefs.serverUrl', newUrl);
-      store.set('userPrefs.mode', 'join');
+      // Someone who runs their own server from this app keeps doing so:
+      // saving "join" here meant the next launch no longer started their
+      // server at all. Picking another server only opens it for now.
+      const hosting = store.get('userPrefs.mode') === 'host' && !!store.get('userPrefs.serverPath');
+      if (!hosting) {
+        store.set('userPrefs.serverUrl', newUrl);
+        store.set('userPrefs.mode', 'join');
+      }
       switchToServer(newUrl);
     } catch {}
   });

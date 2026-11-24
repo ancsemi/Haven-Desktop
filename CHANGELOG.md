@@ -1,5 +1,10 @@
 # Haven Desktop Changelog
 
+## Unreleased
+
+### Fixed
+- **Your own server keeps starting with the app.** If you run your server from Haven Desktop and picked another server from a login page's server list, the app saved that as "join" and stopped starting your server on every launch after. It now only opens the other server and keeps hosting yours.
+
 ## v1.9.0
 
 ### Added
